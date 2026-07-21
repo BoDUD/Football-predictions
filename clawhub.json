@@ -1,0 +1,12 @@
+{
+  "name": "Soccer Predict",
+  "tagline": "Codex football analysis with T-30 rechecks and verified reviews",
+  "description": "Football match analysis for Codex and OpenClaw using Titan007 Asian handicap, totals, European odds, lineups, half-time and HT/FT data. Includes visual output, timezone-safe T-30 lineup rechecks, one machine-readable primary pick per match, verified post-match settlement, primary-first ROI statistics, and cautious calibration guardrails without small-sample automatic weight changes.",
+  "category": "finance",
+  "tags": ["football", "soccer", "betting", "prediction", "sports", "analytics", "quantitative", "titan007", "odds", "handicap"],
+  "version": "2.0.0",
+  "license": "MIT",
+  "pricing": "free",
+  "support_url": "https://github.com/BoDUD/Football-predictions/issues",
+  "homepage": "https://github.com/BoDUD/Football-predictions"
+}
