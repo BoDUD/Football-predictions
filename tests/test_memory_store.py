@@ -90,6 +90,7 @@ class MemoryStoreTests(unittest.TestCase):
                 [(pick["rank"], pick["score"]) for pick in created["exact_score_picks"]],
                 [(1, "1-0"), (2, "2-0")],
             )
+            self.assertEqual(created["league_key"], "测试联赛")
             self.assertTrue(all(pick["status"] == "scenario_only" for pick in created["exact_score_picks"]))
 
             reviewed = memory_store.cmd_review(
@@ -160,6 +161,166 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )
             self.assertEqual(result["record"]["primary_result"], "win")
+            self.assertIsNone(result["record"]["asian_result"])
+            self.assertEqual(result["record"]["total_result"], "win")
+            self.assertEqual(result["record"]["settlement_basis"]["grading_scope"], "primary_only")
+            self.assertEqual(result["record"]["settlement_basis"]["analysis_stage"], "initial")
+            self.assertEqual(
+                result["record"]["settlement_basis"]["policy"],
+                "latest_active_prematch_version",
+            )
+            self.assertEqual(result["league_key"], "测试联赛")
+            self.assertEqual(result["league_stats"]["reviewed_matches"], 1)
+
+    def test_review_settles_lineup_check_instead_of_initial_revision(self):
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    asian_side=None,
+                    primary_market="total",
+                    total_side="under",
+                    total_line=2.5,
+                )
+            )
+            lineup = memory_store.cmd_record(
+                record_args(
+                    base,
+                    analysis_stage="lineup-check",
+                    asian_side=None,
+                    primary_market="total",
+                    total_side="over",
+                    total_line=2.5,
+                    total_odds=0.92,
+                )
+            )["record"]
+            self.assertEqual(lineup["total_pick"]["side"], "over")
+            self.assertEqual(lineup["revisions"][-1]["total_pick"]["side"], "under")
+
+            reviewed = memory_store.cmd_review(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    match_id="1",
+                    home_score=3,
+                    away_score=0,
+                    half_home_score=1,
+                    half_away_score=0,
+                    key_learning="临场升盘后的大球方向得到验证",
+                )
+            )
+            record = reviewed["record"]
+            self.assertEqual(record["total_result"], "win")
+            self.assertEqual(record["primary_result"], "win")
+            self.assertEqual(record["settlement_basis"]["analysis_stage"], "lineup-check")
+            self.assertEqual(
+                record["settlement_basis"]["formal_picks"]["total"]["side"],
+                "over",
+            )
+            self.assertEqual(reviewed["stats"]["primary"]["wins"], 1)
+
+    def test_settlement_basis_migration_preserves_results_and_revisions(self):
+        total = {
+            "side": "under",
+            "line": 2.5,
+            "odds": 0.88,
+            "ev": 0.05,
+            "market_signal": "aligned",
+        }
+        record = reviewed_record("201", total=total, total_result="win")
+        record.update({
+            "analysis_stage": "lineup-check",
+            "lineup_rechecked_at": "2026-07-21T10:00:00+00:00",
+            "updated_at": "2026-07-21T10:00:00+00:00",
+            "primary_market": "total",
+            "primary_pick": dict(total, market="total", role="primary"),
+            "primary_result": "win",
+            "final_score": "0-0",
+        })
+        with tempfile.TemporaryDirectory() as base:
+            path = memory_store.data_path(base)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps([record], ensure_ascii=False), encoding="utf-8")
+            before = memory_store.load_history(path)[0]
+            migrated = memory_store.cmd_migrate_settlement_basis(
+                SimpleNamespace(base_dir=base, write=True)
+            )
+            self.assertEqual(migrated["changed_match_ids"], ["201"])
+            saved = memory_store.load_history(path)[0]
+            self.assertEqual(saved["settlement_basis"]["analysis_stage"], "lineup-check")
+            self.assertEqual(saved["primary_result"], before["primary_result"])
+            self.assertEqual(saved["total_result"], before["total_result"])
+            self.assertEqual(saved["revisions"], before["revisions"])
+
+    def test_league_normalization_grouped_stats_migration_and_calibration(self):
+        self.assertEqual(memory_store.normalize_league_name("2026芬超第16轮"), "芬超")
+        self.assertEqual(memory_store.normalize_league_name("韩K联 第19轮"), "韩K联")
+        self.assertEqual(memory_store.normalize_league_name("2026世界杯决赛"), "世界杯")
+
+        total_win = {
+            "side": "over",
+            "line": 2.5,
+            "odds": 0.90,
+            "ev": 0.06,
+            "market_signal": "aligned",
+        }
+        total_loss = {
+            "side": "under",
+            "line": 2.5,
+            "odds": 0.88,
+            "ev": 0.05,
+            "market_signal": "neutral",
+        }
+        first = reviewed_record("101", total=total_win, total_result="win")
+        first.update({
+            "league": "2026芬超第16轮",
+            "primary_market": "total",
+            "primary_pick": dict(total_win, market="total", role="primary"),
+            "primary_result": "win",
+        })
+        second = reviewed_record("102", total=total_loss, total_result="loss")
+        second.update({
+            "league": "芬超",
+            "primary_market": "total",
+            "primary_pick": dict(total_loss, market="total", role="primary"),
+            "primary_result": "loss",
+        })
+        history = [first, second]
+
+        stats = memory_store.calculate_stats(history)
+        self.assertEqual(list(stats["leagues"]), ["芬超"])
+        league = stats["leagues"]["芬超"]
+        self.assertEqual(league["source_labels"], ["2026芬超第16轮", "芬超"])
+        self.assertEqual(league["reviewed_matches"], 2)
+        self.assertEqual(league["primary"]["wins"], 1)
+        self.assertEqual(league["primary"]["losses"], 1)
+        self.assertEqual(league["primary_by_market"]["combined"]["matches"], 2)
+        self.assertEqual(len(league["recent_learnings"]), 2)
+
+        with tempfile.TemporaryDirectory() as base:
+            path = memory_store.data_path(base)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+            revisions_before = {item["match_id"]: item["revisions"] for item in history}
+            migrated = memory_store.cmd_migrate_leagues(
+                SimpleNamespace(base_dir=base, write=True)
+            )
+            self.assertEqual(migrated["changed_match_ids"], ["101", "102"])
+            saved = memory_store.load_history(path)
+            self.assertTrue(all(item["league_key"] == "芬超" for item in saved))
+            self.assertEqual(
+                {item["match_id"]: item["revisions"] for item in saved},
+                revisions_before,
+            )
+
+            calibration = memory_store.cmd_calibrate(
+                SimpleNamespace(base_dir=base, guardrail=None, minimum_graded=20, write=True)
+            )["calibration"]
+            profile = calibration["league_profiles"]["芬超"]
+            self.assertEqual(profile["sample_tier"], "anecdotal")
+            self.assertEqual(profile["decision"], "hold_weights_insufficient_league_sample")
+            self.assertEqual(profile["active_weight_adjustments"], {})
+            self.assertIn("按1个联赛归类", calibration["summary"])
 
     def test_lineup_check_is_not_due_before_t_minus_30(self):
         with tempfile.TemporaryDirectory() as base:
@@ -212,9 +373,13 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(stats["primary"]["accuracy"], 0.5)
             self.assertEqual(stats["primary"]["profit_units"], -0.15)
             self.assertEqual(stats["primary"]["roi"], -0.025)
-            self.assertEqual(stats["all_formal"]["combined"]["matches"], 12)
-            self.assertEqual(stats["all_formal"]["combined"]["wins"], 7)
-            self.assertEqual(stats["all_formal"]["combined"]["losses"], 5)
+            self.assertEqual(stats["primary_by_market"]["combined"]["matches"], 6)
+            self.assertEqual(stats["primary_by_market"]["combined"]["wins"], 3)
+            self.assertEqual(stats["primary_by_market"]["combined"]["losses"], 3)
+            self.assertEqual(stats["all_formal"]["combined"]["monetary_scope"], "not_tracked")
+            self.assertIsNone(stats["all_formal"]["combined"]["stake_units"])
+            self.assertIsNone(stats["all_formal"]["combined"]["profit_units"])
+            self.assertIsNone(stats["all_formal"]["combined"]["roi"])
             self.assertEqual(stats["combined"], stats["all_formal"]["combined"])
 
             saved = memory_store.load_history(path)
@@ -229,9 +394,32 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(calibration["reviewed_matches"], 6)
             self.assertIn("主推6场3胜3负0走", calibration["summary"])
             self.assertIn("收益-0.15u，ROI -2.50%", calibration["summary"])
-            self.assertIn("全部正式方向12项7胜5负0走", calibration["summary"])
+            self.assertIn("主推分市场统计6项3胜3负0走", calibration["summary"])
+            self.assertIn("次推仅作赛前参考，不结算、不计命中率或金额", calibration["summary"])
+            self.assertTrue(all("主推或全部正式方向" not in item for item in calibration["guardrails"]))
             self.assertEqual(calibration["active_weight_adjustments"], {})
             self.assertTrue(all(value is False for value in calibration["weight_change_eligible"].values()))
+
+    def test_secondary_pick_is_ignored_by_all_statistics(self):
+        primary = {"side": "under", "line": 2.5, "odds": 0.90, "ev": 0.06, "role": "primary"}
+        secondary = {"side": "home", "line": 0.0, "odds": 0.84, "ev": 0.05, "role": "secondary"}
+        record = reviewed_record("secondary-no-money", secondary, "loss", primary, "win")
+        record.update({
+            "primary_market": "total",
+            "primary_pick": dict(primary, market="total"),
+            "primary_result": "win",
+        })
+
+        stats = memory_store.calculate_stats([record])
+
+        self.assertEqual(stats["primary"]["profit_units"], 0.9)
+        self.assertEqual(stats["primary"]["roi"], 0.9)
+        self.assertEqual(stats["all_formal"]["combined"]["matches"], 1)
+        self.assertEqual(stats["all_formal"]["combined"]["wins"], 1)
+        self.assertEqual(stats["all_formal"]["combined"]["losses"], 0)
+        self.assertIsNone(stats["all_formal"]["combined"]["profit_units"])
+        self.assertIsNone(stats["all_formal"]["asian"]["profit_units"])
+        self.assertIsNone(stats["all_formal"]["totals"]["profit_units"])
 
 
 if __name__ == "__main__":

@@ -12,18 +12,22 @@ python <skill-dir>/scripts/lineup_scheduler.py --base-dir <workspace> register -
 
 Require an archived kickoff with an explicit offset. Verify that the returned `source_kickoff`, `kickoff`, and `scheduled_for` represent the same absolute instant and that the user-local values use `+09:00`. Stop if Titan's countdown conflicts with that conversion.
 
-Use the returned `retry_plan`: T-30 is the primary attempt, followed by bounded one-time recovery attempts at T-25, T-20, T-15, T-10, T-5, and T-2. These attempts are resilience against a temporarily unavailable Codex executor, not seven analyses. Never schedule a retry before T-30 or at/after kickoff, and never replace this plan with a global polling task.
+Immediately run `automation-plan --match-id <id>`. Use only its `future_attempts`: T-30 is the primary attempt, followed by bounded one-time recovery attempts at T-25, T-20, T-15, T-10, T-5, and T-2. These attempts are resilience against a temporarily unavailable Codex executor, not seven analyses. Never schedule a retry before T-30 or at/after kickoff, and never replace this plan with a global polling task.
+
+For an immediate Codex automation create, pass each attempt's `automation_rrule` unchanged. It is deliberately expressed in UTC because immediate creates reject `DTSTART` and the executor interprets an unanchored `BYHOUR`/`BYMINUTE` rule as UTC. Never build the rule from the displayed Japan hour. Before claiming success, verify the persisted automation rule exactly equals `automation_rrule`; if it differs, delete the bad automation and recreate it. If `catch_up_required` is true, create the independent catch-up task immediately and schedule only the remaining `future_attempts`.
 
 Create each attempt as a standalone local Codex automation in the same saved project. Use these names:
 
 - Primary: `Soccer Predict 临场复查 <match_id>`
 - Recovery: `Soccer Predict 临场复查 <match_id> 补跑 T-<minutes>`
 
-Check exact names before creation. After each creation, persist its returned ID:
+Check exact names before creation. Use `mode=create`, not a timezone-anchored `DTSTART` rule. After each creation, persist its returned ID:
 
 ```text
-python <skill-dir>/scripts/lineup_scheduler.py --base-dir <workspace> attach-automation --match-id <id> --automation-id <automation_id> --automation-name "<name>"
+python <skill-dir>/scripts/lineup_scheduler.py --base-dir <workspace> attach-automation --match-id <id> --automation-id <automation_id> --automation-name "<name>" --attempt-label <label> --automation-rrule "<persisted_rrule>"
 ```
+
+`attach-automation` rejects a rule that does not equal the UTC rule generated for that attempt. Do not claim that scheduling succeeded unless attachment returns `schedule_verified: true`.
 
 Tell the user the primary Japan-time check time. Keep successful delivery enabled because a recovery attempt may become the real analysis.
 
