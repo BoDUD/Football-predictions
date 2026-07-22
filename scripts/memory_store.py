@@ -7,7 +7,9 @@ import argparse
 from copy import deepcopy
 import json
 import math
+import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,12 +31,24 @@ DEFAULT_GUARDRAILS = [
     "盘口与相关欧赔同时明显反向时，普通低EV方向降为观察；仅当EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面支持时可作正式方向，主推同样受此门槛约束。",
     "伤停表与确认首发冲突时，以确认首发为准；旧伤停不得继续作为进球或让球方向的支持证据。",
     "大小球降水不能单独构成主推依据；必须同时取得多家公司一致性和进攻配置或机会质量证据。",
-    "两个精确比分候选仅作比赛形态参考；分别记录Top-1/Top-2诊断，不计入主推或全部正式方向的命中率与ROI。",
+    "两个精确比分候选仅作比赛形态参考；分别记录Top-1/Top-2诊断，不计入主推命中率与ROI。",
 ]
 OBSOLETE_GUARDRAILS = {
     "若亚盘与相关欧赔一致明显反向，常规低EV方向降级为观察；只有EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面证据时才能正式推荐。",
     "精确比分仅作比赛形态参考，不计入主推命中率。",
+    "两个精确比分候选仅作比赛形态参考；分别记录Top-1/Top-2诊断，不计入主推或全部正式方向的命中率与ROI。",
 }
+LEAGUE_ALIASES = {
+    "韩国K联": "韩K联",
+    "韩国K联赛": "韩K联",
+    "K联赛": "韩K联",
+}
+LEAGUE_STAGE_SUFFIX = re.compile(
+    r"(?:"
+    r"(?:常规赛|小组赛|资格赛|预选赛|附加赛)?第?\d+(?:轮|周|阶段)|"
+    r"(?:1/16|1/8|1/4)决赛|十六强|八强|四分之一决赛|半决赛|决赛"
+    r")$"
+)
 
 
 def data_path(base_dir: str | None) -> Path:
@@ -79,6 +93,25 @@ def parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"Datetime must include timezone: {value}")
     return parsed.astimezone(timezone.utc)
+
+
+def normalize_league_name(value: Any) -> str:
+    """Return a stable league key while preserving the raw label elsewhere."""
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not raw:
+        return "unknown"
+    compact = re.sub(r"\s+", "", raw)
+    compact = re.sub(r"^(?:19|20)\d{2}(?:[-/](?:19|20)?\d{2})?", "", compact)
+    previous = None
+    while compact and compact != previous:
+        previous = compact
+        compact = LEAGUE_STAGE_SUFFIX.sub("", compact)
+    compact = compact.strip("-_/·")
+    return LEAGUE_ALIASES.get(compact, compact or raw)
+
+
+def league_key_for_record(record: dict[str, Any]) -> str:
+    return normalize_league_name(record.get("league_key") or record.get("league"))
 
 
 def split_line(line: float) -> tuple[float, float]:
@@ -295,6 +328,33 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the final active pre-match version used for official settlement."""
+    stage = str(record.get("analysis_stage") or "initial")
+    if stage not in {"initial", "lineup-check"}:
+        raise ValueError(f"Unsupported active analysis stage for settlement: {stage}")
+    if record.get("lineup_rechecked_at") and stage != "lineup-check":
+        raise ValueError("Lineup recheck exists but the active record is not the lineup-check version")
+    return {
+        "policy": "latest_active_prematch_version",
+        "grading_scope": "primary_only",
+        "analysis_stage": stage,
+        "version_archived_at": record.get("updated_at", record.get("created_at")),
+        "lineup_rechecked_at": record.get("lineup_rechecked_at"),
+        "primary_market": record.get("primary_market"),
+        "primary_pick": deepcopy(record.get("primary_pick")),
+        "formal_picks": {
+            "asian": deepcopy(record.get("asian_pick")),
+            "total": deepcopy(record.get("total_pick")),
+            "half_time": deepcopy(record.get("half_time_pick")),
+            "htft": deepcopy(record.get("htft_picks", [])),
+        },
+        "predicted_score": record.get("predicted_score"),
+        "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
+        "revision_count": len(record.get("revisions", [])),
+    }
+
+
 def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in snapshot.items() if key != "archived_at"}
 
@@ -329,6 +389,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "status": "pending",
         "analysis_stage": args.analysis_stage,
         "league": args.league,
+        "league_key": normalize_league_name(args.league),
         "kickoff": args.kickoff,
         "home_team": args.home_team,
         "away_team": args.away_team,
@@ -475,6 +536,62 @@ def cmd_migrate_primary(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_migrate_leagues(args: argparse.Namespace) -> dict[str, Any]:
+    """Backfill stable league keys without touching revisions or settlements."""
+    path = data_path(args.base_dir)
+    history = load_history(path)
+    changed: list[str] = []
+    for record in history:
+        revisions_before = deepcopy(record.get("revisions", []))
+        league_key = normalize_league_name(record.get("league"))
+        if record.get("league_key") != league_key:
+            record["league_key"] = league_key
+            changed.append(str(record.get("match_id")))
+        if record.get("revisions", []) != revisions_before:
+            raise ValueError(
+                f"League migration unexpectedly modified revisions for match {record.get('match_id')}"
+            )
+    if args.write:
+        save_history(path, history)
+    return {
+        "ok": True,
+        "path": str(path),
+        "written": args.write,
+        "changed_match_ids": changed,
+        "stats": calculate_stats(history),
+    }
+
+
+def cmd_migrate_settlement_basis(args: argparse.Namespace) -> dict[str, Any]:
+    """Backfill settlement audit metadata without re-grading reviewed records."""
+    path = data_path(args.base_dir)
+    history = load_history(path)
+    changed: list[str] = []
+    for record in history:
+        if record.get("mode") != "prematch" or record.get("status") != "reviewed":
+            continue
+        if isinstance(record.get("settlement_basis"), dict):
+            continue
+        before = deepcopy(record)
+        record["settlement_basis"] = settlement_basis_for_record(record)
+        without_basis = deepcopy(record)
+        without_basis.pop("settlement_basis", None)
+        if without_basis != before:
+            raise ValueError(
+                f"Settlement-basis migration modified graded data for match {record.get('match_id')}"
+            )
+        changed.append(str(record.get("match_id")))
+    if args.write:
+        save_history(path, history)
+    return {
+        "ok": True,
+        "path": str(path),
+        "written": args.write,
+        "changed_match_ids": changed,
+        "stats": calculate_stats(history),
+    }
+
+
 def cmd_due_lineup_check(args: argparse.Namespace) -> dict[str, Any]:
     path = data_path(args.base_dir)
     history = load_history(path)
@@ -519,6 +636,8 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     if record.get("mode") != "prematch":
         raise ValueError("Only pre-match predictions can be reviewed for accuracy")
     if record.get("status") == "reviewed":
+        stats = calculate_stats(history)
+        league_key = league_key_for_record(record)
         return {
             "ok": True,
             "already_reviewed": True,
@@ -527,13 +646,16 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             "final_score": record.get("final_score"),
             "reviewed_at": record.get("reviewed_at"),
             "record": record,
-            "stats": calculate_stats(history),
+            "league_key": league_key,
+            "league_stats": stats["leagues"].get(league_key),
+            "stats": stats,
         }
 
     if not args.key_learning.strip():
         raise ValueError("Review requires a concise non-empty --key-learning grounded in the verified result")
 
     home, away = int(args.home_score), int(args.away_score)
+    settlement_basis = settlement_basis_for_record(record)
     predicted = str(record.get("predicted_score", ""))
     predicted_exact = predicted == f"{home}-{away}"
     actual_score = f"{home}-{away}"
@@ -548,6 +670,19 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     half_scores_available = args.half_home_score is not None and args.half_away_score is not None
     half_home = int(args.half_home_score) if half_scores_available else None
     half_away = int(args.half_away_score) if half_scores_available else None
+    primary_market = settlement_basis.get("primary_market")
+    primary_pick = settlement_basis.get("primary_pick")
+    primary_result = None
+    if isinstance(primary_pick, dict):
+        if primary_market == "asian":
+            primary_result = settle_asian(primary_pick, home, away)
+        elif primary_market == "total":
+            primary_result = settle_total(primary_pick, home, away)
+        elif primary_market == "half_time" and half_scores_available:
+            primary_result = settle_half_time(primary_pick, half_home, half_away)
+        elif primary_market == "htft" and half_scores_available:
+            results = settle_htft([primary_pick], half_home, half_away, home, away)
+            primary_result = results[0] if results else None
     record.update({
         "status": "reviewed",
         "reviewed_at": now_iso(),
@@ -555,19 +690,31 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         "score_exact": predicted_exact,
         "exact_score_hit_rank": exact_score_hit_rank,
         "exact_score_any_hit": exact_score_hit_rank in {1, 2},
-        "asian_result": settle_asian(record.get("asian_pick"), home, away),
-        "total_result": settle_total(record.get("total_pick"), home, away),
+        "asian_result": primary_result if primary_market == "asian" else None,
+        "total_result": primary_result if primary_market == "total" else None,
         "half_time_score": f"{half_home}-{half_away}" if half_scores_available else None,
-        "half_time_result": settle_half_time(record.get("half_time_pick"), half_home, half_away) if half_scores_available else None,
-        "htft_results": settle_htft(record.get("htft_picks"), half_home, half_away, home, away) if half_scores_available else [],
+        "half_time_result": primary_result if primary_market == "half_time" else None,
+        "htft_results": [],
+        "primary_result": primary_result,
         "key_learning": args.key_learning,
+        "league_key": league_key_for_record(record),
+        "settlement_basis": settlement_basis,
     })
-    record["primary_result"] = primary_result_from_record(record)
     warnings = []
-    if (record.get("half_time_pick") or record.get("htft_picks")) and not half_scores_available:
-        warnings.append("Half-time score was not supplied; half-time and HT/FT picks remain ungraded")
+    if primary_market in {"half_time", "htft"} and not half_scores_available:
+        warnings.append("Half-time score was not supplied; the primary pick remains ungraded")
     save_history(path, history)
-    return {"ok": True, "path": str(path), "record": record, "warnings": warnings, "stats": calculate_stats(history)}
+    stats = calculate_stats(history)
+    league_key = league_key_for_record(record)
+    return {
+        "ok": True,
+        "path": str(path),
+        "record": record,
+        "warnings": warnings,
+        "league_key": league_key,
+        "league_stats": stats["leagues"].get(league_key),
+        "stats": stats,
+    }
 
 
 def rate_block(results: list[str]) -> dict[str, Any]:
@@ -599,52 +746,61 @@ def settlement_profit(result: str, odds: Any) -> float | None:
     }.get(result)
 
 
-def performance_block(pairs: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+def performance_block(
+    pairs: list[tuple[str, dict[str, Any]]],
+    *,
+    calculate_money: bool = True,
+) -> dict[str, Any]:
     block = rate_block([result for result, _ in pairs])
-    profits = [settlement_profit(result, pick.get("odds")) for result, pick in pairs]
-    settled_profits = [value for value in profits if value is not None]
     archived_evs = [float(pick["ev"]) for _, pick in pairs if pick.get("ev") is not None]
-    block.update({
-        "stake_units": len(settled_profits),
-        "profit_units": round(sum(settled_profits), 4),
-        "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
-        "avg_archived_ev": round(sum(archived_evs) / len(archived_evs), 4) if archived_evs else None,
-    })
+    if calculate_money:
+        profits = [settlement_profit(result, pick.get("odds")) for result, pick in pairs]
+        settled_profits = [value for value in profits if value is not None]
+        block.update({
+            "monetary_scope": "primary_only",
+            "stake_units": len(settled_profits),
+            "profit_units": round(sum(settled_profits), 4),
+            "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
+        })
+    else:
+        block.update({
+            "monetary_scope": "not_tracked",
+            "stake_units": None,
+            "profit_units": None,
+            "roi": None,
+        })
+    block["avg_archived_ev"] = round(sum(archived_evs) / len(archived_evs), 4) if archived_evs else None
     signals: dict[str, dict[str, Any]] = {}
     for signal in sorted({str(pick.get("market_signal", "unknown")) for _, pick in pairs}):
         subset = [(result, pick) for result, pick in pairs if str(pick.get("market_signal", "unknown")) == signal]
-        signals[signal] = performance_block_without_signals(subset)
+        signals[signal] = performance_block_without_signals(subset, calculate_money=calculate_money)
     block["by_market_signal"] = signals
     return block
 
 
-def performance_block_without_signals(pairs: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+def performance_block_without_signals(
+    pairs: list[tuple[str, dict[str, Any]]],
+    *,
+    calculate_money: bool = True,
+) -> dict[str, Any]:
     block = rate_block([result for result, _ in pairs])
-    profits = [settlement_profit(result, pick.get("odds")) for result, pick in pairs]
-    settled_profits = [value for value in profits if value is not None]
-    block.update({
-        "stake_units": len(settled_profits),
-        "profit_units": round(sum(settled_profits), 4),
-        "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
-    })
+    if calculate_money:
+        profits = [settlement_profit(result, pick.get("odds")) for result, pick in pairs]
+        settled_profits = [value for value in profits if value is not None]
+        block.update({
+            "monetary_scope": "primary_only",
+            "stake_units": len(settled_profits),
+            "profit_units": round(sum(settled_profits), 4),
+            "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
+        })
+    else:
+        block.update({
+            "monetary_scope": "not_tracked",
+            "stake_units": None,
+            "profit_units": None,
+            "roi": None,
+        })
     return block
-
-
-def market_pairs(records: list[dict[str, Any]], result_key: str, pick_key: str) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        (str(record[result_key]), record[pick_key])
-        for record in records
-        if record.get(result_key) and isinstance(record.get(pick_key), dict)
-    ]
-
-
-def htft_pairs(records: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
-    pairs: list[tuple[str, dict[str, Any]]] = []
-    for record in records:
-        for result, pick in zip(record.get("htft_results", []), record.get("htft_picks", [])):
-            if result and isinstance(pick, dict):
-                pairs.append((str(result), pick))
-    return pairs
 
 
 def primary_pairs(records: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -659,54 +815,105 @@ def primary_pairs(records: list[dict[str, Any]]) -> list[tuple[str, dict[str, An
     return pairs
 
 
-def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
-    reviewed = [r for r in history if r.get("mode") == "prematch" and r.get("status") == "reviewed"]
-    asian = market_pairs(reviewed, "asian_result", "asian_pick")
-    totals = market_pairs(reviewed, "total_result", "total_pick")
-    half_time = market_pairs(reviewed, "half_time_result", "half_time_pick")
-    htft = htft_pairs(reviewed)
-    primary = primary_pairs(reviewed)
-    exact_top1 = sum((r.get("exact_score_hit_rank") == 1) or bool(r.get("score_exact")) for r in reviewed)
-    exact_top2 = sum(
+def primary_pairs_for_market(
+    records: list[dict[str, Any]], market: str
+) -> list[tuple[str, dict[str, Any]]]:
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for record in records:
+        primary = record.get("primary_pick")
+        if not isinstance(primary, dict) or record.get("primary_market") != market:
+            continue
+        result = record.get("primary_result") or primary_result_from_record(record)
+        if result:
+            pairs.append((str(result), primary))
+    return pairs
+
+
+def primary_market_performance(records: list[dict[str, Any]]) -> dict[str, Any]:
+    asian = primary_pairs_for_market(records, "asian")
+    totals = primary_pairs_for_market(records, "total")
+    half_time = primary_pairs_for_market(records, "half_time")
+    htft = primary_pairs_for_market(records, "htft")
+    return {
+        "asian": performance_block(asian, calculate_money=False),
+        "totals": performance_block(totals, calculate_money=False),
+        "half_time": performance_block(half_time, calculate_money=False),
+        "htft": performance_block(htft, calculate_money=False),
+        "combined": performance_block(asian + totals + half_time + htft, calculate_money=False),
+    }
+
+
+def exact_score_diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    top1 = sum((r.get("exact_score_hit_rank") == 1) or bool(r.get("score_exact")) for r in records)
+    top2 = sum(
         (r.get("exact_score_hit_rank") in {1, 2})
         or (r.get("exact_score_hit_rank") is None and bool(r.get("score_exact")))
-        for r in reviewed
+        for r in records
     )
-    leagues: dict[str, dict[str, Any]] = {}
-    for league in sorted({str(r.get("league", "unknown")) for r in reviewed}):
-        subset = [r for r in reviewed if str(r.get("league", "unknown")) == league]
-        leagues[league] = {
-            "matches": len(subset),
-            "primary": performance_block(primary_pairs(subset)),
-            "asian": performance_block(market_pairs(subset, "asian_result", "asian_pick")),
-            "totals": performance_block(market_pairs(subset, "total_result", "total_pick")),
-            "half_time": performance_block(market_pairs(subset, "half_time_result", "half_time_pick")),
-            "htft": performance_block(htft_pairs(subset)),
-        }
-    combined = asian + totals + half_time + htft
-    all_formal = {
-        "asian": performance_block(asian),
-        "totals": performance_block(totals),
-        "half_time": performance_block(half_time),
-        "htft": performance_block(htft),
-        "combined": performance_block(combined),
+    return {
+        "top1_hits": top1,
+        "top1_rate": round(top1 / len(records), 4) if records else None,
+        "top2_hits": top2,
+        "top2_rate": round(top2 / len(records), 4) if records else None,
     }
+
+
+def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[str, Any]:
+    primary_by_market = primary_market_performance(records)
+    learnings = [
+        {
+            "match_id": str(record.get("match_id")),
+            "reviewed_at": record.get("reviewed_at"),
+            "key_learning": str(record.get("key_learning", "")).strip(),
+        }
+        for record in records[-20:]
+        if str(record.get("key_learning", "")).strip()
+    ]
+    return {
+        "league_key": league_key,
+        "source_labels": sorted({str(record.get("league", "unknown")) for record in records}),
+        "matches": len(records),
+        "reviewed_matches": len(records),
+        "primary": performance_block(primary_pairs(records)),
+        "primary_by_market": primary_by_market,
+        "all_formal": primary_by_market,
+        "secondary_tracking": "disabled",
+        "asian": primary_by_market["asian"],
+        "totals": primary_by_market["totals"],
+        "half_time": primary_by_market["half_time"],
+        "htft": primary_by_market["htft"],
+        "exact_scores": exact_score_diagnostics(records),
+        "recent_learnings": learnings,
+    }
+
+
+def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
+    reviewed = [r for r in history if r.get("mode") == "prematch" and r.get("status") == "reviewed"]
+    primary = primary_pairs(reviewed)
+    exact_scores = exact_score_diagnostics(reviewed)
+    leagues: dict[str, dict[str, Any]] = {}
+    for league_key in sorted({league_key_for_record(record) for record in reviewed}):
+        subset = [record for record in reviewed if league_key_for_record(record) == league_key]
+        leagues[league_key] = league_performance(subset, league_key)
+    primary_by_market = primary_market_performance(reviewed)
     return {
         "reviewed_matches": len(reviewed),
         "pending_matches": sum(r.get("mode") == "prematch" and r.get("status") == "pending" for r in history),
         "primary": performance_block(primary),
-        "all_formal": all_formal,
-        "asian": all_formal["asian"],
-        "totals": all_formal["totals"],
-        "half_time": all_formal["half_time"],
-        "htft": all_formal["htft"],
-        "combined": all_formal["combined"],
-        "exact_scores": exact_top1,
-        "exact_score_rate": round(exact_top1 / len(reviewed), 4) if reviewed else None,
-        "exact_score_top1_hits": exact_top1,
-        "exact_score_top1_rate": round(exact_top1 / len(reviewed), 4) if reviewed else None,
-        "exact_score_top2_hits": exact_top2,
-        "exact_score_top2_rate": round(exact_top2 / len(reviewed), 4) if reviewed else None,
+        "primary_by_market": primary_by_market,
+        "all_formal": primary_by_market,
+        "secondary_tracking": "disabled",
+        "asian": primary_by_market["asian"],
+        "totals": primary_by_market["totals"],
+        "half_time": primary_by_market["half_time"],
+        "htft": primary_by_market["htft"],
+        "combined": primary_by_market["combined"],
+        "exact_scores": exact_scores["top1_hits"],
+        "exact_score_rate": exact_scores["top1_rate"],
+        "exact_score_top1_hits": exact_scores["top1_hits"],
+        "exact_score_top1_rate": exact_scores["top1_rate"],
+        "exact_score_top2_hits": exact_scores["top2_hits"],
+        "exact_score_top2_rate": exact_scores["top2_rate"],
         "learnings_recorded": sum(bool(str(r.get("key_learning", "")).strip()) for r in reviewed),
         "leagues": leagues,
     }
@@ -724,21 +931,63 @@ def merge_guardrails(*groups: list[str]) -> list[str]:
 
 def dynamic_calibration_summary(stats: dict[str, Any], minimum: int) -> str:
     primary = stats["primary"]
-    all_formal = stats["all_formal"]["combined"]
+    primary_by_market = stats["primary_by_market"]["combined"]
 
     def roi_text(block: dict[str, Any]) -> str:
         roi = block.get("roi")
         return "—" if roi is None else f"{float(roi) * 100:+.2f}%"
 
     return (
-        f"已复盘{stats['reviewed_matches']}场；主推{primary['matches']}场"
+        f"已复盘{stats['reviewed_matches']}场，按{len(stats['leagues'])}个联赛归类；"
+        f"主推{primary['matches']}场"
         f"{primary['wins']}胜{primary['losses']}负{primary['pushes']}走，"
         f"收益{primary['profit_units']:+.2f}u，ROI {roi_text(primary)}。"
-        f"全部正式方向{all_formal['matches']}项"
-        f"{all_formal['wins']}胜{all_formal['losses']}负{all_formal['pushes']}走，"
-        f"收益{all_formal['profit_units']:+.2f}u，ROI {roi_text(all_formal)}。"
+        f"主推分市场统计{primary_by_market['matches']}项"
+        f"{primary_by_market['wins']}胜{primary_by_market['losses']}负{primary_by_market['pushes']}走。"
+        "次推仅作赛前参考，不结算、不计命中率或金额。"
         f"单市场不足{minimum}个有效样本时只保存guardrail，不调整全局权重。"
     )
+
+
+def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str, Any]:
+    profiles: dict[str, Any] = {}
+    for league_key, league_stats in stats["leagues"].items():
+        sample_threshold = {
+            market: league_stats["primary_by_market"][market]["graded"] >= minimum
+            for market in ("asian", "totals", "half_time", "htft")
+        }
+        matches = int(league_stats["reviewed_matches"])
+        sample_tier = "anecdotal" if matches < 10 else "provisional" if matches < 20 else "established"
+        primary = league_stats["primary"]
+        roi = primary.get("roi")
+        roi_text = "—" if roi is None else f"{float(roi) * 100:+.2f}%"
+        profiles[league_key] = {
+            "league_key": league_key,
+            "source_labels": league_stats["source_labels"],
+            "reviewed_matches": matches,
+            "sample_tier": sample_tier,
+            "minimum_graded_per_market_for_weight_change": minimum,
+            "sample_threshold_met_by_market": sample_threshold,
+            "decision": (
+                "manual_feature_level_review_required"
+                if any(sample_threshold.values())
+                else "hold_weights_insufficient_league_sample"
+            ),
+            "active_weight_adjustments": {},
+            "summary": (
+                f"{league_key}：主推{primary['matches']}场"
+                f"{primary['wins']}胜{primary['losses']}负{primary['pushes']}走，"
+                f"收益{primary['profit_units']:+.2f}u，ROI {roi_text}；"
+                f"样本层级{sample_tier}。"
+            ),
+            "primary": primary,
+            "primary_by_market": league_stats["primary_by_market"],
+            "all_formal": league_stats["all_formal"],
+            "secondary_tracking": "disabled",
+            "exact_scores": league_stats["exact_scores"],
+            "recent_learnings": league_stats["recent_learnings"],
+        }
+    return profiles
 
 
 def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
@@ -756,7 +1005,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
     guardrails = merge_guardrails(DEFAULT_GUARDRAILS, supplied_guardrails)
     minimum = args.minimum_graded
     eligibility = {
-        market: stats["all_formal"][market]["graded"] >= minimum
+        market: stats["primary_by_market"][market]["graded"] >= minimum
         for market in ("asian", "totals", "half_time", "htft")
     }
     calibration = {
@@ -769,6 +1018,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "summary": dynamic_calibration_summary(stats, minimum),
         "guardrails": guardrails,
         "stats": stats,
+        "league_profiles": league_calibration_profiles(stats, minimum),
     }
     if not any(eligibility.values()):
         calibration["decision"] = "hold_weights_insufficient_sample"
@@ -859,6 +1109,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migrate.add_argument("--write", action="store_true", help="Persist the compatibility migration")
 
+    migrate_leagues = sub.add_parser(
+        "migrate-leagues",
+        help="Backfill normalized league keys without changing revisions or settlements",
+    )
+    migrate_leagues.add_argument("--write", action="store_true", help="Persist league-key migration")
+
+    migrate_basis = sub.add_parser(
+        "migrate-settlement-basis",
+        help="Backfill active-version settlement metadata without re-grading matches",
+    )
+    migrate_basis.add_argument("--write", action="store_true", help="Persist settlement-basis metadata")
+
     sub.add_parser("pending", help="List pending pre-match predictions")
     due = sub.add_parser("due-lineup-check", help="List pending matches due in the final 30 minutes before kickoff")
     due.add_argument("--now", help="Override current time with an ISO datetime including timezone")
@@ -884,6 +1146,10 @@ def main() -> int:
             result = cmd_review(args)
         elif args.command == "migrate-primary":
             result = cmd_migrate_primary(args)
+        elif args.command == "migrate-leagues":
+            result = cmd_migrate_leagues(args)
+        elif args.command == "migrate-settlement-basis":
+            result = cmd_migrate_settlement_basis(args)
         elif args.command == "due-lineup-check":
             if args.min_minutes < 0 or args.max_minutes < args.min_minutes:
                 raise ValueError("Require 0 <= min-minutes <= max-minutes")

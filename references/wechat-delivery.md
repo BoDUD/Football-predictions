@@ -22,6 +22,16 @@ Run one `test:<token>` delivery with `--verify-draft-only` before enabling unatt
 
 Use deliberately formatted WeChat plain text. Do not paste Codex Markdown, HTML, tables, probability bars, or the visualization artifact. Use short labeled lines, for example:
 
+Generate the copy text from the archived record whenever possible:
+
+```text
+python <skill-dir>/scripts/wechat_formatter.py --base-dir <workspace> --match-id <id> --kind initial
+python <skill-dir>/scripts/wechat_formatter.py --base-dir <workspace> --match-id <id> --kind lineup-check
+python <skill-dir>/scripts/wechat_formatter.py --base-dir <workspace> --match-id <id> --kind review
+```
+
+Always append the matching output to the Codex result under `微信可复制版`, even when `wechat_push.json` is absent or disabled. Keep the copy body exactly as plain text: no Markdown headings, bullets, blockquotes, code-fence markers, HTML, tables, or visualization syntax. Initial and lineup copies may also be passed to the guarded sender when it is enabled. Review copies are manual-only and must never be passed to `wechat_push.py`.
+
 ```text
 【初盘分析｜<match_id>】
 比赛：<home> vs <away>
@@ -36,6 +46,8 @@ Use deliberately formatted WeChat plain text. Do not paste Codex Markdown, HTML,
 ```
 
 For T-30, start with `【临场分析｜<match_id>】` and include `检查时间：`, `比赛状态：`, plus `主推维持：` or `主推变更：` before the current `主推：` line.
+
+For reviews, start with `【赛后复盘｜<league_key>｜<match_id>】`. Include the verified half-time and full-time scores, `结算依据：临场版最终有效推荐` or `初盘版最终有效推荐`, the primary settlement, all active formal settlements, exact-score diagnostic, causal learning, league primary record, and cumulative primary record. Do not include superseded initial picks as official results.
 
 ## Deliver once
 

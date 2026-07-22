@@ -35,7 +35,7 @@ If the match is already live, label the output `滚球分析`, omit pre-match EV
 
 Read [references/prediction-framework.md](references/prediction-framework.md), [references/exact-score.md](references/exact-score.md), and [references/half-time-full-time.md](references/half-time-full-time.md), then:
 
-- Before calculating a new prediction, run `memory_store.py stats` and read `<workspace>/.codex/soccer-predict/calibration.json` when it exists. Apply its guardrails, but apply weight overrides only when `weight_change_eligible` permits them and the stored adjustment is supported by feature-level evidence.
+- Before calculating a new prediction, run `memory_store.py stats` and read `<workspace>/.codex/soccer-predict/calibration.json` when it exists. Read the matching normalized `league_profiles` entry as league context. Apply its guardrails, but apply weight overrides only when the relevant sample threshold permits them and the stored adjustment is supported by feature-level evidence.
 - Default to `可视化模式` for every prediction and review unless the user explicitly asks for `简洁模式`, `简洁`, `concise`, or `short`.
 - Visual mode must use compact Markdown tables and probability bars to show match status, opening-to-current Asian handicap and totals movement, no-vig 1X2 probabilities, EV comparison, key fundamentals/lineups, recommendations, predicted score, and risks.
 - Visual mode must also show **exactly two ranked exact-score candidates**, a first-half panel, and a 3x3 HT/FT probability matrix. Show at most one first-half pick and **exactly two ranked HT/FT suggestions** whenever the model matrix is available.
@@ -72,15 +72,19 @@ Pass `--primary-market` on every `record` call. Select exactly one archived form
 
 The archive command is idempotent for identical predictions. If it returns `duplicate_ignored: true`, do not claim a new revision was created.
 
+After every successful initial archive, run `wechat_formatter.py --base-dir <workspace> --match-id <id> --kind initial`. Append its exact plain-text output under `微信可复制版`, after the visual analysis. This copy block is mandatory even when automatic WeChat delivery is disabled; do not replace it with Markdown tables, HTML, or the visualization.
+
 ## Automatic lineup-time reanalysis in Codex
 
-Read [references/lineup-scheduling.md](references/lineup-scheduling.md) and follow it after every archived initial prediction. Register the verified kickoff with `lineup_scheduler.py`, explicitly using `Asia/Tokyo` for this user's local timezone and `Asia/Shanghai` for Titan Chinese pages. Create the primary standalone automation at T-30 plus the bounded recovery attempts returned by the script. Never analyze earlier than T-30, never run after kickoff, and never create a global polling automation.
+Read [references/lineup-scheduling.md](references/lineup-scheduling.md) and follow it after every archived initial prediction. Register the verified kickoff with `lineup_scheduler.py`, explicitly using `Asia/Tokyo` for this user's local timezone and `Asia/Shanghai` for Titan Chinese pages. Run `automation-plan`, create only its future attempts using the returned UTC rules, and attach each persisted rule through the script's schedule check. Never construct automation hours from Japan wall-clock values, analyze earlier than T-30, run after kickoff, or create a global polling automation.
 
 At the beginning of every soccer-predict invocation, run `lineup_scheduler.py due`. If it finds a missed-but-still-prematch check, create a separate Codex task immediately and let that task claim and run it. This opportunistic catch-up supplements the bounded scheduled retries after a local executor outage.
 
 Every automation must claim the match before collecting data. A claim lease prevents duplicate revisions; a failed attempt must release the lease, and an expired lease may be reclaimed by the next retry. Do not mark the task complete until `record --analysis-stage lineup-check` succeeds and `lineup_scheduler.py complete` verifies the archived revision. After success or an explicit started/finished/cancelled/postponed state, delete or disable every attached automation for that match and persist `mark-cleaned`.
 
 Delivery is mandatory for the one attempt that obtains the claim. It must finish with a user-facing final answer in its own Codex task even when no odds, lineup, EV, or recommendation changed. Begin with `临场复查 <match_id>`, state the Japan-time check time and match status, and show `主推维持` or `主推变更`. Archive no-op retry tasks that fail to obtain a claim so only the real lineup analysis stays visible.
+
+After every successful lineup-check archive, run `wechat_formatter.py --base-dir <workspace> --match-id <id> --kind lineup-check` and append its exact output under `微信可复制版`. Generate it whether the primary changed or stayed the same.
 
 If `<workspace>/.codex/soccer-predict/wechat_push.json` exists and has `enabled: true`, read [references/wechat-delivery.md](references/wechat-delivery.md). Require a successful same-session `--verify-draft-only` readiness check before unattended delivery; current WeChat 4.1+ may hide UIA per account, and Windows Narrator is not a recovery method. After a valid initial prediction is archived, send one separately formatted plain-text initial summary through the configured verified backend with event key `initial:<match_id>`. After the revised T-30 analysis and archive succeed, send one separately formatted plain-text lineup summary with event key `lineup-check:<match_id>`. Never paste the Codex Markdown/HTML visualization into WeChat. Treat WeChat as a secondary delivery channel: complete the Codex task regardless, report `微信已推送` only after `sent: true`, and on any target-verification, accessibility, readiness, or send failure report `微信未推送` without retrying, restarting WeChat/Narrator, or choosing another recipient. Never push post-match reviews through this setting.
 
@@ -110,6 +114,8 @@ Read [references/review-framework.md](references/review-framework.md). A review 
 
 Treat `status: reviewed` as a terminal state. Before fetching scores or generating a review, inspect the archived record. If the match is already reviewed, do not fetch data, run settlement again, rewrite the record, produce another full review, or schedule another review. Return only a brief notice that the review is already complete, together with the stored final score and review time when available.
 
+For a standalone review task, normalize the league first and title it `复盘｜<league_key>｜<match_id>｜<home_team> vs <away_team>`. Begin the visual review with the same league label so review tasks remain easy to scan by competition; keep each match in its own task.
+
 Apply a hard terminal-state gate before every manual or automatic review:
 
 - Open the Titan live/detail page and require an explicit terminal status such as `完`, `完场`, or `Finished`. A visible score, a 90+ minute clock, half-time, extra time in progress, or penalties in progress is not proof that the match has ended.
@@ -126,13 +132,17 @@ python <skill-dir>/scripts/memory_store.py stats
 python <skill-dir>/scripts/memory_store.py calibrate --write
 ```
 
-Only archived pre-match formal recommendations affect accuracy and flat-stake ROI. Explain the diagnostic Top-1/Top-2 exact-score result, Asian result, totals result, first-half result, HT/FT results, key miss/hit, cumulative statistics, and the saved learning. If the half-time score cannot be verified, leave half-time and HT/FT picks ungraded.
+Settle the final active pre-match version only. When an archived `lineup-check` exists, its primary and formal picks replace the initial version for official win/loss, accuracy, profit, and ROI; use the initial revision only for diagnostic comparison. Fall back to the initial version only when no valid lineup-check was archived. Require the review result to persist `settlement_basis.policy: latest_active_prematch_version` and verify its `analysis_stage` before reporting the outcome.
 
-When reporting `战绩`, `准确率`, or `ROI`, lead with `stats.primary`: one final active primary per match. Report `stats.all_formal` only as secondary detail; never present the combined formal-direction count as the number of match primaries. Exact-score accuracy is diagnostic only and never enters primary accuracy.
+Only the final active primary affects direction accuracy, profit, and ROI. Keep secondary picks as pre-match references only: never settle them, record their hit/miss outcome, include them in any performance denominator, assign them a stake, or calculate profit/loss and ROI. Explain the diagnostic Top-1/Top-2 exact-score result, the primary result, key miss/hit, cumulative primary statistics, current-league primary statistics, and the saved learning. If the primary is a half-time or HT/FT pick and the half-time score cannot be verified, leave it ungraded.
 
-`--key-learning` is mandatory and must identify the causal assumption that was confirmed or rejected. Do not use generic text such as “模型需优化”. The calibration snapshot is durable workspace memory; it summarizes accuracy, ROI, market-signal splits, and whether the sample is large enough for weight changes.
+After `review`, `stats`, and `calibrate --write` succeed, run `wechat_formatter.py --base-dir <workspace> --match-id <id> --kind review`. Append its exact output under `微信可复制版`. This review copy is for the user to send manually; never treat its generation as authorization to push a post-match review to WeChat.
 
-Do not automatically change global weights from a tiny sample. Require at least 20 graded selections in the affected market plus feature-level evidence before saving a weight override. With fewer samples, keep weights unchanged and save only provisional guardrails or data-quality lessons.
+When reporting `战绩`, `准确率`, or `ROI`, use `stats.primary`: one final active primary per match, using the lineup-check primary whenever present. Use `stats.primary_by_market` only to break those same primaries down by market. Ignore legacy secondary result fields and never mix superseded initial picks into statistics. In a single-match review, label secondary picks `仅赛前参考，不结算` without showing win/loss/push. Exact-score accuracy is diagnostic only and never enters primary accuracy.
+
+`--key-learning` is mandatory and must identify the causal assumption behind the final active primary that was confirmed or rejected. Do not mention a secondary pick as hit/missed or use its outcome as calibration evidence. Do not use generic text such as “模型需优化”. The script preserves the raw competition label but groups learning by normalized `league_key`, so season/round variants of the same league share one profile. The calibration snapshot is durable workspace memory; it summarizes global and league-level primary accuracy, ROI, market-signal splits, recent causal learnings, and whether the sample is large enough for weight changes.
+
+Do not automatically change global or league-specific weights from a tiny sample. Require at least 20 graded selections in the affected market within the relevant scope plus feature-level evidence before saving a weight override. With fewer samples, keep weights unchanged and save only provisional guardrails or data-quality lessons.
 
 ## Automatic review in Codex
 

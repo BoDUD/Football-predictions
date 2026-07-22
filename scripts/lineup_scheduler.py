@@ -121,14 +121,48 @@ def history_record(base_dir: str | None, match_id: str) -> dict[str, Any] | None
 
 
 def retry_plan(kickoff: datetime, local_zone) -> list[dict[str, Any]]:
-    return [
-        {
-            "minutes_before_kickoff": minutes,
-            "run_at": iso_seconds((kickoff - timedelta(minutes=minutes)).astimezone(local_zone)),
-            "label": "T-30" if minutes == 30 else f"retry-T-{minutes}",
-        }
-        for minutes in RETRY_MINUTES
-    ]
+    plan = []
+    for minutes in RETRY_MINUTES:
+        run_at = kickoff - timedelta(minutes=minutes)
+        run_at_utc = run_at.astimezone(timezone.utc)
+        plan.append(
+            {
+                "minutes_before_kickoff": minutes,
+                "run_at": iso_seconds(run_at.astimezone(local_zone)),
+                "run_at_utc": iso_seconds(run_at_utc),
+                "automation_timezone": "UTC",
+                "automation_rrule": codex_rrule_utc(run_at_utc),
+                "label": "T-30" if minutes == 30 else f"retry-T-{minutes}",
+            }
+        )
+    return plan
+
+
+def codex_rrule_utc(run_at: datetime) -> str:
+    """Return the unanchored one-shot RRULE expected by immediate Codex creates.
+
+    Codex immediate automation creation rejects DTSTART. Its local executor treats
+    an unanchored BYHOUR/BYMINUTE rule as UTC, so converting the absolute instant
+    here prevents callers from accidentally scheduling a Japan wall-clock hour as
+    a UTC hour.
+    """
+    utc_run_at = run_at.astimezone(timezone.utc)
+    return (
+        "RRULE:FREQ=DAILY;"
+        f"BYHOUR={utc_run_at.hour};BYMINUTE={utc_run_at.minute};COUNT=1"
+    )
+
+
+def ensure_retry_plan(task: dict[str, Any]) -> None:
+    """Backfill machine-readable automation fields on compatible old tasks."""
+    kickoff = parse_datetime(str(task["kickoff"]))
+    local_zone = named_timezone(str(task.get("user_timezone") or DEFAULT_USER_TIMEZONE))
+    expected = retry_plan(kickoff, local_zone)
+    current = task.get("retry_plan")
+    if not isinstance(current, list) or any(
+        not isinstance(item, dict) or not item.get("automation_rrule") for item in current
+    ):
+        task["retry_plan"] = expected
 
 
 def sync_terminal(task: dict[str, Any], record: dict[str, Any] | None, current: datetime) -> None:
@@ -176,6 +210,7 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
                 and existing.get("user_timezone") == args.user_timezone
             )
             if same:
+                ensure_retry_plan(existing)
                 return task_result(path, existing, duplicate_ignored=True)
             if existing.get("status") in TERMINAL_STATUSES:
                 raise ValueError(f"Refusing to replace terminal lineup task for match {args.match_id}")
@@ -212,7 +247,27 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
     path = state_path(args.base_dir)
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
-        ref = {"id": args.automation_id, "name": args.automation_name}
+        ensure_retry_plan(task)
+        attempt = next(
+            (item for item in task["retry_plan"] if item["label"] == args.attempt_label),
+            None,
+        )
+        if not attempt:
+            raise ValueError(f"Unknown attempt label: {args.attempt_label}")
+        if args.automation_rrule != attempt["automation_rrule"]:
+            raise ValueError(
+                "Automation RRULE does not match the expected UTC rule for "
+                f"{args.attempt_label}: {attempt['automation_rrule']}"
+            )
+        ref = {
+            "id": args.automation_id,
+            "name": args.automation_name,
+            "attempt_label": args.attempt_label,
+            "run_at": attempt["run_at"],
+            "run_at_utc": attempt["run_at_utc"],
+            "automation_rrule": args.automation_rrule,
+            "schedule_verified": True,
+        }
         refs = task.setdefault("automation_refs", [])
         if ref not in refs:
             refs.append(ref)
@@ -332,6 +387,7 @@ def cmd_due(args: argparse.Namespace) -> dict[str, Any]:
     due: list[dict[str, Any]] = []
     with locked_state(path) as state:
         for task in state["tasks"].values():
+            ensure_retry_plan(task)
             record = history_record(args.base_dir, str(task["match_id"]))
             sync_terminal(task, record, current)
             if task.get("status") in TERMINAL_STATUSES:
@@ -348,15 +404,50 @@ def cmd_due(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "path": str(path), "checked_at": iso_seconds(current), "due": due}
 
 
+def cmd_automation_plan(args: argparse.Namespace) -> dict[str, Any]:
+    """Return only safe future Codex creates plus an explicit catch-up signal."""
+    path = state_path(args.base_dir)
+    current = parse_datetime(args.now) if args.now else now_utc()
+    with locked_state(path) as state:
+        task = get_task(state, args.match_id)
+        ensure_retry_plan(task)
+        sync_terminal(task, history_record(args.base_dir, args.match_id), current)
+        kickoff = parse_datetime(str(task["kickoff"]))
+        scheduled = parse_datetime(str(task["scheduled_for"]))
+        terminal = task.get("status") in TERMINAL_STATUSES
+        lease = parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+        future_attempts = []
+        if not terminal and current < kickoff:
+            for item in task["retry_plan"]:
+                run_at = parse_datetime(str(item["run_at_utc"]))
+                if current < run_at < kickoff:
+                    future_attempts.append(dict(item))
+        return {
+            "ok": True,
+            "path": str(path),
+            "checked_at": iso_seconds(current),
+            "match_id": str(task["match_id"]),
+            "status": task.get("status"),
+            "catch_up_required": (
+                not terminal and scheduled <= current < kickoff and (not lease or lease <= current)
+            ),
+            "create_mode": "create",
+            "rrule_timezone": "UTC",
+            "future_attempts": future_attempts,
+        }
+
+
 def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
         if args.match_id:
             task = get_task(state, args.match_id)
+            ensure_retry_plan(task)
             sync_terminal(task, history_record(args.base_dir, args.match_id), current)
             return task_result(path, task)
         for task in state["tasks"].values():
+            ensure_retry_plan(task)
             sync_terminal(task, history_record(args.base_dir, str(task["match_id"])), current)
         return {"ok": True, "path": str(path), "tasks": list(state["tasks"].values())}
 
@@ -378,6 +469,8 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("--match-id", required=True)
     attach.add_argument("--automation-id", required=True)
     attach.add_argument("--automation-name", required=True)
+    attach.add_argument("--attempt-label", required=True)
+    attach.add_argument("--automation-rrule", required=True)
 
     claim = sub.add_parser("claim", help="Atomically claim a due prematch lineup check")
     claim.add_argument("--match-id", required=True)
@@ -407,6 +500,13 @@ def build_parser() -> argparse.ArgumentParser:
     due = sub.add_parser("due", help="List due or missed-but-still-prematch checks")
     due.add_argument("--now")
 
+    automation_plan = sub.add_parser(
+        "automation-plan",
+        help="Return UTC RRULEs for safe future Codex creates and any catch-up requirement",
+    )
+    automation_plan.add_argument("--match-id", required=True)
+    automation_plan.add_argument("--now")
+
     status = sub.add_parser("status", help="Show persisted lineup task state")
     status.add_argument("--match-id")
     status.add_argument("--now")
@@ -427,6 +527,7 @@ def main() -> int:
             "terminal": cmd_terminal,
             "mark-cleaned": cmd_mark_cleaned,
             "due": cmd_due,
+            "automation-plan": cmd_automation_plan,
             "status": cmd_status,
         }
         result = handlers[args.command](args)

@@ -14,24 +14,29 @@ If no archived pre-match record exists, provide an informational review but do n
 3. Open the Titan live/detail page and require an explicit finished status. A non-empty score or elapsed clock is insufficient. If the match is prematch, live, at half-time, in extra time, in penalties, delayed, interrupted, postponed, cancelled, or ambiguous, stop without settlement and leave the record pending.
 4. Verify the half-time score, final score, and whether the final score is a 90-minute result. Asian and totals markets normally settle on regulation time unless the archived record states otherwise.
 5. Note red cards, penalties, disallowed goals, major injuries, or unusual stoppages when available.
-6. Write a specific causal learning and run `memory_store.py review --verified-finished ... --key-learning "..."` with the final home and away scores exactly once.
+6. Resolve the final active pre-match version. Prefer the archived `lineup-check`; use `initial` only when no valid lineup-check exists. Write a specific causal learning and run `memory_store.py review --verified-finished ... --key-learning "..."` with the final home and away scores exactly once.
 7. Compare both ranked exact-score candidates with the result, then compare Asian settlement, totals settlement, first-half settlement, HT/FT settlement, and the main causal assumptions.
-8. Run `memory_store.py stats`; report `primary` first and `all_formal` second, plus league-level context when useful.
+8. Run `memory_store.py stats`; report global `primary` and its per-market breakdown, then the current match's normalized league profile. Do not grade or report secondary-pick outcomes.
 9. Run `memory_store.py calibrate --write` so the workspace calibration snapshot stays synchronized.
+10. Run `wechat_formatter.py --base-dir <workspace> --match-id <id> --kind review` and append the resulting plain text as the manual `微信可复制版`. Do not auto-send it.
+
+When the review has its own Codex task, use `复盘｜<league_key>｜<match_id>｜<home_team> vs <away_team>` as the title. Keep one match per task; the normalized league prefix provides the grouping.
 
 ## Settlement and statistics
 
-The script handles whole, half, and quarter lines. `half_win` counts as a correct direction, `half_loss` as incorrect, and `push` is excluded from the accuracy denominator. ROI uses one-unit flat stakes with Hong Kong odds: win `+odds`, half-win `+odds/2`, push `0`, half-loss `-0.5`, and loss `-1`. `primary` settles at most one final active main pick per match; `all_formal` contains every archived formal direction and is secondary reporting. Preserve the legacy per-market fields as aliases of `all_formal`. HT/FT selections settle from the verified half-time and 90-minute result. Report exact-score Top-1 and Top-2 hit rates only as scenario diagnostics; they never enter either betting denominator. Live analyses and observation candidates never enter either betting denominator.
+The script handles whole, half, and quarter lines. `half_win` counts as a correct primary direction, `half_loss` as incorrect, and `push` is excluded from the accuracy denominator. Calculate one-unit flat-stake money only for `primary`, using Hong Kong odds: win `+odds`, half-win `+odds/2`, push `0`, half-loss `-0.5`, and loss `-1`. Keep secondary picks as pre-match references only: do not settle them, persist a hit/miss result for them, include them in accuracy, assign them a stake, or calculate profit/ROI. `primary` settles at most one final active main pick per match. `primary_by_market` categorizes those same primary results; `all_formal` remains only as a compatibility alias and must not reintroduce secondaries. A lineup-check supersedes the initial version. Keep the initial snapshot in `revisions` for diagnosis, never for duplicate grading. Persist and display `settlement_basis` so the settled stage and primary are auditable. HT/FT settles only when it is the primary and the verified half-time score exists. Report exact-score Top-1 and Top-2 hit rates only as scenario diagnostics; they never enter primary accuracy. Live analyses and observation candidates never enter the denominator.
 
 ## Learning updates
 
-Write a concise, non-empty `key_learning` grounded in observed evidence. Name the assumption that was confirmed or rejected; do not use generic text such as “模型需优化”. Do not claim model training occurred merely because prose weights changed. Only describe a parameter as updated when a durable value was actually saved.
+Write a concise, non-empty `key_learning` grounded in observed evidence. Evaluate only the final active primary assumption; do not describe a secondary pick as hit or missed or use its outcome as calibration evidence. Name the primary assumption that was confirmed or rejected; do not use generic text such as “模型需优化”. Do not claim model training occurred merely because prose weights changed. Only describe a parameter as updated when a durable value was actually saved.
 
 After each review, persist the calibration snapshot. Generate its summary from current statistics and lead with `primary`; never reuse an old hand-written match count. Require at least 20 graded selections in a market plus feature-level evidence before changing weights. Before that threshold, keep weights unchanged; save only provisional guardrails and data-quality lessons.
 
+Group reviews by normalized `league_key`, while retaining every original competition label in `source_labels`. Treat season prefixes, round suffixes, and knockout-stage suffixes as metadata rather than separate leagues. Use `league_profiles.<league_key>.recent_learnings` to carry causal lessons into later matches from that league. League samples below 10 reviewed matches are anecdotal; 10-19 are provisional. Never transfer a one-match league pattern into a global weight.
+
 When the user asks for a review-record summary, compare at least:
 
-- Asian handicap, totals, first-half, HT/FT, and combined accuracy/ROI.
+- Primary accuracy, profit, and ROI overall and by primary market; do not summarize secondary results.
 - Archived EV versus realized flat-stake ROI.
 - Results grouped by `market_signal` when enough classified records exist.
 - Initial versus lineup-check revisions and whether the primary pick changed.

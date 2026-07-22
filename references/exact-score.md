@@ -12,7 +12,7 @@ Use this guide for every valid pre-match prediction and lineup-time reanalysis.
 ## Display and archive
 
 - Show rank, score, model probability, and a short scenario label for both candidates in visual and concise modes.
-- Label both `高方差参考（不计主推）`. They are not formal bets and never enter `primary` or `all_formal` accuracy/ROI.
+- Label both `高方差参考（不计主推）`. They are not formal bets and never enter primary accuracy/ROI.
 - Show exact-score odds and EV only when current market odds were actually collected. Missing odds must remain `数据未取得`; never infer them from 1X2 or totals.
 - Archive both with repeated `--exact-score-pick SCORE:PROBABILITY`. On a lineup check, recalculate both and preserve the previous pair in `revisions`.
 - During review, report Top-1 and Top-2 hit diagnostics separately. Do not use either diagnostic to change global weights from a small sample.
