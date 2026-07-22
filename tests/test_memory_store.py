@@ -25,6 +25,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "home_team": "主队",
         "away_team": "客队",
         "predicted_score": "1-0",
+        "exact_score_pick": ["1-0:0.20", "2-0:0.15"],
         "recommendation": "测试",
         "source_url": "https://example.test/match",
         "notes": "",
@@ -80,8 +81,46 @@ def reviewed_record(match_id, asian=None, asian_result=None, total=None, total_r
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_two_exact_scores_are_ranked_archived_and_diagnostic_only(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                record_args(base, exact_score_pick=["2-0:0.15", "1-0:0.20"])
+            )["record"]
+            self.assertEqual(
+                [(pick["rank"], pick["score"]) for pick in created["exact_score_picks"]],
+                [(1, "1-0"), (2, "2-0")],
+            )
+            self.assertTrue(all(pick["status"] == "scenario_only" for pick in created["exact_score_picks"]))
+
+            reviewed = memory_store.cmd_review(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    match_id="1",
+                    home_score=2,
+                    away_score=0,
+                    half_home_score=1,
+                    half_away_score=0,
+                    key_learning="第二波胆覆盖了主队扩大优势的比赛形态",
+                )
+            )
+            self.assertFalse(reviewed["record"]["score_exact"])
+            self.assertEqual(reviewed["record"]["exact_score_hit_rank"], 2)
+            self.assertTrue(reviewed["record"]["exact_score_any_hit"])
+            self.assertEqual(reviewed["stats"]["exact_score_top1_hits"], 0)
+            self.assertEqual(reviewed["stats"]["exact_score_top2_hits"], 1)
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 1)
+
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "exactly two"):
+                memory_store.cmd_record(record_args(base, exact_score_pick=["1-0:0.20"]))
+            with self.assertRaisesRegex(ValueError, "highest-probability"):
+                memory_store.cmd_record(
+                    record_args(base, predicted_score="2-0", exact_score_pick=["1-0:0.20", "2-0:0.15"])
+                )
+
     def test_unique_primary_and_lineup_change(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as base:
+        with tempfile.TemporaryDirectory() as base:
             initial = memory_store.cmd_record(record_args(base))
             self.assertEqual(initial["record"]["primary_market"], "total")
             self.assertEqual(initial["record"]["total_pick"]["role"], "primary")
@@ -106,7 +145,7 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.cmd_record(record_args(base, match_id="3", primary_market="half_time"))
 
     def test_review_persists_primary_result(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as base:
+        with tempfile.TemporaryDirectory() as base:
             memory_store.cmd_record(record_args(base, asian_side=None, primary_market="total"))
             result = memory_store.cmd_review(
                 SimpleNamespace(
@@ -123,7 +162,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(result["record"]["primary_result"], "win")
 
     def test_lineup_check_is_not_due_before_t_minus_30(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as base:
+        with tempfile.TemporaryDirectory() as base:
             defaults = memory_store.build_parser().parse_args(["due-lineup-check"])
             self.assertEqual((defaults.min_minutes, defaults.max_minutes), (0.0, 30.0))
             memory_store.cmd_record(record_args(base, asian_side=None, primary_market="total"))
@@ -156,7 +195,7 @@ class MemoryStoreTests(unittest.TestCase):
             "2924601:total",
             "2929664:total",
         ]
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as base:
+        with tempfile.TemporaryDirectory() as base:
             path = memory_store.data_path(base)
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")

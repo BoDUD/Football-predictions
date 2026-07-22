@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0] - 2026-07-22
+
+### Changed
+- Added a persistent Japan-time lineup scheduler with a hard T−30 gate, bounded pre-kickoff retries, expiring claim leases, and invocation-time catch-up.
+- Added mandatory standalone lineup tasks plus auditable completion and cleanup of match-specific Codex automations.
+- Added exactly two diagnostic exact-score candidates and guarded plain-text WeChat delivery support.
+
 ## [2.0.0] - 2026-07-21
 
 ### Changed

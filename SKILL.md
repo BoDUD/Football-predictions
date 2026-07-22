@@ -2,10 +2,10 @@
 name: soccer-predict
 description: >
   Analyze football matches from titan007.com using Asian handicap, totals, European odds,
-  first-half and half-time/full-time markets, fundamentals, lineups, corners, and post-match review. Use for match IDs or descriptions,
+  exact scores, first-half and half-time/full-time markets, fundamentals, lineups, corners, and post-match review. Use for match IDs or descriptions,
   football predictions, handicap/over-under analysis, result reviews, accuracy statistics,
-  automatic checks around 30 minutes before kickoff, and requests to schedule an automatic Codex
-  review after a match.
+  automatic checks around 30 minutes before kickoff, optional guarded delivery of those checks to
+  the user's own WeChat conversation, and requests to schedule an automatic Codex review after a match.
 ---
 
 # Soccer Predict for Codex
@@ -33,15 +33,16 @@ If the match is already live, label the output `滚球分析`, omit pre-match EV
 
 ## Predict
 
-Read [references/prediction-framework.md](references/prediction-framework.md) and [references/half-time-full-time.md](references/half-time-full-time.md), then:
+Read [references/prediction-framework.md](references/prediction-framework.md), [references/exact-score.md](references/exact-score.md), and [references/half-time-full-time.md](references/half-time-full-time.md), then:
 
 - Before calculating a new prediction, run `memory_store.py stats` and read `<workspace>/.codex/soccer-predict/calibration.json` when it exists. Apply its guardrails, but apply weight overrides only when `weight_change_eligible` permits them and the stored adjustment is supported by feature-level evidence.
 - Default to `可视化模式` for every prediction and review unless the user explicitly asks for `简洁模式`, `简洁`, `concise`, or `short`.
 - Visual mode must use compact Markdown tables and probability bars to show match status, opening-to-current Asian handicap and totals movement, no-vig 1X2 probabilities, EV comparison, key fundamentals/lineups, recommendations, predicted score, and risks.
-- Visual mode must also show a first-half panel and a 3x3 HT/FT probability matrix. Show at most one first-half pick and **exactly two ranked HT/FT suggestions** whenever the model matrix is available.
+- Visual mode must also show **exactly two ranked exact-score candidates**, a first-half panel, and a 3x3 HT/FT probability matrix. Show at most one first-half pick and **exactly two ranked HT/FT suggestions** whenever the model matrix is available.
+- For every valid pre-match or lineup-check prediction, rank the two most probable exact scores from the model score distribution. Label both `高方差参考（不计主推）`; never call them formal picks or include them in primary/all-formal ROI. If exact-score market odds are unavailable, show model probability without inventing odds or EV.
 - Classify each HT/FT suggestion as either `正式推荐` or `观察候选（未达标）`. A formal recommendation must pass the thresholds in `references/half-time-full-time.md`. If fewer than two outcomes pass, fill the remaining slots with the highest-EV outcomes and label them as observation candidates. Never hide the two ranked suggestions behind a generic “观望” result, and never describe a negative-EV candidate as positive value.
 - For both HT/FT suggestions show selection, current odds, model probability, no-vig market probability, model-versus-market edge, EV, rank, and status. When current odds are unavailable, rank by model probability and label the suggestion `赔率缺失，不可执行`; never invent odds or EV.
-- Concise mode: return only the best direction, probability, EV, predicted score, and one short rationale.
+- Concise mode: return only the best direction, probability, EV, exactly two ranked exact scores, and one short rationale.
 - If some visual fields are unavailable, keep the section visible and mark them `数据未取得` or `待公布`; never invent values to fill the layout.
 - Use current pre-match odds for final calculations and opening odds only for movement analysis.
 - Handle quarter lines with their real half-win/half-loss settlement; do not reduce them to a binary outcome.
@@ -65,7 +66,7 @@ python <skill-dir>/scripts/memory_store.py record --analysis-stage initial [fiel
 
 The script stores records under `<workspace>/.codex/soccer-predict/history.json`. Pass `--base-dir <workspace>` when the current directory is not the intended workspace. Do not use `.openclaw` or `.claude` paths.
 
-Include the match ID, league, kickoff, teams, predicted score, 1X2 probabilities, source URL, concise rationale, `--data-quality`, and the market-signal classification for each archived pick: `aligned`, `neutral`, `against`, `conflicting`, or `unknown`. Archive only formal Asian, total, first-half, and HT/FT recommendations in their pick fields; keep unqualified observations in notes so they do not pollute accuracy or ROI. Use `--asian-market-signal`, `--total-market-signal`, and `--half-market-signal` when the corresponding formal pick exists. Archive HT/FT recommendations with `--htft-pick SELECTION:ODDS:PROBABILITY:EV`. If archiving fails, report the failure instead of claiming learning is enabled.
+Include the match ID, league, kickoff, teams, 1X2 probabilities, source URL, concise rationale, `--data-quality`, and exactly two `--exact-score-pick SCORE:PROBABILITY` values. Keep `--predicted-score` equal to the first-ranked exact score. Archive only formal Asian, total, first-half, and HT/FT recommendations in their pick fields; keep unqualified observations in notes so they do not pollute accuracy or ROI. Use `--asian-market-signal`, `--total-market-signal`, and `--half-market-signal` when the corresponding formal pick exists. Archive HT/FT recommendations with `--htft-pick SELECTION:ODDS:PROBABILITY:EV`. If archiving fails, report the failure instead of claiming learning is enabled.
 
 Pass `--primary-market` on every `record` call. Select exactly one archived formal direction as the machine-readable primary; the script marks every other formal direction `secondary`. Use `--primary-market none` only when no formal direction qualifies. A lineup check must explicitly persist `primary_change.status` as `maintained` or `changed`.
 
@@ -73,25 +74,20 @@ The archive command is idempotent for identical predictions. If it returns `dupl
 
 ## Automatic lineup-time reanalysis in Codex
 
-For every archived prediction whose converted user-local kickoff includes a reliable timezone, create exactly one match-specific Codex automation for **kickoff minus 30 minutes**. Do not run the lineup reanalysis earlier than T-30. Derive the schedule from the verified absolute kickoff instant, not from Titan's displayed hour copied into the user's timezone.
+Read [references/lineup-scheduling.md](references/lineup-scheduling.md) and follow it after every archived initial prediction. Register the verified kickoff with `lineup_scheduler.py`, explicitly using `Asia/Tokyo` for this user's local timezone and `Asia/Shanghai` for Titan Chinese pages. Create the primary standalone automation at T-30 plus the bounded recovery attempts returned by the script. Never analyze earlier than T-30, never run after kickoff, and never create a global polling automation.
 
-Never create or keep a recurring polling automation for lineup-time reanalysis. Name the one-time task `Soccer Predict 临场复查 <match_id>` and check for that exact task before creating it so retries do not make duplicates.
+At the beginning of every soccer-predict invocation, run `lineup_scheduler.py due`. If it finds a missed-but-still-prematch check, create a separate Codex task immediately and let that task claim and run it. This opportunistic catch-up supplements the bounded scheduled retries after a local executor outage.
 
-The automation must:
+Every automation must claim the match before collecting data. A claim lease prevents duplicate revisions; a failed attempt must release the lease, and an expired lease may be reclaimed by the next retry. Do not mark the task complete until `record --analysis-stage lineup-check` succeeds and `lineup_scheduler.py complete` verifies the archived revision. After success or an explicit started/finished/cancelled/postponed state, delete or disable every attached automation for that match and persist `mark-cleaned`.
 
-1. Process only its named match ID; do not scan every pending match.
-2. Reopen the titan007 match page and collect current Asian handicap, totals, 1X2, first-half odds, HT/FT odds, confirmed lineups, injuries, and match status.
-3. Compare the new data with the archived opening/earlier prediction and produce visual mode output. Highlight changed full-time and first-half lines, changed EV, lineup effects, HT/FT matrix changes, and whether any primary pick changed.
-4. If the match is still prematch, archive the revised prediction with `record --analysis-stage lineup-check`. This replaces the active prediction used for settlement while preserving earlier revisions.
-5. If the match has started, label it live and do not overwrite the archived pre-match prediction.
-6. End after this single run; do not schedule another lineup check.
+Delivery is mandatory for the one attempt that obtains the claim. It must finish with a user-facing final answer in its own Codex task even when no odds, lineup, EV, or recommendation changed. Begin with `临场复查 <match_id>`, state the Japan-time check time and match status, and show `主推维持` or `主推变更`. Archive no-op retry tasks that fail to obtain a claim so only the real lineup analysis stays visible.
 
-Delivery is mandatory. The lineup-time automation must finish with a user-facing final answer in its own Codex task, even when no odds, lineup, EV, or recommendation changed. Never treat an archive write, an unchanged result, or an analysis embedded only in the initial prediction as successful delivery. The final answer must begin with `临场复查 <match_id>`, state the check time and match status, and show `主推维持` or `主推变更`. When creating the automation, keep successful-run notifications enabled and tell the user the scheduled local time.
+If `<workspace>/.codex/soccer-predict/wechat_push.json` exists and has `enabled: true`, read [references/wechat-delivery.md](references/wechat-delivery.md). Require a successful same-session `--verify-draft-only` readiness check before unattended delivery; current WeChat 4.1+ may hide UIA per account, and Windows Narrator is not a recovery method. After a valid initial prediction is archived, send one separately formatted plain-text initial summary through the configured verified backend with event key `initial:<match_id>`. After the revised T-30 analysis and archive succeed, send one separately formatted plain-text lineup summary with event key `lineup-check:<match_id>`. Never paste the Codex Markdown/HTML visualization into WeChat. Treat WeChat as a secondary delivery channel: complete the Codex task regardless, report `微信已推送` only after `sent: true`, and on any target-verification, accessibility, readiness, or send failure report `微信未推送` without retrying, restarting WeChat/Narrator, or choosing another recipient. Never push post-match reviews through this setting.
 
 Thread separation is mandatory:
 
 - Keep the originating analysis task for the initial prediction only. Do not post the lineup-time result back into that task.
-- Run every scheduled lineup-time automation as a new standalone Codex task and keep it visible in the task list. Use the title `临场复查 <match_id>｜<home_team> vs <away_team>`.
+- Run the claimed scheduled or recovery attempt as a new standalone Codex task and keep it visible in the task list. Use the title `临场复查 <match_id>｜<home_team> vs <away_team>`.
 - When an immediate lineup-time check is required instead of a scheduled automation, locate the Codex thread-creation tool and create a new project task for the check. Return only the new-task confirmation in the originating task; put the reanalysis itself in the new task.
 - If the thread-creation tool is unavailable, report that a separate lineup-check task could not be created. Do not silently fall back to publishing the reanalysis in the originating task.
 - A user request made inside the originating task to perform the lineup-time check still creates a new task. Follow-up discussion may continue inside that new lineup-check task.
@@ -103,8 +99,6 @@ Do not silently count an initial prediction as the delivered lineup-time reanaly
 - If fewer than 30 minutes remain but the match is still prematch, create a new Codex task, run the lineup-time reanalysis there immediately, and label it late.
 - If the user explicitly requests a lineup-time check before T-30, schedule it for T-30. A requested check at or after T-30 may run immediately and count as the one check, using the required `临场复查 <match_id>` output and delivery format.
 - If kickoff time or timezone is uncertain, do not guess the schedule; report that automatic reanalysis could not be scheduled.
-
-Do not mark a lineup-time check complete until data collection and revised analysis succeed.
 
 ## Review
 
@@ -132,7 +126,7 @@ python <skill-dir>/scripts/memory_store.py stats
 python <skill-dir>/scripts/memory_store.py calibrate --write
 ```
 
-Only archived pre-match formal recommendations affect accuracy and flat-stake ROI. Explain score error, Asian result, totals result, first-half result, HT/FT results, key miss/hit, cumulative statistics, and the saved learning. If the half-time score cannot be verified, leave half-time and HT/FT picks ungraded.
+Only archived pre-match formal recommendations affect accuracy and flat-stake ROI. Explain the diagnostic Top-1/Top-2 exact-score result, Asian result, totals result, first-half result, HT/FT results, key miss/hit, cumulative statistics, and the saved learning. If the half-time score cannot be verified, leave half-time and HT/FT picks ungraded.
 
 When reporting `战绩`, `准确率`, or `ROI`, lead with `stats.primary`: one final active primary per match. Report `stats.all_formal` only as secondary detail; never present the combined formal-direction count as the number of match primaries. Exact-score accuracy is diagnostic only and never enters primary accuracy.
 

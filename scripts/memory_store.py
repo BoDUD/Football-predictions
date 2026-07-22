@@ -29,10 +29,11 @@ DEFAULT_GUARDRAILS = [
     "盘口与相关欧赔同时明显反向时，普通低EV方向降为观察；仅当EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面支持时可作正式方向，主推同样受此门槛约束。",
     "伤停表与确认首发冲突时，以确认首发为准；旧伤停不得继续作为进球或让球方向的支持证据。",
     "大小球降水不能单独构成主推依据；必须同时取得多家公司一致性和进攻配置或机会质量证据。",
-    "精确比分仅作比赛形态参考，不计入主推命中率。",
+    "两个精确比分候选仅作比赛形态参考；分别记录Top-1/Top-2诊断，不计入主推或全部正式方向的命中率与ROI。",
 ]
 OBSOLETE_GUARDRAILS = {
     "若亚盘与相关欧赔一致明显反向，常规低EV方向降级为观察；只有EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面证据时才能正式推荐。",
+    "精确比分仅作比赛形态参考，不计入主推命中率。",
 }
 
 
@@ -167,6 +168,20 @@ def parse_htft_pick(value: str) -> dict[str, Any]:
     }
 
 
+def parse_exact_score_pick(value: str) -> dict[str, Any]:
+    parts = [part.strip() for part in value.split(":")]
+    if len(parts) != 2:
+        raise ValueError("Exact-score pick must be SCORE:PROBABILITY, for example 2-1:0.126")
+    score_parts = parts[0].split("-")
+    if len(score_parts) != 2 or not all(part.isdigit() for part in score_parts):
+        raise ValueError(f"Invalid exact score: {parts[0]}")
+    home, away = (int(part) for part in score_parts)
+    probability = float(parts[1])
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Exact-score probability must be between 0 and 1")
+    return {"score": f"{home}-{away}", "probability": probability}
+
+
 def find_record(history: list[dict[str, Any]], match_id: str) -> dict[str, Any] | None:
     return next((item for item in history if str(item.get("match_id")) == str(match_id)), None)
 
@@ -265,6 +280,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "analysis_stage": record.get("analysis_stage", "initial"),
         "archived_at": record.get("updated_at", record.get("created_at")),
         "predicted_score": record.get("predicted_score"),
+        "exact_score_picks": record.get("exact_score_picks", []),
         "recommendation": record.get("recommendation"),
         "notes": record.get("notes"),
         "data_quality": record.get("data_quality", "unknown"),
@@ -293,6 +309,19 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     timestamp = now_iso()
     revisions = list(existing.get("revisions", [])) if existing else []
     previous_primary = active_primary_identity(existing)
+    exact_score_picks = [parse_exact_score_pick(value) for value in (args.exact_score_pick or [])]
+    if len(exact_score_picks) != 2:
+        raise ValueError("Record requires exactly two --exact-score-pick values")
+    if len({pick["score"] for pick in exact_score_picks}) != 2:
+        raise ValueError("Exact-score picks must contain two distinct scores")
+    if sum(float(pick["probability"]) for pick in exact_score_picks) > 1.0 + 1e-9:
+        raise ValueError("Exact-score probabilities cannot sum to more than 1")
+    exact_score_picks.sort(key=lambda pick: (-float(pick["probability"]), pick["score"]))
+    for rank, pick in enumerate(exact_score_picks, start=1):
+        pick["rank"] = rank
+        pick["status"] = "scenario_only"
+    if str(args.predicted_score).strip() != exact_score_picks[0]["score"]:
+        raise ValueError("--predicted-score must equal the highest-probability exact-score pick")
 
     record: dict[str, Any] = {
         "match_id": str(args.match_id),
@@ -304,6 +333,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "home_team": args.home_team,
         "away_team": args.away_team,
         "predicted_score": args.predicted_score,
+        "exact_score_picks": exact_score_picks,
         "recommendation": args.recommendation,
         "source_url": args.source_url,
         "notes": args.notes,
@@ -506,6 +536,15 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     home, away = int(args.home_score), int(args.away_score)
     predicted = str(record.get("predicted_score", ""))
     predicted_exact = predicted == f"{home}-{away}"
+    actual_score = f"{home}-{away}"
+    exact_score_hit_rank = next(
+        (
+            int(pick.get("rank", index))
+            for index, pick in enumerate(record.get("exact_score_picks", []), start=1)
+            if isinstance(pick, dict) and str(pick.get("score")) == actual_score
+        ),
+        1 if predicted_exact else None,
+    )
     half_scores_available = args.half_home_score is not None and args.half_away_score is not None
     half_home = int(args.half_home_score) if half_scores_available else None
     half_away = int(args.half_away_score) if half_scores_available else None
@@ -514,6 +553,8 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         "reviewed_at": now_iso(),
         "final_score": f"{home}-{away}",
         "score_exact": predicted_exact,
+        "exact_score_hit_rank": exact_score_hit_rank,
+        "exact_score_any_hit": exact_score_hit_rank in {1, 2},
         "asian_result": settle_asian(record.get("asian_pick"), home, away),
         "total_result": settle_total(record.get("total_pick"), home, away),
         "half_time_score": f"{half_home}-{half_away}" if half_scores_available else None,
@@ -625,7 +666,12 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     half_time = market_pairs(reviewed, "half_time_result", "half_time_pick")
     htft = htft_pairs(reviewed)
     primary = primary_pairs(reviewed)
-    exact = sum(bool(r.get("score_exact")) for r in reviewed)
+    exact_top1 = sum((r.get("exact_score_hit_rank") == 1) or bool(r.get("score_exact")) for r in reviewed)
+    exact_top2 = sum(
+        (r.get("exact_score_hit_rank") in {1, 2})
+        or (r.get("exact_score_hit_rank") is None and bool(r.get("score_exact")))
+        for r in reviewed
+    )
     leagues: dict[str, dict[str, Any]] = {}
     for league in sorted({str(r.get("league", "unknown")) for r in reviewed}):
         subset = [r for r in reviewed if str(r.get("league", "unknown")) == league]
@@ -655,8 +701,12 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "half_time": all_formal["half_time"],
         "htft": all_formal["htft"],
         "combined": all_formal["combined"],
-        "exact_scores": exact,
-        "exact_score_rate": round(exact / len(reviewed), 4) if reviewed else None,
+        "exact_scores": exact_top1,
+        "exact_score_rate": round(exact_top1 / len(reviewed), 4) if reviewed else None,
+        "exact_score_top1_hits": exact_top1,
+        "exact_score_top1_rate": round(exact_top1 / len(reviewed), 4) if reviewed else None,
+        "exact_score_top2_hits": exact_top2,
+        "exact_score_top2_rate": round(exact_top2 / len(reviewed), 4) if reviewed else None,
         "learnings_recorded": sum(bool(str(r.get("key_learning", "")).strip()) for r in reviewed),
         "leagues": leagues,
     }
@@ -746,6 +796,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--home-team", required=True)
     record.add_argument("--away-team", required=True)
     record.add_argument("--predicted-score", required=True)
+    record.add_argument(
+        "--exact-score-pick",
+        action="append",
+        help="Required exactly twice as SCORE:PROBABILITY; rank is derived from probability",
+    )
     record.add_argument("--recommendation", default="")
     record.add_argument("--source-url", default="")
     record.add_argument("--notes", default="")
