@@ -23,7 +23,7 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- Predicted score
+- Exactly two ranked exact-score candidates with model probability
 
 ### Mode B: 可视化模式 (Visual/Detailed)
 Full analysis with compact Markdown tables and probability bars. Use this stable order:
@@ -34,9 +34,10 @@ Full analysis with compact Markdown tables and probability bars. Use this stable
 4. Probability bars: home/draw/away, handicap sides, and over/under sides
 5. EV comparison table: direction, line, odds, model probability, EV, and confidence
 6. Evidence panel: recent form, home/away split, H2H, motivation, lineup/injuries, and data quality
-7. Decision card: primary pick, secondary lean, predicted score, key reasons, and risks
-8. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
-9. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two ranked suggestions. Mark each as `正式推荐` or `观察候选（未达标）`.
+7. Decision card: primary pick, secondary lean, key reasons, and risks
+8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`
+9. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
+10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two ranked suggestions. Mark each as `正式推荐` or `观察候选（未达标）`.
 
 Render probability bars with a fixed-width 20-block scale, for example:
 
@@ -257,7 +258,7 @@ When a team is missing key defensive players, the over/under model MUST adjust u
 
 ## Step 5: Win Probability & Betting Advice
 
-Read [half-time-full-time.md](half-time-full-time.md) and calculate first-half and HT/FT markets when the required data is available.
+Read [exact-score.md](exact-score.md) and [half-time-full-time.md](half-time-full-time.md). Calculate two exact-score candidates for every valid pre-match model, then calculate first-half and HT/FT markets when the required data is available.
 
 ### Win Probability Prediction
 Combine odds analysis and model analysis to predict:
@@ -275,12 +276,12 @@ Under EV              = P(under_win) * under_odds - P(over_win)
 
 ### Final Output
 1. Best threshold-qualified betting recommendation; if none qualifies, show the highest-ranked observation as `不下注`
-2. Predicted final score
+2. Exactly two ranked exact-score candidates with model probability
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
 5. A 3x3 HT/FT probability matrix and exactly two ranked HT/FT suggestions whenever the matrix can be calculated. Use formal recommendations first; otherwise fill with the highest-EV observation candidates and show their negative or sub-threshold EV plainly.
 
-Treat the predicted exact score only as a shape/scenario reference. Never include exact-score hits or misses in primary-pick accuracy or ROI.
+Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
 
 ---
 
@@ -295,13 +296,13 @@ Treat the predicted exact score only as a shape/scenario reference. Never includ
 记录至少包含：
 
 - 比赛 ID、联赛、带时区的开球时间
-- 主客队和预测比分
+- 主客队和两个按概率排序的预测比分
 - 亚盘选择方、盘口、赔率
 - 大小球方向、盘口、赔率
 - 胜平负概率、推荐概率和 EV
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。观察候选只写入 notes。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存波胆候选，并让 `--predicted-score` 等于第一候选。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

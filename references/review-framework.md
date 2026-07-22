@@ -15,13 +15,13 @@ If no archived pre-match record exists, provide an informational review but do n
 4. Verify the half-time score, final score, and whether the final score is a 90-minute result. Asian and totals markets normally settle on regulation time unless the archived record states otherwise.
 5. Note red cards, penalties, disallowed goals, major injuries, or unusual stoppages when available.
 6. Write a specific causal learning and run `memory_store.py review --verified-finished ... --key-learning "..."` with the final home and away scores exactly once.
-7. Compare predicted and actual score, Asian settlement, totals settlement, first-half settlement, HT/FT settlement, and the main causal assumptions.
+7. Compare both ranked exact-score candidates with the result, then compare Asian settlement, totals settlement, first-half settlement, HT/FT settlement, and the main causal assumptions.
 8. Run `memory_store.py stats`; report `primary` first and `all_formal` second, plus league-level context when useful.
 9. Run `memory_store.py calibrate --write` so the workspace calibration snapshot stays synchronized.
 
 ## Settlement and statistics
 
-The script handles whole, half, and quarter lines. `half_win` counts as a correct direction, `half_loss` as incorrect, and `push` is excluded from the accuracy denominator. ROI uses one-unit flat stakes with Hong Kong odds: win `+odds`, half-win `+odds/2`, push `0`, half-loss `-0.5`, and loss `-1`. `primary` settles at most one final active main pick per match; `all_formal` contains every archived formal direction and is secondary reporting. Preserve the legacy per-market fields as aliases of `all_formal`. HT/FT selections settle from the verified half-time and 90-minute result. Exact scores are scenario diagnostics only. Live analyses and observation candidates never enter either betting denominator.
+The script handles whole, half, and quarter lines. `half_win` counts as a correct direction, `half_loss` as incorrect, and `push` is excluded from the accuracy denominator. ROI uses one-unit flat stakes with Hong Kong odds: win `+odds`, half-win `+odds/2`, push `0`, half-loss `-0.5`, and loss `-1`. `primary` settles at most one final active main pick per match; `all_formal` contains every archived formal direction and is secondary reporting. Preserve the legacy per-market fields as aliases of `all_formal`. HT/FT selections settle from the verified half-time and 90-minute result. Report exact-score Top-1 and Top-2 hit rates only as scenario diagnostics; they never enter either betting denominator. Live analyses and observation candidates never enter either betting denominator.
 
 ## Learning updates
 
