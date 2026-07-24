@@ -54,6 +54,14 @@ Useful review questions:
 
 ## Automatic review
 
-The Skill cannot wake itself. A Codex automation must be explicitly requested and scheduled. Its prompt must include the match ID and workspace path so the later task reads the same history file.
+For this installation, every successfully archived pre-match prediction is idempotently registered with `review_scheduler.py`. The first check is due at verified kickoff plus three hours in `Asia/Tokyo`. The Windows watchdog and recurring Codex dispatcher provide unattended execution; see [watchdog-runtime.md](watchdog-runtime.md).
 
-Every automatic review status check must be one-time. At startup, check the archived status; if it is already `reviewed`, end without another review or rescheduling. If Titan does not explicitly show a terminal match status, do not call the review command. Leave the record pending; when automatic review was authorized, schedule one non-duplicate follow-up status check 30 minutes later. Stop retrying postponed, cancelled, or abandoned matches and report their administrative status without settlement.
+Every due event creates a new saved review task. That task must claim the exact scheduler item before opening Titan. At startup, check the archived status; if it is already `reviewed`, end without another review. If Titan does not explicitly show a terminal match status, do not call the review command: call `review_scheduler.py wait`, leave the record pending, and archive that no-result task. The scheduler creates exactly one follow-up due 30 minutes later, which gets a fresh task. Stop retrying postponed, cancelled, or abandoned matches and report their administrative status without settlement.
+
+After a verified review, save the complete user-facing result artifact and call:
+
+```text
+python <skill-dir>/scripts/review_scheduler.py --base-dir <workspace> complete --match-id <id> --thread-id <current_thread_id> --result-artifact <path>
+```
+
+Send the final answer immediately. The result task must not call `mark-delivered`, delete automations, call `mark-cleaned`, or archive itself. A later dispatcher run verifies the exact task is completed with a non-empty final answer, marks delivery, removes only exact automation references, and marks cleanup. No-idle runs inspect only local scheduler/outbox state and must not open Titan or emit a substantive review.

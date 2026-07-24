@@ -37,7 +37,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
 - Recommend at most one first-half direction. For HT/FT, always output exactly two ranked suggestions whenever a nine-outcome model matrix is available.
-- Treat first-half advice as actionable only when current odds are available, model EV is positive, and the probability edge survives lineup-time reanalysis.
+- Treat first-half advice as actionable only when current odds are available and the probability edge survives lineup-time reanalysis. During the active small-sample protection period, an archived first-half primary requires EV >= 8%, model-versus-market edge >= 4pp, and medium/high data quality; lower positive EV is observation only.
 - Treat HT/FT as high variance. Require model EV of at least 8%, a model-versus-market edge of at least 4 percentage points, and data from at least five bookmakers for a `正式推荐`.
 - Rank all nine outcomes by EV descending. Put threshold-qualified outcomes first; break ties by model-versus-market edge, then model probability. Fill any remaining slot among the top two with the best unqualified outcome and label it `观察候选（未达标）`.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a ranked model direction, not an actionable positive-EV bet.
