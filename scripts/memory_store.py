@@ -27,7 +27,15 @@ RESULT_KEY_BY_MARKET = {
     "total": "total_result",
     "half_time": "half_time_result",
 }
+PROVISIONAL_FORMAL_MIN_EV = 0.08
+PROVISIONAL_FORMAL_MIN_EDGE_PP = 4.0
+PROVISIONAL_MIN_FIRMS = 5
+PROVISIONAL_LINEUP_CHANGE_MIN_EV_DELTA = 0.04
+DEEP_FAVORITE_LINE = -0.75
 DEFAULT_GUARDRAILS = [
+    "小样本保护期内，所有市场主推必须满足EV>=8%、模型相对市场边际>=4pp且数据质量至少为medium；亚洲盘和大小球正式次推同样受此门槛约束。EV在5%-8%的方向只作观察，不得归档为正式方向。",
+    "让球方达到-0.75或更深时，主推必须使用独立净胜球/穿盘分布，且具备确认首发、机会质量证据与对手尾部风险检查；不得用1X2胜率、强阵容或控球优势直接替代穿盘概率。",
+    "临场主推变更必须记录原因。跨市场、反向或追更差盘口时，原主推须被硬信息证伪，新方向数据质量须为high、首发已确认，且当前EV至少比旧方向高4pp；否则维持原主推或取消主推，不强行寻找替代方向。",
     "盘口与相关欧赔同时明显反向时，普通低EV方向降为观察；仅当EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面支持时可作正式方向，主推同样受此门槛约束。",
     "伤停表与确认首发冲突时，以确认首发为准；旧伤停不得继续作为进球或让球方向的支持证据。",
     "大小球降水不能单独构成主推依据；必须同时取得多家公司一致性和进攻配置或机会质量证据。",
@@ -231,6 +239,321 @@ def formal_picks(record: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return picks
 
 
+def require_minimum(value: Any, minimum: float, label: str) -> float:
+    if value is None:
+        raise ValueError(f"{label} is required by the provisional formal-pick guardrail")
+    number = float(value)
+    if number + 1e-9 < minimum:
+        raise ValueError(f"{label} must be at least {minimum:g}; downgrade the candidate to observation")
+    return number
+
+
+def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
+    """Reject formal picks that do not satisfy the active small-sample guardrails."""
+    evidence = record.get("guardrail_evidence", {})
+    data_quality = str(record.get("data_quality") or "unknown")
+    full_time_picks = [
+        (market, pick)
+        for market, pick in formal_picks(record)
+        if market in {"asian", "total"}
+    ]
+
+    if full_time_picks and data_quality not in {"medium", "high"}:
+        raise ValueError("Full-time formal picks require medium or high data quality")
+    if full_time_picks and evidence.get("injury_evidence_status") == "stale_conflict":
+        raise ValueError(
+            "Stale injury evidence conflicts with the confirmed lineup; recalculate without it "
+            "or archive no formal pick"
+        )
+
+    for market, pick in full_time_picks:
+        require_minimum(pick.get("ev"), PROVISIONAL_FORMAL_MIN_EV, f"{market} EV")
+        require_minimum(
+            pick.get("edge_pp"),
+            PROVISIONAL_FORMAL_MIN_EDGE_PP,
+            f"{market} model-versus-market edge (pp)",
+        )
+        signal = str(pick.get("market_signal") or "unknown")
+        if signal == "against":
+            require_minimum(
+                pick.get("firm_count"),
+                PROVISIONAL_MIN_FIRMS,
+                f"{market} bookmaker count",
+            )
+            if not (
+                evidence.get("lineup_confirmed")
+                or evidence.get("fundamental_supported")
+            ):
+                raise ValueError(
+                    f"{market} against-market formal pick requires independent lineup "
+                    "or fundamental evidence"
+                )
+
+    primary_market = record.get("primary_market")
+    primary = record.get("primary_pick")
+    if primary_market in {"half_time", "htft"} and isinstance(primary, dict):
+        if data_quality not in {"medium", "high"}:
+            raise ValueError(
+                "A half-time or HT/FT primary requires medium or high data quality"
+            )
+        require_minimum(
+            primary.get("ev"),
+            PROVISIONAL_FORMAL_MIN_EV,
+            f"{primary_market} primary EV",
+        )
+        primary_edge_pp = (
+            primary.get("edge_pp")
+            if primary_market == "half_time"
+            else evidence.get("primary_htft_edge_pp")
+        )
+        require_minimum(
+            primary_edge_pp,
+            PROVISIONAL_FORMAL_MIN_EDGE_PP,
+            f"{primary_market} primary model-versus-market edge (pp)",
+        )
+        if primary_market == "htft":
+            require_minimum(
+                evidence.get("primary_htft_firm_count"),
+                PROVISIONAL_MIN_FIRMS,
+                "HT/FT primary bookmaker count",
+            )
+    if primary_market == "total" and isinstance(primary, dict):
+        require_minimum(
+            primary.get("firm_count"),
+            PROVISIONAL_MIN_FIRMS,
+            "total bookmaker count",
+        )
+        supported_attack = bool(
+            evidence.get("chance_quality_supported")
+            or (
+                evidence.get("lineup_confirmed")
+                and evidence.get("attack_configuration_supported")
+            )
+        )
+        if not supported_attack:
+            raise ValueError(
+                "Total primary requires chance-quality evidence or a confirmed attacking "
+                "configuration; price movement alone is insufficient"
+            )
+
+    if (
+        primary_market == "asian"
+        and isinstance(primary, dict)
+        and float(primary.get("line", 0.0)) <= DEEP_FAVORITE_LINE
+    ):
+        if data_quality != "high":
+            raise ValueError("Asian favorite -0.75 or deeper requires high data quality")
+        if not evidence.get("lineup_confirmed"):
+            raise ValueError("Asian favorite -0.75 or deeper requires confirmed lineups")
+        if not evidence.get("chance_quality_supported"):
+            raise ValueError(
+                "Asian favorite -0.75 or deeper requires independent chance-quality evidence"
+            )
+        if not evidence.get("opponent_tail_risk_checked"):
+            raise ValueError(
+                "Asian favorite -0.75 or deeper requires an opponent counterattack/"
+                "goalkeeper/set-piece tail-risk check"
+            )
+        if not primary.get("cover_distribution_validated"):
+            raise ValueError(
+                "Asian favorite -0.75 or deeper requires an independently validated "
+                "goal-margin/cover distribution"
+            )
+        cover_probability = primary.get("cover_probability")
+        if cover_probability is None or not 0.0 <= float(cover_probability) <= 1.0:
+            raise ValueError(
+                "Asian favorite -0.75 or deeper requires --asian-cover-probability "
+                "between 0 and 1"
+            )
+
+
+def same_primary_direction(
+    previous_market: Any,
+    previous: dict[str, Any] | None,
+    current_market: Any,
+    current: dict[str, Any] | None,
+) -> bool:
+    if (
+        not isinstance(previous, dict)
+        or not isinstance(current, dict)
+        or previous_market != current_market
+    ):
+        return False
+    if previous_market == "htft":
+        return str(previous.get("selection", "")).upper() == str(
+            current.get("selection", "")
+        ).upper()
+    if previous_market == "half_time" and previous.get("market") != current.get("market"):
+        return False
+    return previous.get("side") == current.get("side")
+
+
+def selected_line_worsened(
+    market: Any,
+    previous: dict[str, Any] | None,
+    current: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return False
+    old_line = previous.get("line")
+    new_line = current.get("line")
+    if old_line is None or new_line is None:
+        return False
+    old_value = float(old_line)
+    new_value = float(new_line)
+    if market == "asian":
+        return new_value < old_value
+    if market == "total":
+        return (
+            current.get("side") == "over" and new_value > old_value
+        ) or (
+            current.get("side") == "under" and new_value < old_value
+        )
+    if market == "half_time" and current.get("market") in {"asian", "total"}:
+        if current.get("market") == "asian":
+            return new_value < old_value
+        return (
+            current.get("side") == "over" and new_value > old_value
+        ) or (
+            current.get("side") == "under" and new_value < old_value
+        )
+    return False
+
+
+def build_primary_change(
+    record: dict[str, Any],
+    existing: dict[str, Any] | None,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    previous_identity = active_primary_identity(existing)
+    current_identity = active_primary_identity(record)
+    current_primary = record.get("primary_pick")
+    current_ev = (
+        float(current_primary["ev"])
+        if isinstance(current_primary, dict) and current_primary.get("ev") is not None
+        else None
+    )
+
+    if record.get("analysis_stage") != "lineup-check":
+        return {
+            "status": "initial",
+            "previous": None,
+            "current": list(current_identity) if current_identity else None,
+            "reason": None,
+            "previous_current_ev": None,
+            "new_current_ev": current_ev,
+            "ev_improvement": None,
+            "decision": "initial",
+            "guardrail_passed": True,
+        }
+    if not existing:
+        raise ValueError("A lineup-check archive requires an existing initial prediction")
+    if previous_identity == current_identity:
+        return {
+            "status": "maintained",
+            "previous": list(previous_identity) if previous_identity else None,
+            "current": list(current_identity) if current_identity else None,
+            "reason": str(getattr(args, "primary_change_reason", "") or "").strip() or None,
+            "previous_current_ev": None,
+            "new_current_ev": current_ev,
+            "ev_improvement": None,
+            "decision": "maintained",
+            "guardrail_passed": True,
+        }
+
+    reason = str(getattr(args, "primary_change_reason", "") or "").strip()
+    if not reason:
+        raise ValueError("A changed lineup-check primary requires --primary-change-reason")
+
+    previous_market = existing.get("primary_market")
+    previous_primary = existing.get("primary_pick")
+    current_market = record.get("primary_market")
+    if current_identity is None:
+        return {
+            "status": "changed",
+            "previous": list(previous_identity) if previous_identity else None,
+            "current": None,
+            "reason": reason,
+            "previous_current_ev": getattr(args, "previous_primary_current_ev", None),
+            "new_current_ev": None,
+            "ev_improvement": None,
+            "decision": "cancelled_to_none",
+            "guardrail_passed": True,
+        }
+
+    evidence = record.get("guardrail_evidence", {})
+    if record.get("data_quality") != "high":
+        raise ValueError("A changed lineup-check primary requires high data quality")
+    if not evidence.get("lineup_confirmed"):
+        raise ValueError("A changed lineup-check primary requires confirmed lineups")
+
+    same_direction = same_primary_direction(
+        previous_market,
+        previous_primary if isinstance(previous_primary, dict) else None,
+        current_market,
+        current_primary if isinstance(current_primary, dict) else None,
+    )
+    worse_line = same_direction and selected_line_worsened(
+        current_market,
+        previous_primary if isinstance(previous_primary, dict) else None,
+        current_primary if isinstance(current_primary, dict) else None,
+    )
+    if worse_line and not bool(getattr(args, "accept_worse_line", False)):
+        raise ValueError(
+            "The lineup-check line is worse for the same selection; maintain the archived "
+            "line or pass --accept-worse-line after the strict replacement gate is met"
+        )
+
+    previous_ev = getattr(args, "previous_primary_current_ev", None)
+    ev_improvement = None
+    strict_replacement = previous_identity is not None and (
+        not same_direction or worse_line
+    )
+    if strict_replacement:
+        if not bool(getattr(args, "previous_primary_invalidated", False)):
+            raise ValueError(
+                "Cross-market, opposite-direction, or worse-line primary changes require "
+                "--previous-primary-invalidated"
+            )
+        if previous_ev is None:
+            raise ValueError(
+                "A strict lineup-check primary change requires --previous-primary-current-ev"
+            )
+        if current_ev is None:
+            raise ValueError("The new lineup-check primary requires a current EV")
+        ev_improvement = current_ev - float(previous_ev)
+        if ev_improvement + 1e-9 < PROVISIONAL_LINEUP_CHANGE_MIN_EV_DELTA:
+            raise ValueError(
+                "The new lineup-check primary EV must exceed the previous direction's "
+                "current EV by at least 4 percentage points"
+            )
+
+    decision = (
+        "newly_qualified"
+        if previous_identity is None
+        else "worse_line_replaced"
+        if worse_line
+        else "same_direction_line_improved"
+        if same_direction
+        else "strict_replacement"
+    )
+    return {
+        "status": "changed",
+        "previous": list(previous_identity) if previous_identity else None,
+        "current": list(current_identity),
+        "reason": reason,
+        "previous_invalidated": bool(
+            getattr(args, "previous_primary_invalidated", False)
+        ),
+        "previous_current_ev": float(previous_ev) if previous_ev is not None else None,
+        "new_current_ev": current_ev,
+        "ev_improvement": ev_improvement,
+        "worse_line": worse_line,
+        "decision": decision,
+        "guardrail_passed": True,
+    }
+
+
 def pick_identity(market: str | None, pick: dict[str, Any] | None) -> tuple[Any, ...] | None:
     if not market or not isinstance(pick, dict):
         return None
@@ -317,6 +640,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "recommendation": record.get("recommendation"),
         "notes": record.get("notes"),
         "data_quality": record.get("data_quality", "unknown"),
+        "guardrail_evidence": record.get("guardrail_evidence", {}),
         "probabilities": record.get("probabilities"),
         "asian_pick": record.get("asian_pick"),
         "total_pick": record.get("total_pick"),
@@ -368,7 +692,6 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
 
     timestamp = now_iso()
     revisions = list(existing.get("revisions", [])) if existing else []
-    previous_primary = active_primary_identity(existing)
     exact_score_picks = [parse_exact_score_pick(value) for value in (args.exact_score_pick or [])]
     if len(exact_score_picks) != 2:
         raise ValueError("Record requires exactly two --exact-score-pick values")
@@ -399,6 +722,30 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "source_url": args.source_url,
         "notes": args.notes,
         "data_quality": args.data_quality,
+        "guardrail_evidence": {
+            "lineup_confirmed": bool(getattr(args, "lineup_confirmed", False)),
+            "fundamental_supported": bool(
+                getattr(args, "fundamental_evidence", False)
+            ),
+            "chance_quality_supported": bool(
+                getattr(args, "chance_quality_evidence", False)
+            ),
+            "attack_configuration_supported": bool(
+                getattr(args, "attack_configuration_evidence", False)
+            ),
+            "opponent_tail_risk_checked": bool(
+                getattr(args, "opponent_tail_risk_checked", False)
+            ),
+            "injury_evidence_status": getattr(
+                args, "injury_evidence_status", "not_used"
+            ),
+            "primary_htft_edge_pp": getattr(
+                args, "primary_htft_edge_pp", None
+            ),
+            "primary_htft_firm_count": getattr(
+                args, "primary_htft_firm_count", None
+            ),
+        },
         "probabilities": {
             "home_win": args.home_win_probability,
             "draw": args.draw_probability,
@@ -420,7 +767,13 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "odds": args.asian_odds,
             "probability": args.asian_probability,
             "ev": args.asian_ev,
+            "edge_pp": getattr(args, "asian_edge_pp", None),
+            "firm_count": getattr(args, "asian_firm_count", None),
             "market_signal": args.asian_market_signal,
+            "cover_probability": getattr(args, "asian_cover_probability", None),
+            "cover_distribution_validated": bool(
+                getattr(args, "asian_cover_distribution_validated", False)
+            ),
         }
     if args.total_side:
         record["total_pick"] = {
@@ -429,6 +782,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "odds": args.total_odds,
             "probability": args.total_probability,
             "ev": args.total_ev,
+            "edge_pp": getattr(args, "total_edge_pp", None),
+            "firm_count": getattr(args, "total_firm_count", None),
             "market_signal": args.total_market_signal,
         }
     if args.half_market:
@@ -447,22 +802,16 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "odds": args.half_odds,
             "probability": args.half_probability,
             "ev": args.half_ev,
+            "edge_pp": getattr(args, "half_edge_pp", None),
+            "firm_count": getattr(args, "half_firm_count", None),
             "market_signal": args.half_market_signal,
         }
     if args.htft_pick:
         record["htft_picks"] = [parse_htft_pick(value) for value in args.htft_pick]
 
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
-    current_primary = active_primary_identity(record)
-    if args.analysis_stage == "lineup-check":
-        change_status = "maintained" if existing and previous_primary == current_primary else "changed"
-    else:
-        change_status = "initial"
-    record["primary_change"] = {
-        "status": change_status,
-        "previous": list(previous_primary) if previous_primary else None,
-        "current": list(current_primary) if current_primary else None,
-    }
+    validate_provisional_formal_guardrails(record)
+    record["primary_change"] = build_primary_change(record, existing, args)
 
     if existing:
         previous_snapshot = revision_snapshot(existing)
@@ -1055,6 +1404,22 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--source-url", default="")
     record.add_argument("--notes", default="")
     record.add_argument("--data-quality", choices=("high", "medium", "low", "unknown"), default="unknown")
+    record.add_argument("--lineup-confirmed", action="store_true")
+    record.add_argument("--fundamental-evidence", action="store_true")
+    record.add_argument("--chance-quality-evidence", action="store_true")
+    record.add_argument("--attack-configuration-evidence", action="store_true")
+    record.add_argument("--opponent-tail-risk-checked", action="store_true")
+    record.add_argument(
+        "--injury-evidence-status",
+        choices=("not_used", "fresh", "confirmed_override", "stale_conflict"),
+        default="not_used",
+    )
+    record.add_argument("--primary-change-reason", default="")
+    record.add_argument("--previous-primary-invalidated", action="store_true")
+    record.add_argument("--previous-primary-current-ev", type=float)
+    record.add_argument("--accept-worse-line", action="store_true")
+    record.add_argument("--primary-htft-edge-pp", type=float)
+    record.add_argument("--primary-htft-firm-count", type=int)
     record.add_argument(
         "--primary-market",
         choices=("none",) + PRIMARY_MARKETS,
@@ -1070,12 +1435,26 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--asian-odds", type=float)
     record.add_argument("--asian-probability", type=float)
     record.add_argument("--asian-ev", type=float)
+    record.add_argument(
+        "--asian-edge-pp",
+        type=float,
+        help="Model probability minus no-vig market probability in percentage points",
+    )
+    record.add_argument("--asian-firm-count", type=int)
+    record.add_argument("--asian-cover-probability", type=float)
+    record.add_argument("--asian-cover-distribution-validated", action="store_true")
     record.add_argument("--asian-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
     record.add_argument("--total-side", choices=("over", "under"))
     record.add_argument("--total-line", type=float)
     record.add_argument("--total-odds", type=float)
     record.add_argument("--total-probability", type=float)
     record.add_argument("--total-ev", type=float)
+    record.add_argument(
+        "--total-edge-pp",
+        type=float,
+        help="Model probability minus no-vig market probability in percentage points",
+    )
+    record.add_argument("--total-firm-count", type=int)
     record.add_argument("--total-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
     record.add_argument("--half-market", choices=("1x2", "asian", "total"))
     record.add_argument("--half-side", choices=("home", "draw", "away", "over", "under"))
@@ -1083,6 +1462,8 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--half-odds", type=float)
     record.add_argument("--half-probability", type=float)
     record.add_argument("--half-ev", type=float)
+    record.add_argument("--half-edge-pp", type=float)
+    record.add_argument("--half-firm-count", type=int)
     record.add_argument("--half-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
     record.add_argument("--htft-pick", action="append", help="Repeatable SELECTION:ODDS:PROBABILITY:EV, e.g. DD:3.40:0.31:0.054")
     record.add_argument("--force", action="store_true")

@@ -30,13 +30,15 @@ HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
 FORBIDDEN_MARKUP = re.compile(r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I)
 
 
-def clean_text(value: Any, limit: int = 90) -> str:
+def clean_text(value: Any, limit: int | None = None) -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ")
     text = re.sub(r"[*_`#<>\[\]]", "", text)
     text = re.sub(r"\s+", " ", text).strip(" ｜|-")
     if not text:
         return "无"
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+    if limit is None or len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def percentage(value: Any) -> str:
@@ -154,11 +156,12 @@ def htft_text(version: dict[str, Any], record: dict[str, Any]) -> str:
 
 
 def validate_plain_text(lines: list[str]) -> str:
-    normalized = "\n".join(clean_text(line, 140) for line in lines if clean_text(line, 140) != "无")
+    cleaned = [clean_text(line) for line in lines]
+    normalized = "\n".join(line for line in cleaned if line != "无")
     if FORBIDDEN_MARKUP.search(normalized):
         raise ValueError("Generated message contains Markdown or HTML")
-    if len(normalized) > 1400:
-        raise ValueError("Generated message exceeds 1400 characters")
+    if len(normalized) > 2000:
+        raise ValueError("Generated message exceeds 2000 characters")
     if len(normalized.splitlines()) > 18:
         raise ValueError("Generated message exceeds 18 lines")
     return normalized
@@ -195,7 +198,10 @@ def render_lineup(record: dict[str, Any]) -> str:
         previous_versions = [item for item in record.get("revisions", []) if isinstance(item, dict)]
         previous = merged_version(record, previous_versions[-1]) if previous_versions else {}
         previous_text = primary_line(previous, record) if previous else "原方向"
-        change_line = f"主推变更：{previous_text} → {primary_line(version, record)}"
+        if not primary:
+            change_line = f"主推取消：{previous_text} → 不下注"
+        else:
+            change_line = f"主推变更：{previous_text} → {primary_line(version, record)}"
     return validate_plain_text([
         f"【临场分析｜{record.get('match_id')}】",
         f"赛事：{record.get('league_key') or memory_store.league_key_for_record(record)}",
@@ -253,12 +259,18 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
     basis = record.get("settlement_basis") if isinstance(record.get("settlement_basis"), dict) else memory_store.settlement_basis_for_record(record)
     basis_label = "临场版" if basis.get("analysis_stage") == "lineup-check" else "初盘版"
     primary = basis.get("primary_pick") if isinstance(basis.get("primary_pick"), dict) else {}
+    primary_result_line = (
+        f"主推：{format_pick(basis.get('primary_market'), primary, record)}＝"
+        f"{result_text(record.get('primary_result'))}"
+        if primary
+        else "主推：无正式推荐（不结算、不计战绩）"
+    )
     return validate_plain_text([
         f"【赛后复盘｜{league_key}｜{record.get('match_id')}】",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
         f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
         f"结算依据：{basis_label}最终有效推荐",
-        f"主推：{format_pick(basis.get('primary_market'), primary, record)}＝{result_text(record.get('primary_result'))}",
+        primary_result_line,
         f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩）",
         f"比分参考：{exact_scores(record)}｜命中排名：{record.get('exact_score_hit_rank') or '未命中'}",
         f"本场关键：{clean_text(record.get('key_learning'))}",

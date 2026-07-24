@@ -23,9 +23,9 @@ Accept either format from user:
 ### 0. Timezone and Match State
 
 - Record the kickoff string exactly as Titan displays it.
-- Record the source timezone separately. For Titan007 Chinese pages, default to `Asia/Shanghai` (`UTC+8`) only when the page does not provide another timezone and no direct evidence contradicts it.
+- Record the source timezone separately. For Titan007 Chinese pages, use `Asia/Shanghai` (`UTC+8`) unless Titan itself provides an explicit different timezone or absolute timestamp.
 - Read the user's timezone from the Codex environment and convert the kickoff to the user's local time before scheduling or calculating time remaining.
-- Cross-check the converted kickoff against the live-detail countdown when available.
+- Use the live-detail countdown only as a non-authoritative sanity check; it may parse a timezone-less wall time in the browser timezone and cannot by itself override the Chinese-page `Asia/Shanghai` default.
 - Keep page status and clock math separate: use explicit page status to classify `prematch`, `live`, or `finished`; use the converted clock only to determine the lineup-check window.
 
 ### 1. Asian Handicap (让球盘)

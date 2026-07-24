@@ -198,7 +198,24 @@ Classify each candidate against the consensus opening-to-current move:
 - `conflicting`: Asian/total and European signals disagree.
 - `unknown`: insufficient comparable bookmaker data.
 
-A normal full-time formal recommendation needs EV >= 5%, model-versus-market edge >= 3pp, and medium/high data quality. A candidate with an `against` signal needs EV >= 8%, edge >= 4pp, at least five bookmakers, and independent lineup or fundamental corroboration. The primary pick gets no exemption from this gate. Otherwise show it as `观察候选（未达标）/不下注` and do not archive it as a pick.
+During the active small-sample protection period, every Asian-handicap or total-goals formal direction needs EV >= 8%, model-versus-market edge >= 4pp, and medium/high data quality. EV from 5% through less than 8% is observation only. A candidate with an `against` signal additionally needs at least five bookmakers and independent confirmed-lineup or fundamental corroboration. The primary pick gets no exemption. Otherwise show it as `观察候选（未达标）/不下注` and do not archive it as a pick.
+
+Keep this guardrail active until the affected market has at least 20 graded primary selections and a feature-level review explicitly changes it. Do not relax it automatically at 20 and do not convert it into a global weight change without feature-level evidence.
+
+### Deep-favorite cover gate
+
+For a selected favorite at `-0.75` or deeper:
+
+1. Calculate the goal-margin distribution directly and report the selected line's full-win, half-win, push, half-loss, and loss probabilities when applicable.
+2. Require high data quality, confirmed lineups, and independent chance-quality evidence such as non-penalty xG, big chances, shots on target, or comparable chance creation.
+3. Stress-test the opponent's counterattack, goalkeeper, set-piece, and early-concession tail risks.
+4. Do not use 1X2 win probability, possession, reputation, or a strong XI as a proxy for cover probability.
+
+If any item is missing, downgrade the deep favorite to observation even when the team is likely to win.
+
+### Totals evidence gate
+
+A total-goals primary needs consensus from at least five firms and either independent chance-quality evidence or a confirmed attacking configuration. Historical over rates, H2H scores, a single price drop, or a stale injury list are context only and cannot satisfy the gate. If a confirmed XI contradicts the injury list, discard the stale injury effect and recalculate before recommending.
 
 ### 4.1 Asian Handicap Logistic Regression Model
 

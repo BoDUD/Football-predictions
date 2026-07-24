@@ -83,6 +83,18 @@ class WeChatFormatterTests(unittest.TestCase):
                 self.assertIn(field, text)
             self.assert_plain(text)
 
+    def test_initial_copy_does_not_truncate_long_fields(self):
+        record = base_record()
+        record["recommendation"] = "R" * 220
+        record["notes"] = "N" * 500
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn(record["recommendation"], text)
+            self.assertIn(record["notes"], text)
+            self.assertNotIn("…", text)
+            self.assert_plain(text)
+
     def test_lineup_copy_states_change_and_active_primary(self):
         record = base_record()
         record["revisions"] = [{
@@ -108,6 +120,63 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertIn("当前主推：客队 +0.25 @0.86", text)
             self.assertIn("检查时间：2026-07-23 19:02（日本时间）", text)
             self.assert_plain(text)
+
+    def test_no_primary_lineup_and_review_are_explicitly_not_settled(self):
+        record = base_record()
+        record["revisions"] = [{
+            key: record.get(key)
+            for key in (
+                "analysis_stage", "recommendation", "notes", "predicted_score",
+                "exact_score_picks", "asian_pick", "total_pick", "half_time_pick",
+                "htft_picks", "primary_market", "primary_pick", "primary_change",
+            )
+        }]
+        record.update({
+            "analysis_stage": "lineup-check",
+            "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+            "asian_pick": None,
+            "total_pick": None,
+            "half_time_pick": None,
+            "htft_picks": [],
+            "primary_market": None,
+            "primary_pick": None,
+            "primary_change": {
+                "status": "changed",
+                "decision": "cancelled_to_none",
+            },
+        })
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            lineup_text = formatter.render(base, "42", "lineup-check")
+            self.assertIn("主推取消：小2.5 @0.92 → 不下注", lineup_text)
+            self.assertIn("当前主推：无正式推荐", lineup_text)
+            self.assert_plain(lineup_text)
+
+            record.update({
+                "status": "reviewed",
+                "half_time_score": "0-0",
+                "final_score": "1-0",
+                "primary_result": None,
+                "key_learning": "旧方向失效后没有强行寻找替代主推",
+                "reviewed_at": "2026-07-23T13:00:00+00:00",
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "analysis_stage": "lineup-check",
+                    "primary_market": None,
+                    "primary_pick": None,
+                    "formal_picks": {
+                        "asian": None,
+                        "total": None,
+                        "half_time": None,
+                        "htft": [],
+                    },
+                },
+            })
+            write_history(base, [record])
+            review_text = formatter.render(base, "42", "review")
+            self.assertIn("主推：无正式推荐（不结算、不计战绩）", review_text)
+            self.assertNotIn("无正式推荐＝未结算", review_text)
+            self.assert_plain(review_text)
 
     def test_review_copy_uses_settlement_basis_and_statistics(self):
         record = base_record()
