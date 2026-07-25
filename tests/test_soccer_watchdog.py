@@ -467,11 +467,24 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.assertEqual(pending[0]["due"], ready)
         self.assertEqual(pending[0]["event_id"], event["event_id"])
 
-    def test_windows_installer_requires_workspace_and_has_ten_minute_limit(self):
+    def test_windows_installer_is_explicit_opt_in_and_recoverably_disableable(self):
         installer = (
             REPO_ROOT / "scripts" / "install_windows_watchdog.ps1"
         ).read_text(encoding="utf-8")
 
+        self.assertIn("[switch] $AllowRecurring", installer)
+        self.assertIn(
+            'throw "install requires -AllowRecurring because this creates five-minute polling"',
+            installer,
+        )
+        self.assertIn(
+            'throw "enable requires -AllowRecurring because this starts five-minute polling"',
+            installer,
+        )
+        self.assertIn(
+            "Disable-ScheduledTask -TaskName $TaskName",
+            installer,
+        )
         self.assertIn(
             'throw "install requires an explicit -Workspace path"',
             installer,
@@ -480,6 +493,30 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.assertIn(
             "-ExecutionTimeLimit (New-TimeSpan -Minutes 10)",
             installer,
+        )
+        self.assertIn("-Hidden", installer)
+
+    def test_skill_defaults_to_exact_one_time_automations(self):
+        skill = (REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        runtime = (
+            REPO_ROOT / "references" / "watchdog-runtime.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Exact per-match, one-time Codex automations are the default executor",
+            skill,
+        )
+        self.assertIn(
+            "never materialize `retry-T-*` automations",
+            skill,
+        )
+        self.assertIn(
+            "Do not keep Python or PowerShell running",
+            runtime,
+        )
+        self.assertIn(
+            "install -AllowRecurring",
+            runtime,
         )
 
 

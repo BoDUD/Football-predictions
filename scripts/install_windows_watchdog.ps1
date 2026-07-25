@@ -1,8 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "status", "uninstall")]
+    [ValidateSet("install", "status", "disable", "enable", "uninstall")]
     [string] $Action = "status",
+
+    [switch] $AllowRecurring,
 
     [string] $Workspace,
 
@@ -100,7 +102,36 @@ switch ($Action) {
         break
     }
 
+    "disable" {
+        $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($null -ne $existing) {
+            Disable-ScheduledTask -TaskName $TaskName | Out-Null
+        }
+        [pscustomobject]@{
+            Installed = ($null -ne $existing)
+            Enabled = $false
+            TaskName = $TaskName
+        }
+        break
+    }
+
+    "enable" {
+        if (-not $AllowRecurring) {
+            throw "enable requires -AllowRecurring because this starts five-minute polling"
+        }
+        $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($null -eq $existing) {
+            throw "Watchdog task is not installed: $TaskName"
+        }
+        Enable-ScheduledTask -TaskName $TaskName | Out-Null
+        Get-WatchdogStatus
+        break
+    }
+
     "install" {
+        if (-not $AllowRecurring) {
+            throw "install requires -AllowRecurring because this creates five-minute polling"
+        }
         if ([string]::IsNullOrWhiteSpace($Workspace)) {
             throw "install requires an explicit -Workspace path"
         }
@@ -172,6 +203,7 @@ switch ($Action) {
             -RestartInterval (New-TimeSpan -Minutes 1) `
             -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
             -WakeToRun `
+            -Hidden `
             -MultipleInstances IgnoreNew
         $definition = New-ScheduledTask `
             -Action $taskAction `
@@ -179,9 +211,8 @@ switch ($Action) {
             -Principal $principal `
             -Settings $settings `
             -Description (
-                "Every five minutes, sync and persist due soccer-predict lineup, " +
-                "review, and cleanup events, then wake the verified Codex app. " +
-                "It does not fabricate analysis."
+                "Optional recurring fallback. Every five minutes, sync and persist due " +
+                "soccer-predict events, then wake the verified Codex app."
             )
 
         Register-ScheduledTask `

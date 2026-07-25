@@ -1,35 +1,37 @@
-# Unattended runtime and dispatcher
+# One-time runtime and optional watchdog
 
-Use this runtime for every archived pre-match prediction. It combines a Windows wake task, a lightweight Codex dispatcher, and match-specific visible tasks.
+Use exact per-match Codex automations by default. They run only at the verified T-30 and kickoff-plus-three-hour times and create match-specific visible tasks. Do not keep Python or PowerShell running, and do not install or enable five-minute polling unless the user explicitly opts in.
 
 ## Runtime layers
 
-1. The Windows task runs every five minutes and at logon. It synchronizes missing lineup/review registrations, asks both schedulers for due work and cleanup work, writes exact events to `<workspace>/.codex/soccer-predict/outbox`, and starts the verified Codex Store app when work exists.
-2. The recurring Codex dispatcher reads only that outbox. It does not open Titan, calculate probabilities, settle bets, or publish match analysis itself.
-3. The dispatcher creates one visible Codex task for each lineup or review event. The child task must claim the scheduler lease before doing work.
-4. Cleanup events stay in the dispatcher. They verify that the result task already has a completed final answer before marking delivery and removing automations.
+1. After an initial archive, create one T-30 automation and one kickoff-plus-three-hour review automation. Both must end in `COUNT=1`.
+2. Each automation opens one visible Codex task for its named match. The child task must claim the scheduler lease before doing work.
+3. The T-30 task must not run early or after kickoff. The review time only makes a check due and is not proof of full-time.
+4. A later user-initiated invocation or explicit one-time cleanup task verifies the completed result before marking delivery and removing exact automation references.
 
-Locking the Windows session does not stop this workflow. Powering off, logging out, losing network access, or disabling Windows Task Scheduler still prevents execution. Never claim otherwise.
+Powering off, logging out, losing network access, or making the local Codex execution environment unavailable prevents execution. Never claim otherwise.
 
-## Windows task
+## Optional recurring Windows watchdog
+
+The recurring watchdog is a fallback for users who explicitly accept five-minute polling. It is not the default and must never be enabled merely to support one scheduled match.
 
 Install against explicit paths:
 
 ```text
-powershell -ExecutionPolicy Bypass -File <skill-dir>/scripts/install_windows_watchdog.ps1 install -Workspace <workspace> -PythonPath <python.exe>
+powershell -ExecutionPolicy Bypass -File <skill-dir>/scripts/install_windows_watchdog.ps1 install -AllowRecurring -Workspace <workspace> -PythonPath <python.exe>
 ```
 
-The task name is `SoccerPredict-Watchdog`. It uses the current interactive user, runs every five minutes and at logon, starts missed runs when available, permits battery execution, requests wake-to-run, ignores overlapping instances, and retries failures three times. Use the script's `status` action to verify `Installed`, `State`, `LastTaskResult`, and `NextRunTime`.
+The task name is `SoccerPredict-Watchdog`. `install` and `enable` refuse to proceed without `-AllowRecurring`. Use `disable` to stop polling without deleting the task. When explicitly enabled, it runs every five minutes and at logon, starts missed runs when available, permits battery execution, requests wake-to-run, ignores overlapping instances, and retries failures three times.
 
 The watchdog dynamically resolves the installed `OpenAI.Codex` AppX AUMID. Package activation only starts Codex; it does not fabricate or consume an analysis.
 
-## Dispatcher contract
+## Optional dispatcher contract
 
-On every dispatcher run:
+Only when recurring polling was explicitly enabled:
 
 1. Run `soccer_watchdog.py --workspace <workspace> --skill-dir <skill-dir>`.
 2. Run it again with `--list-events`.
-3. Process at most one event per five-minute run so a later cron tick cannot interrupt a long batch. Prioritize time-sensitive `lineup`, then `review`, then delivery/cleanup, then metadata recovery.
+3. Process at most one event per run. Prioritize time-sensitive `lineup`, then `review`, then delivery/cleanup, then metadata recovery.
 4. If the protected workspace `.codex` state returns `Permission denied` in a Codex sandbox, immediately retry the exact scheduler/watchdog command with controlled escalation. This installation is explicitly authorized to update only the soccer-predict state directory.
 5. If no events exist, archive the dispatcher run and end without opening Titan or producing a user notification.
 6. For `lineup` and `review` events, create a new task in the saved workspace project. In a project-bound cron run, prefer a same-directory fork followed immediately by the full match-specific prompt; use direct thread creation when it returns reliably. Do not execute the match inside the dispatcher. Acknowledge the event only after a real child thread ID exists, the full prompt was delivered, and the title was set:
@@ -53,6 +55,6 @@ Moving an outbox event to `processed` records dispatch, not analytical success. 
 - Read the Skill, claim the exact scheduler item, and stop/archive on a refused claim.
 - Persist a complete non-empty result artifact and call `complete` with the current task ID and artifact path.
 - Send the final answer immediately after `complete`. Do not delete automations or call `mark-delivered` in the result task.
-- A later dispatcher run verifies the final answer and performs cleanup.
+- A later user-initiated invocation, explicit one-time cleanup task, or optional dispatcher run verifies the final answer and performs cleanup.
 
-If a review check finds no explicit finished status, call `review_scheduler.py wait`; archive that no-result check. The scheduler creates exactly one 30-minute follow-up, and the dispatcher later creates a fresh check task.
+If a review check finds no explicit finished status, call `review_scheduler.py wait`; archive that no-result check and create exactly one fresh `COUNT=1` follow-up automation for 30 minutes later. Do not start a recurring retry loop.
