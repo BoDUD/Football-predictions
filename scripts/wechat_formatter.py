@@ -129,6 +129,18 @@ def exact_scores(version: dict[str, Any]) -> str:
     return "、".join(f"{pick.get('score')}（{percentage(pick.get('probability'))}）" for pick in picks)
 
 
+def zero_zero_text(version: dict[str, Any]) -> str:
+    audit = version.get("zero_zero_audit")
+    if not isinstance(audit, dict):
+        return "未记录"
+    rank = audit.get("rank")
+    status = "进入前二" if audit.get("included_in_top2") else "未进前二"
+    result = f"{percentage(audit.get('probability'))}｜总排名第{rank}｜{status}"
+    if audit.get("odds") is not None:
+        result += f"｜赔率{float(audit['odds']):g}｜EV {percentage(audit.get('ev'))}"
+    return result
+
+
 def primary_line(version: dict[str, Any], record: dict[str, Any]) -> str:
     return format_pick(version.get("primary_market"), version.get("primary_pick"), record)
 
@@ -181,6 +193,7 @@ def render_initial(record: dict[str, Any]) -> str:
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
+        f"0-0核验：{zero_zero_text(version)}",
         f"核心判断：{clean_text(version.get('recommendation'))}",
         f"风险：{clean_text(version.get('notes'))}",
         "仅供数据分析参考",
@@ -215,6 +228,7 @@ def render_lineup(record: dict[str, Any]) -> str:
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
+        f"0-0核验：{zero_zero_text(version)}",
         f"临场判断：{clean_text(version.get('recommendation'))}",
         f"风险：{clean_text(version.get('notes'))}",
         "仅供数据分析参考",
@@ -273,6 +287,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         primary_result_line,
         f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩）",
         f"比分参考：{exact_scores(record)}｜命中排名：{record.get('exact_score_hit_rank') or '未命中'}",
+        f"0-0核验：{zero_zero_text(record)}",
         f"本场关键：{clean_text(record.get('key_learning'))}",
         f"{league_key}主推：{performance_text(league.get('primary'))}",
         f"累计主推：{performance_text(stats.get('primary'))}",

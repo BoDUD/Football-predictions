@@ -26,6 +26,10 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "away_team": "客队",
         "predicted_score": "1-0",
         "exact_score_pick": ["1-0:0.20", "2-0:0.15"],
+        "zero_zero_probability": 0.10,
+        "zero_zero_rank": 4,
+        "zero_zero_odds": None,
+        "zero_zero_ev": None,
         "recommendation": "测试",
         "source_url": "https://example.test/match",
         "notes": "",
@@ -138,6 +142,73 @@ class MemoryStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "highest-probability"):
                 memory_store.cmd_record(
                     record_args(base, predicted_score="2-0", exact_score_pick=["1-0:0.20", "2-0:0.15"])
+                )
+
+    def test_zero_zero_audit_is_required_consistent_and_revisioned(self):
+        with tempfile.TemporaryDirectory() as base:
+            top_one = memory_store.cmd_record(
+                record_args(
+                    base,
+                    predicted_score="0-0",
+                    exact_score_pick=["1-0:0.20", "0-0:0.30"],
+                    zero_zero_probability=0.30,
+                    zero_zero_rank=1,
+                    zero_zero_odds=12.0,
+                    zero_zero_ev=2.60,
+                )
+            )["record"]
+            self.assertEqual(top_one["exact_score_picks"][0]["score"], "0-0")
+            self.assertEqual(
+                top_one["zero_zero_audit"],
+                {
+                    "score": "0-0",
+                    "probability": 0.30,
+                    "rank": 1,
+                    "included_in_top2": True,
+                    "status": "top_two",
+                    "odds": 12.0,
+                    "ev": 2.60,
+                },
+            )
+
+            lineup = memory_store.cmd_record(
+                record_args(
+                    base,
+                    analysis_stage="lineup-check",
+                    zero_zero_probability=0.11,
+                    zero_zero_rank=4,
+                )
+            )["record"]
+            self.assertEqual(lineup["zero_zero_audit"]["rank"], 4)
+            self.assertEqual(
+                lineup["revisions"][-1]["zero_zero_audit"]["rank"],
+                1,
+            )
+
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "requires --zero-zero"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        zero_zero_probability=None,
+                        zero_zero_rank=None,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "must be an exact-score pick"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        zero_zero_probability=0.18,
+                        zero_zero_rank=2,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "exceeds the archived second-ranked"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        zero_zero_probability=0.18,
+                        zero_zero_rank=3,
+                    )
                 )
 
     def test_unique_primary_and_lineup_change(self):

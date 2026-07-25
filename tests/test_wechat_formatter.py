@@ -41,6 +41,15 @@ def base_record() -> dict:
             {"score": "1-0", "probability": 0.20, "rank": 1},
             {"score": "1-1", "probability": 0.16, "rank": 2},
         ],
+        "zero_zero_audit": {
+            "score": "0-0",
+            "probability": 0.12,
+            "rank": 4,
+            "included_in_top2": False,
+            "status": "analyzed_not_top_two",
+            "odds": 12.0,
+            "ev": 0.44,
+        },
         "asian_pick": {
             "side": "away",
             "line": 0.25,
@@ -81,6 +90,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertTrue(text.startswith("【初盘分析｜42】\n"))
             for field in ("赛事：芬超", "比赛：主队 vs 客队", "开赛：", "主推：小2.5 @0.92", "次选：", "比分参考："):
                 self.assertIn(field, text)
+            self.assertIn("0-0核验：12.0%｜总排名第4｜未进前二｜赔率12｜EV 44.0%", text)
             self.assert_plain(text)
 
     def test_initial_copy_does_not_truncate_long_fields(self):
@@ -101,7 +111,7 @@ class WeChatFormatterTests(unittest.TestCase):
             key: record.get(key)
             for key in (
                 "analysis_stage", "recommendation", "notes", "predicted_score",
-                "exact_score_picks", "asian_pick", "total_pick", "half_time_pick",
+                "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
                 "htft_picks", "primary_market", "primary_pick", "primary_change",
             )
         }]
@@ -127,7 +137,7 @@ class WeChatFormatterTests(unittest.TestCase):
             key: record.get(key)
             for key in (
                 "analysis_stage", "recommendation", "notes", "predicted_score",
-                "exact_score_picks", "asian_pick", "total_pick", "half_time_pick",
+                "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
                 "htft_picks", "primary_market", "primary_pick", "primary_change",
             )
         }]

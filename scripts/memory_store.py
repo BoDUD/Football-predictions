@@ -223,6 +223,67 @@ def parse_exact_score_pick(value: str) -> dict[str, Any]:
     return {"score": f"{home}-{away}", "probability": probability}
 
 
+def build_zero_zero_audit(
+    args: argparse.Namespace,
+    exact_score_picks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    probability = getattr(args, "zero_zero_probability", None)
+    rank = getattr(args, "zero_zero_rank", None)
+    if probability is None or rank is None:
+        raise ValueError(
+            "Record requires --zero-zero-probability and --zero-zero-rank "
+            "to prove that 0-0 was evaluated"
+        )
+    probability = float(probability)
+    rank = int(rank)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("0-0 probability must be between 0 and 1")
+    if rank < 1:
+        raise ValueError("0-0 rank must be at least 1")
+
+    zero_zero_pick = next(
+        (pick for pick in exact_score_picks if pick.get("score") == "0-0"),
+        None,
+    )
+    if rank <= 2:
+        if not zero_zero_pick:
+            raise ValueError("0-0 ranked in the Top-2 must be an exact-score pick")
+        if int(zero_zero_pick.get("rank", 0)) != rank:
+            raise ValueError("0-0 audit rank must match its exact-score pick rank")
+        if abs(float(zero_zero_pick.get("probability", 0.0)) - probability) > 1e-4:
+            raise ValueError("0-0 audit probability must match its exact-score pick")
+    else:
+        if zero_zero_pick:
+            raise ValueError("0-0 outside the Top-2 cannot replace a higher-ranked pick")
+        second_probability = float(exact_score_picks[1]["probability"])
+        if probability > second_probability + 1e-4:
+            raise ValueError("0-0 probability exceeds the archived second-ranked score")
+
+    odds = getattr(args, "zero_zero_odds", None)
+    if odds is not None:
+        odds = float(odds)
+        if odds <= 1.0:
+            raise ValueError("0-0 decimal odds must be greater than 1")
+    supplied_ev = getattr(args, "zero_zero_ev", None)
+    calculated_ev = probability * odds - 1.0 if odds is not None else None
+    if supplied_ev is not None:
+        supplied_ev = float(supplied_ev)
+        if calculated_ev is None:
+            raise ValueError("0-0 EV requires --zero-zero-odds")
+        if abs(supplied_ev - calculated_ev) > 1e-4:
+            raise ValueError("0-0 EV must equal probability * decimal odds - 1")
+
+    return {
+        "score": "0-0",
+        "probability": probability,
+        "rank": rank,
+        "included_in_top2": rank <= 2,
+        "status": "top_two" if rank <= 2 else "analyzed_not_top_two",
+        "odds": odds,
+        "ev": round(calculated_ev, 12) if calculated_ev is not None else None,
+    }
+
+
 def find_record(history: list[dict[str, Any]], match_id: str) -> dict[str, Any] | None:
     return next((item for item in history if str(item.get("match_id")) == str(match_id)), None)
 
@@ -637,6 +698,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "archived_at": record.get("updated_at", record.get("created_at")),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": record.get("exact_score_picks", []),
+        "zero_zero_audit": record.get("zero_zero_audit"),
         "recommendation": record.get("recommendation"),
         "notes": record.get("notes"),
         "data_quality": record.get("data_quality", "unknown"),
@@ -675,6 +737,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         },
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
+        "zero_zero_audit": deepcopy(record.get("zero_zero_audit")),
         "revision_count": len(record.get("revisions", [])),
     }
 
@@ -705,6 +768,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         pick["status"] = "scenario_only"
     if str(args.predicted_score).strip() != exact_score_picks[0]["score"]:
         raise ValueError("--predicted-score must equal the highest-probability exact-score pick")
+    zero_zero_audit = build_zero_zero_audit(args, exact_score_picks)
 
     record: dict[str, Any] = {
         "match_id": str(args.match_id),
@@ -718,6 +782,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "away_team": args.away_team,
         "predicted_score": args.predicted_score,
         "exact_score_picks": exact_score_picks,
+        "zero_zero_audit": zero_zero_audit,
         "recommendation": args.recommendation,
         "source_url": args.source_url,
         "notes": args.notes,
@@ -1399,6 +1464,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--exact-score-pick",
         action="append",
         help="Required exactly twice as SCORE:PROBABILITY; rank is derived from probability",
+    )
+    record.add_argument(
+        "--zero-zero-probability",
+        type=float,
+        required=True,
+        help="Model probability for 0-0 from the same full score distribution",
+    )
+    record.add_argument(
+        "--zero-zero-rank",
+        type=int,
+        required=True,
+        help="One-based rank of 0-0 in the full exact-score distribution",
+    )
+    record.add_argument(
+        "--zero-zero-odds",
+        type=float,
+        help="Current 0-0 decimal odds when actually collected",
+    )
+    record.add_argument(
+        "--zero-zero-ev",
+        type=float,
+        help="Optional audited 0-0 decimal-odds EV; recalculated and validated",
     )
     record.add_argument("--recommendation", default="")
     record.add_argument("--source-url", default="")

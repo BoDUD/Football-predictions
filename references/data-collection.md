@@ -44,6 +44,11 @@ Accept either format from user:
 - Fields: home win odds, draw odds, away win odds
 - Record all available bookmaker data (at least top 10)
 
+### Exact score
+- Collect the current exact-score market when Titan publishes it, including the 0-0 row.
+- A missing 0-0 market price does not remove 0-0 from the model distribution; record the odds as unavailable and still calculate its probability and rank.
+- Never substitute a totals or 1X2 price for an exact-score price.
+
 ### First-Half and Half-Time/Full-Time Markets
 - Extract opening and current first-half 1X2, Asian handicap, and totals odds.
 - Extract all available half-time/full-time outcomes (HH, HD, HA, DH, DD, DA, AH, AD, AA).
