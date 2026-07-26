@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
-  short_description: "Visual football, exact-score, first-half, and HT/FT analysis"
-  default_prompt: "Use $soccer-predict for a visual match analysis with two ranked exact scores, a mandatory 0-0 audit, and lineup-time rechecking."
+  short_description: "Visual football, lineup, and post-match analysis"
+  default_prompt: "Use $soccer-predict for a visual match analysis with two ranked exact scores, showing 0-0 only when it ranks in the pair, plus lineup-time rechecking."

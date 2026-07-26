@@ -23,7 +23,7 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- Exactly two ranked exact-score candidates with model probability, plus the mandatory one-line 0-0 audit
+- Exactly two ranked exact-score candidates with model probability; 0-0 appears only when it ranks in that pair
 
 ### Mode B: 可视化模式 (Visual/Detailed)
 Full analysis with compact Markdown tables and probability bars. Use this stable order:
@@ -35,7 +35,7 @@ Full analysis with compact Markdown tables and probability bars. Use this stable
 5. EV comparison table: direction, line, odds, model probability, EV, and confidence
 6. Evidence panel: recent form, home/away split, H2H, motivation, lineup/injuries, and data quality
 7. Decision card: primary pick, secondary lean, key reasons, and risks
-8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`, followed by a separate 0-0 probability/rank audit
+8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`; do not add a separate 0-0 row unless explicitly requested
 9. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
 10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two ranked suggestions. Mark each as `正式推荐` or `观察候选（未达标）`.
 
@@ -293,7 +293,7 @@ Under EV              = P(under_win) * under_odds - P(over_win)
 
 ### Final Output
 1. Best threshold-qualified betting recommendation; if none qualifies, show the highest-ranked observation as `不下注`
-2. Exactly two ranked exact-score candidates with model probability, plus 0-0 probability and its full-distribution rank
+2. Exactly two ranked exact-score candidates with model probability; include 0-0 only when it ranks in the pair
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
 5. A 3x3 HT/FT probability matrix and exactly two ranked HT/FT suggestions whenever the matrix can be calculated. Use formal recommendations first; otherwise fill with the highest-EV observation candidates and show their negative or sub-threshold EV plainly.

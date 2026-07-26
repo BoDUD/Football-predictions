@@ -90,7 +90,31 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertTrue(text.startswith("【初盘分析｜42】\n"))
             for field in ("赛事：芬超", "比赛：主队 vs 客队", "开赛：", "主推：小2.5 @0.92", "次选：", "比分参考："):
                 self.assertIn(field, text)
-            self.assertIn("0-0核验：12.0%｜总排名第4｜未进前二｜赔率12｜EV 44.0%", text)
+            self.assertNotIn("0-0核验：", text)
+            self.assertNotIn("0-0（12.0%）", text)
+            self.assert_plain(text)
+
+    def test_zero_zero_is_displayed_only_when_it_ranks_in_top_two(self):
+        record = base_record()
+        record["predicted_score"] = "0-0"
+        record["exact_score_picks"] = [
+            {"score": "0-0", "probability": 0.24, "rank": 1},
+            {"score": "1-0", "probability": 0.19, "rank": 2},
+        ]
+        record["zero_zero_audit"] = {
+            "score": "0-0",
+            "probability": 0.24,
+            "rank": 1,
+            "included_in_top2": True,
+            "status": "top_two",
+            "odds": 7.0,
+            "ev": 0.68,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn("比分参考：0-0（24.0%）、1-0（19.0%）", text)
+            self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
     def test_initial_copy_does_not_truncate_long_fields(self):
@@ -103,6 +127,19 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertIn(record["recommendation"], text)
             self.assertIn(record["notes"], text)
             self.assertNotIn("…", text)
+            self.assert_plain(text)
+
+    def test_hidden_zero_zero_audit_does_not_leak_through_user_facing_prose(self):
+        record = base_record()
+        record["recommendation"] = "小球方向更稳；0-0核验未进前二。赔率12，EV44%。低节奏判断保留。"
+        record["notes"] = "阵容仍有不确定性；概率12.0%，全分布第4。对应比分0-0。赔率12，EV44%。其他风险保留。"
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn("核心判断：小球方向更稳；低节奏判断保留。", text)
+            self.assertIn("风险：阵容仍有不确定性；其他风险保留。", text)
+            for hidden in ("0-0核验", "对应比分0-0", "概率12.0%", "赔率12", "EV44%"):
+                self.assertNotIn(hidden, text)
             self.assert_plain(text)
 
     def test_lineup_copy_states_change_and_active_primary(self):
@@ -129,6 +166,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertIn("主推变更：小2.5 @0.92 → 客队 +0.25 @0.86", text)
             self.assertIn("当前主推：客队 +0.25 @0.86", text)
             self.assertIn("检查时间：2026-07-23 19:02（日本时间）", text)
+            self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
     def test_no_primary_lineup_and_review_are_explicitly_not_settled(self):
@@ -199,7 +237,7 @@ class WeChatFormatterTests(unittest.TestCase):
             "total_result": "win",
             "primary_result": "win",
             "exact_score_hit_rank": 1,
-            "key_learning": "临场低节奏判断得到验证",
+            "key_learning": "临场低节奏判断得到验证；0-0全分布第4。赔率12，EV44%。保留小样本观察。",
             "reviewed_at": "2026-07-23T13:00:00+00:00",
             "settlement_basis": {
                 "policy": "latest_active_prematch_version",
@@ -224,6 +262,9 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("客队 +0.25 @0.86＝", text)
             self.assertIn("芬超主推：1场1胜0负0走", text)
             self.assertIn("累计主推：1场1胜0负0走", text)
+            self.assertIn("本场关键：临场低节奏判断得到验证；保留小样本观察。", text)
+            self.assertNotIn("赔率12", text)
+            self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
 

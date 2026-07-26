@@ -40,10 +40,11 @@ Read [references/prediction-framework.md](references/prediction-framework.md), [
 - Visual mode must use compact Markdown tables and probability bars to show match status, opening-to-current Asian handicap and totals movement, no-vig 1X2 probabilities, EV comparison, key fundamentals/lineups, recommendations, predicted score, and risks.
 - Visual mode must also show **exactly two ranked exact-score candidates**, a first-half panel, and a 3x3 HT/FT probability matrix. Show at most one first-half pick and **exactly two ranked HT/FT suggestions** whenever the model matrix is available.
 - For every valid pre-match or lineup-check prediction, rank the two most probable exact scores from the model score distribution. Label both `高方差参考（不计主推）`; never call them formal picks or include them in primary/all-formal ROI. If exact-score market odds are unavailable, show model probability without inventing odds or EV.
-- Always evaluate 0-0 in that same full score distribution. Show a separate `0-0核验` with its probability and overall rank even when it is outside the Top-2; if it truly ranks first or second, it must occupy that position. Never force it into the pair or filter it out. Follow `references/exact-score.md` and use the bundled deterministic ranker for a standard Poisson model.
+- Always evaluate and archive 0-0 in that same full score distribution. If it ranks first or second, let it appear naturally in the two displayed exact-score candidates. Otherwise keep the audit internal and do not print a separate 0-0 row unless the user explicitly asks for that diagnostic. Odds such as 7.00 never trigger display by themselves. Never force 0-0 into the pair or filter it out of the calculation. Follow `references/exact-score.md` and use the bundled deterministic ranker for a standard Poisson model.
+- When a non-Top-2 0-0 audit is hidden, do not repeat its probability, rank, odds, or EV inside recommendation, notes, risks, visual captions, or WeChat copy. Keep those values only in the machine-readable archive.
 - Classify each HT/FT suggestion as either `正式推荐` or `观察候选（未达标）`. A formal recommendation must pass the thresholds in `references/half-time-full-time.md`. If fewer than two outcomes pass, fill the remaining slots with the highest-EV outcomes and label them as observation candidates. Never hide the two ranked suggestions behind a generic “观望” result, and never describe a negative-EV candidate as positive value.
 - For both HT/FT suggestions show selection, current odds, model probability, no-vig market probability, model-versus-market edge, EV, rank, and status. When current odds are unavailable, rank by model probability and label the suggestion `赔率缺失，不可执行`; never invent odds or EV.
-- Concise mode: return only the best direction, probability, EV, exactly two ranked exact scores, the one-line 0-0 audit, and one short rationale.
+- Concise mode: return only the best direction, probability, EV, exactly two ranked exact scores, and one short rationale. Do not add a separate 0-0 audit unless explicitly requested.
 - If some visual fields are unavailable, keep the section visible and mark them `数据未取得` or `待公布`; never invent values to fill the layout.
 - Use current pre-match odds for final calculations and opening odds only for movement analysis.
 - Handle quarter lines with their real half-win/half-loss settlement; do not reduce them to a binary outcome.
@@ -79,7 +80,7 @@ The archive command is idempotent for identical predictions. If it returns `dupl
 
 After every successful initial archive, run `wechat_formatter.py --base-dir <workspace> --match-id <id> --kind initial`. Append its exact plain-text output under `微信可复制版`, after the visual analysis. This copy block is mandatory even when automatic WeChat delivery is disabled; do not replace it with Markdown tables, HTML, or the visualization.
 
-For every `微信可复制版` block, show the formatter output as ordinary wrapped text, not a fenced code block. Keep the full recommendation, notes, risks, and learning text; never present an ellipsis-truncated field as a complete message.
+For every `微信可复制版` block, show the formatter output as ordinary wrapped text, not a fenced code block. Keep the full recommendation, notes, risks, and learning text except for an internally retained non-Top-2 0-0 diagnostic; never present an ellipsis-truncated field as a complete message.
 
 ## Automatic lineup-time reanalysis in Codex
 

@@ -28,6 +28,12 @@ RESULT_LABELS = {
 }
 HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
 FORBIDDEN_MARKUP = re.compile(r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I)
+ZERO_ZERO_REFERENCE = re.compile(r"0-0", re.IGNORECASE)
+ZERO_ZERO_CONTINUATION = re.compile(
+    r"^\s*(?:(?:其|该项|对应)\s*)?"
+    r"(?:概率|总?排名|全分布|赔率|EV|期望值|未进前二|进入前二|未进\s*Top-?2)",
+    re.IGNORECASE,
+)
 
 
 def clean_text(value: Any, limit: int | None = None) -> str:
@@ -129,16 +135,23 @@ def exact_scores(version: dict[str, Any]) -> str:
     return "、".join(f"{pick.get('score')}（{percentage(pick.get('probability'))}）" for pick in picks)
 
 
-def zero_zero_text(version: dict[str, Any]) -> str:
+def display_text(version: dict[str, Any], field: str) -> str:
+    value = clean_text(version.get(field))
     audit = version.get("zero_zero_audit")
-    if not isinstance(audit, dict):
-        return "未记录"
-    rank = audit.get("rank")
-    status = "进入前二" if audit.get("included_in_top2") else "未进前二"
-    result = f"{percentage(audit.get('probability'))}｜总排名第{rank}｜{status}"
-    if audit.get("odds") is not None:
-        result += f"｜赔率{float(audit['odds']):g}｜EV {percentage(audit.get('ev'))}"
-    return result
+    if not isinstance(audit, dict) or audit.get("included_in_top2"):
+        return value
+    clauses = re.split(r"(?<=[。；！？!?])", value)
+    hidden = {index for index, clause in enumerate(clauses) if ZERO_ZERO_REFERENCE.search(clause)}
+    for index in tuple(hidden):
+        next_index = index + 1
+        while next_index < len(clauses) and ZERO_ZERO_CONTINUATION.search(clauses[next_index]):
+            hidden.add(next_index)
+            next_index += 1
+        previous_index = index - 1
+        while previous_index >= 0 and ZERO_ZERO_CONTINUATION.search(clauses[previous_index]):
+            hidden.add(previous_index)
+            previous_index -= 1
+    return "".join(clause for index, clause in enumerate(clauses) if index not in hidden).strip() or "无"
 
 
 def primary_line(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -193,9 +206,8 @@ def render_initial(record: dict[str, Any]) -> str:
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
-        f"0-0核验：{zero_zero_text(version)}",
-        f"核心判断：{clean_text(version.get('recommendation'))}",
-        f"风险：{clean_text(version.get('notes'))}",
+        f"核心判断：{display_text(version, 'recommendation')}",
+        f"风险：{display_text(version, 'notes')}",
         "仅供数据分析参考",
     ])
 
@@ -228,9 +240,8 @@ def render_lineup(record: dict[str, Any]) -> str:
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
-        f"0-0核验：{zero_zero_text(version)}",
-        f"临场判断：{clean_text(version.get('recommendation'))}",
-        f"风险：{clean_text(version.get('notes'))}",
+        f"临场判断：{display_text(version, 'recommendation')}",
+        f"风险：{display_text(version, 'notes')}",
         "仅供数据分析参考",
     ])
 
@@ -287,8 +298,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         primary_result_line,
         f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩）",
         f"比分参考：{exact_scores(record)}｜命中排名：{record.get('exact_score_hit_rank') or '未命中'}",
-        f"0-0核验：{zero_zero_text(record)}",
-        f"本场关键：{clean_text(record.get('key_learning'))}",
+        f"本场关键：{display_text(record, 'key_learning')}",
         f"{league_key}主推：{performance_text(league.get('primary'))}",
         f"累计主推：{performance_text(stats.get('primary'))}",
         "复盘用于校准分析，不代表未来收益",
