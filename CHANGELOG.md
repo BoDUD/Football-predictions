@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.2.0] - 2026-07-28
+
+### Changed
+- Added the forward-only `stability-v1` primary policy: ordinary directions no longer require EV ≥ 8%, but every safe candidate must have positive EV and edge, medium/high data quality, a complete executable market, and market-specific evidence. The unique highest-confidence safe candidate becomes primary; no-bet remains valid when none is safe.
+- Retained the stricter EV ≥ 8%, edge ≥ 4pp, five-firm, and independent-evidence gate when the handicap and related European market move materially against a candidate.
+- Kept historical records immutable under `stability-v1`: prior observations are not promoted and old performance is not recalculated. Match 2912847 is documented only as a forward-rule audit example, not a backfill.
+- Expanded the formal candidate pool to goal ranges, both-teams-to-score, corner totals, and corner handicaps without giving handicap or totals automatic priority.
+- Added complete-market, data-quality, model-edge, bookmaker-depth, and independent-evidence gates for the new markets.
+- Added final-active-primary settlement, decimal/Hong Kong odds handling, corner-score review inputs, primary-only statistics, and plain-text WeChat formatting for every new market.
+- Persist reviewed no-primary matches as machine-readable learning samples while excluding them from record, stake, profit, accuracy, and ROI.
+
 ## [2.1.0] - 2026-07-22
 
 ### Changed

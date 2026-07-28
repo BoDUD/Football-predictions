@@ -88,9 +88,147 @@ class WeChatFormatterTests(unittest.TestCase):
             write_history(base, [base_record()])
             text = formatter.render(base, "42", "initial")
             self.assertTrue(text.startswith("【初盘分析｜42】\n"))
-            for field in ("赛事：芬超", "比赛：主队 vs 客队", "开赛：", "主推：小2.5 @0.92", "次选：", "比分参考："):
+            for field in ("赛事：芬超", "比赛：主队 vs 客队", "开赛：", "主推：小2.5 @0.92", "次选参考：", "比分参考："):
                 self.assertIn(field, text)
-            self.assertIn("0-0核验：12.0%｜总排名第4｜未进前二｜赔率12｜EV 44.0%", text)
+            self.assertNotIn("0-0核验：", text)
+            self.assertNotIn("0-0（12.0%）", text)
+            self.assert_plain(text)
+
+    def test_format_pick_supports_expanded_markets(self):
+        record = base_record()
+        cases = (
+            (
+                "goal_range",
+                {"selection": "2-3", "odds": 2.10},
+                "总进球2-3球 @2.10",
+            ),
+            (
+                "goal_range",
+                {"minimum_goals": 7, "maximum_goals": None, "odds": 6.50},
+                "总进球7+球 @6.50",
+            ),
+            (
+                "goal_range",
+                {"min_goals": 2, "max_goals": 3, "odds": 2.10},
+                "总进球2-3球 @2.10",
+            ),
+            (
+                "btts",
+                {"side": "yes", "odds": 1.80},
+                "双方进球-是 @1.80",
+            ),
+            (
+                "corner_total",
+                {"side": "over", "line": 10.5, "odds": 0.90},
+                "角球大10.5 @0.90",
+            ),
+            (
+                "corner_handicap",
+                {"side": "home", "line": -1.5, "odds": 0.95},
+                "主队角球-1.5 @0.95",
+            ),
+        )
+        for market, pick, expected in cases:
+            with self.subTest(market=market, pick=pick):
+                self.assertEqual(formatter.format_pick(market, pick, record), expected)
+
+    def test_initial_and_lineup_copy_include_expanded_market_picks(self):
+        record = base_record()
+        goal_range = {
+            "selection": "2-3",
+            "minimum_goals": 2,
+            "maximum_goals": 3,
+            "odds": 2.10,
+            "probability": 0.55,
+            "ev": 0.155,
+            "role": "primary",
+        }
+        record.update({
+            "goal_range_pick": dict(goal_range),
+            "btts_pick": {
+                "side": "yes",
+                "odds": 1.80,
+                "probability": 0.61,
+                "ev": 0.098,
+                "role": "secondary",
+            },
+            "corner_total_pick": {
+                "side": "over",
+                "line": 10.5,
+                "odds": 0.90,
+                "probability": 0.58,
+                "ev": 0.102,
+                "role": "secondary",
+            },
+            "primary_market": "goal_range",
+            "primary_pick": dict(goal_range),
+        })
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            initial_text = formatter.render(base, "42", "initial")
+            self.assertIn("主推：总进球2-3球 @2.10", initial_text)
+            self.assertIn(
+                "次选参考：客队 +0.25 @0.86、小2.5 @0.92、双方进球-是 @1.80、角球大10.5 @0.90"
+                "（不结算、不计战绩、不计金额）",
+                initial_text,
+            )
+            self.assert_plain(initial_text)
+
+            record["revisions"] = [{
+                key: record.get(key)
+                for key in (
+                    "analysis_stage", "recommendation", "notes", "predicted_score",
+                    "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
+                    "htft_picks", "goal_range_pick", "btts_pick", "corner_total_pick",
+                    "corner_handicap_pick", "primary_market", "primary_pick", "primary_change",
+                )
+            }]
+            corner_handicap = {
+                "side": "home",
+                "line": -1.5,
+                "odds": 0.95,
+                "probability": 0.62,
+                "ev": 0.209,
+                "role": "primary",
+            }
+            record.update({
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+                "corner_handicap_pick": dict(corner_handicap),
+                "primary_market": "corner_handicap",
+                "primary_pick": dict(corner_handicap),
+                "primary_change": {"status": "changed"},
+            })
+            write_history(base, [record])
+            lineup_text = formatter.render(base, "42", "lineup-check")
+            self.assertIn(
+                "主推变更：总进球2-3球 @2.10 → 主队角球-1.5 @0.95",
+                lineup_text,
+            )
+            self.assertIn("当前主推：主队角球-1.5 @0.95", lineup_text)
+            self.assert_plain(lineup_text)
+
+    def test_zero_zero_is_displayed_only_when_it_ranks_in_top_two(self):
+        record = base_record()
+        record["predicted_score"] = "0-0"
+        record["exact_score_picks"] = [
+            {"score": "0-0", "probability": 0.24, "rank": 1},
+            {"score": "1-0", "probability": 0.19, "rank": 2},
+        ]
+        record["zero_zero_audit"] = {
+            "score": "0-0",
+            "probability": 0.24,
+            "rank": 1,
+            "included_in_top2": True,
+            "status": "top_two",
+            "odds": 7.0,
+            "ev": 0.68,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn("比分参考：0-0（24.0%）、1-0（19.0%）", text)
+            self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
     def test_initial_copy_does_not_truncate_long_fields(self):
@@ -103,6 +241,19 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertIn(record["recommendation"], text)
             self.assertIn(record["notes"], text)
             self.assertNotIn("…", text)
+            self.assert_plain(text)
+
+    def test_hidden_zero_zero_audit_does_not_leak_through_user_facing_prose(self):
+        record = base_record()
+        record["recommendation"] = "小球方向更稳；0-0核验未进前二。赔率12，EV44%。低节奏判断保留。"
+        record["notes"] = "阵容仍有不确定性；概率12.0%，全分布第4。对应比分0-0。赔率12，EV44%。其他风险保留。"
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn("核心判断：小球方向更稳；低节奏判断保留。", text)
+            self.assertIn("风险：阵容仍有不确定性；其他风险保留。", text)
+            for hidden in ("0-0核验", "对应比分0-0", "概率12.0%", "赔率12", "EV44%"):
+                self.assertNotIn(hidden, text)
             self.assert_plain(text)
 
     def test_lineup_copy_states_change_and_active_primary(self):
@@ -129,6 +280,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertIn("主推变更：小2.5 @0.92 → 客队 +0.25 @0.86", text)
             self.assertIn("当前主推：客队 +0.25 @0.86", text)
             self.assertIn("检查时间：2026-07-23 19:02（日本时间）", text)
+            self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
     def test_no_primary_lineup_and_review_are_explicitly_not_settled(self):
@@ -185,6 +337,10 @@ class WeChatFormatterTests(unittest.TestCase):
             write_history(base, [record])
             review_text = formatter.render(base, "42", "review")
             self.assertIn("主推：无正式推荐（不结算、不计战绩）", review_text)
+            self.assertIn(
+                "学习归档：无主推观察样本（只用于规则与数据质量复核）",
+                review_text,
+            )
             self.assertNotIn("无正式推荐＝未结算", review_text)
             self.assert_plain(review_text)
 
@@ -199,7 +355,7 @@ class WeChatFormatterTests(unittest.TestCase):
             "total_result": "win",
             "primary_result": "win",
             "exact_score_hit_rank": 1,
-            "key_learning": "临场低节奏判断得到验证",
+            "key_learning": "临场低节奏判断得到验证；0-0全分布第4。赔率12，EV44%。保留小样本观察。",
             "reviewed_at": "2026-07-23T13:00:00+00:00",
             "settlement_basis": {
                 "policy": "latest_active_prematch_version",
@@ -220,10 +376,56 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertTrue(text.startswith("【赛后复盘｜芬超｜42】\n"))
             self.assertIn("结算依据：临场版最终有效推荐", text)
             self.assertIn("主推：小2.5 @0.92＝红", text)
-            self.assertIn("次选参考：客队 +0.25 @0.86（不结算、不计战绩）", text)
+            self.assertIn("次选参考：客队 +0.25 @0.86（不结算、不计战绩、不计金额）", text)
             self.assertNotIn("客队 +0.25 @0.86＝", text)
             self.assertIn("芬超主推：1场1胜0负0走", text)
             self.assertIn("累计主推：1场1胜0负0走", text)
+            self.assertIn("本场关键：临场低节奏判断得到验证；保留小样本观察。", text)
+            self.assertNotIn("赔率12", text)
+            self.assertNotIn("0-0核验：", text)
+            self.assert_plain(text)
+
+    def test_review_copy_lists_all_expanded_secondary_markets_without_results(self):
+        record = base_record()
+        record.update({
+            "status": "reviewed",
+            "half_time_score": "1-0",
+            "final_score": "2-1",
+            "primary_result": "win",
+            "key_learning": "多市场候选池按统一门槛筛选",
+            "reviewed_at": "2026-07-23T13:00:00+00:00",
+            "settlement_basis": {
+                "policy": "latest_active_prematch_version",
+                "analysis_stage": "initial",
+                "primary_market": "total",
+                "primary_pick": dict(record["primary_pick"]),
+                "formal_picks": {
+                    "asian": record["asian_pick"],
+                    "total": record["total_pick"],
+                    "half_time": None,
+                    "htft": [],
+                    "goal_range": {
+                        "selection": "2-3",
+                        "minimum_goals": 2,
+                        "maximum_goals": 3,
+                        "odds": 2.10,
+                    },
+                    "btts": {"side": "yes", "odds": 1.80},
+                    "corner_total": {"side": "over", "line": 10.5, "odds": 0.90},
+                    "corner_handicap": {"side": "home", "line": -1.5, "odds": 0.95},
+                },
+            },
+        })
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "review")
+            self.assertIn("总进球2-3球 @2.10", text)
+            self.assertIn("双方进球-是 @1.80", text)
+            self.assertIn("角球大10.5 @0.90", text)
+            self.assertIn("主队角球-1.5 @0.95", text)
+            self.assertIn("（不结算、不计战绩、不计金额）", text)
+            for market_text in ("总进球2-3球 @2.10", "双方进球-是 @1.80", "角球大10.5 @0.90", "主队角球-1.5 @0.95"):
+                self.assertNotIn(f"{market_text}＝", text)
             self.assert_plain(text)
 
 

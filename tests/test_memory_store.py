@@ -38,11 +38,13 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "fundamental_evidence": True,
         "chance_quality_evidence": True,
         "attack_configuration_evidence": True,
+        "corner_profile_evidence": True,
         "opponent_tail_risk_checked": True,
         "injury_evidence_status": "fresh",
         "primary_change_reason": "",
         "previous_primary_invalidated": False,
         "previous_primary_current_ev": None,
+        "previous_primary_current_confidence": None,
         "accept_worse_line": False,
         "primary_htft_edge_pp": None,
         "primary_htft_firm_count": None,
@@ -54,7 +56,8 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "asian_side": "home",
         "asian_line": -0.25,
         "asian_odds": 0.9,
-        "asian_probability": 0.55,
+        "asian_odds_format": None,
+        "asian_probability": 0.54,
         "asian_ev": 0.09,
         "asian_edge_pp": 4.5,
         "asian_firm_count": 8,
@@ -64,6 +67,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "total_side": "under",
         "total_line": 2.5,
         "total_odds": 0.9,
+        "total_odds_format": None,
         "total_probability": 0.55,
         "total_ev": 0.09,
         "total_edge_pp": 4.5,
@@ -73,12 +77,78 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "half_side": None,
         "half_line": None,
         "half_odds": None,
+        "half_odds_format": None,
         "half_probability": None,
         "half_ev": None,
         "half_edge_pp": None,
         "half_firm_count": None,
         "half_market_signal": "unknown",
         "htft_pick": None,
+        "htft_odds_format": None,
+        "goal_range_selection": None,
+        "goal_range_odds": None,
+        "goal_range_odds_format": None,
+        "goal_range_probability": None,
+        "goal_range_ev": None,
+        "goal_range_edge_pp": None,
+        "goal_range_firm_count": None,
+        "goal_range_market_signal": "unknown",
+        "goal_range_market_complete": False,
+        "goal_range_market_probability": 0.53,
+        "goal_range_market_source": "https://example.test/goal-range",
+        "goal_range_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "goal_range_price_basis": "consensus",
+        "btts_side": None,
+        "btts_odds": None,
+        "btts_odds_format": None,
+        "btts_probability": None,
+        "btts_ev": None,
+        "btts_edge_pp": None,
+        "btts_firm_count": None,
+        "btts_market_signal": "unknown",
+        "btts_market_complete": False,
+        "btts_market_probability": 0.52,
+        "btts_market_source": "https://example.test/btts",
+        "btts_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "btts_price_basis": "median",
+        "corner_total_side": None,
+        "corner_total_line": None,
+        "corner_total_odds": None,
+        "corner_total_odds_format": None,
+        "corner_total_probability": None,
+        "corner_total_ev": None,
+        "corner_total_edge_pp": None,
+        "corner_total_firm_count": None,
+        "corner_total_market_signal": "unknown",
+        "corner_total_market_complete": False,
+        "corner_total_market_probability": 0.515,
+        "corner_total_market_source": "https://example.test/corner-total",
+        "corner_total_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "corner_total_price_basis": "consensus",
+        "corner_total_full_win_probability": 0.56,
+        "corner_total_half_win_probability": 0.0,
+        "corner_total_push_probability": 0.0,
+        "corner_total_half_loss_probability": 0.0,
+        "corner_total_loss_probability": 0.44,
+        "corner_handicap_side": None,
+        "corner_handicap_line": None,
+        "corner_handicap_odds": None,
+        "corner_handicap_odds_format": None,
+        "corner_handicap_probability": None,
+        "corner_handicap_ev": None,
+        "corner_handicap_edge_pp": None,
+        "corner_handicap_firm_count": None,
+        "corner_handicap_market_signal": "unknown",
+        "corner_handicap_market_complete": False,
+        "corner_handicap_market_probability": 0.515,
+        "corner_handicap_market_source": "https://example.test/corner-handicap",
+        "corner_handicap_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "corner_handicap_price_basis": "median",
+        "corner_handicap_full_win_probability": 0.56,
+        "corner_handicap_half_win_probability": 0.0,
+        "corner_handicap_push_probability": 0.10,
+        "corner_handicap_half_loss_probability": 0.0,
+        "corner_handicap_loss_probability": 0.34,
         "force": False,
     }
     values.update(overrides)
@@ -229,6 +299,7 @@ class MemoryStoreTests(unittest.TestCase):
                     analysis_stage="lineup-check",
                     primary_market="asian",
                     asian_odds=0.95,
+                    asian_probability=0.60,
                     data_quality="high",
                     primary_change_reason="确认首发直接否定原大小球逻辑",
                     previous_primary_invalidated=True,
@@ -400,6 +471,16 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(league["primary"]["losses"], 1)
         self.assertEqual(league["primary_by_market"]["combined"]["matches"], 2)
         self.assertEqual(len(league["recent_learnings"]), 2)
+        self.assertEqual(
+            {item["learning_scope"] for item in league["recent_learnings"]},
+            {"primary"},
+        )
+        self.assertTrue(
+            all(
+                item["counts_toward_primary_record"]
+                for item in league["recent_learnings"]
+            )
+        )
 
         with tempfile.TemporaryDirectory() as base:
             path = memory_store.data_path(base)
@@ -425,6 +506,110 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(profile["decision"], "hold_weights_insufficient_league_sample")
             self.assertEqual(profile["active_weight_adjustments"], {})
             self.assertIn("按1个联赛归类", calibration["summary"])
+
+    def test_learning_scope_migration_backfills_old_records_without_regrading(self):
+        primary = reviewed_record(
+            "primary-learning",
+            total={
+                "side": "over",
+                "line": 2.5,
+                "odds": 0.9,
+                "ev": 0.08,
+                "role": "primary",
+            },
+            total_result="win",
+        )
+        primary.update({
+            "primary_market": "total",
+            "primary_pick": {
+                "market": "total",
+                "side": "over",
+                "line": 2.5,
+                "odds": 0.9,
+                "ev": 0.08,
+                "role": "primary",
+            },
+            "primary_result": "win",
+        })
+        no_primary = reviewed_record("no-primary-learning")
+        no_primary.update({
+            "primary_market": None,
+            "primary_pick": None,
+            "primary_result": None,
+            "settlement_basis": {
+                "policy": "latest_active_prematch_version",
+                "analysis_stage": "lineup-check",
+                "primary_market": None,
+                "primary_pick": None,
+                "formal_picks": {},
+            },
+        })
+        history = [primary, no_primary]
+        with tempfile.TemporaryDirectory() as base:
+            path = memory_store.data_path(base)
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(history, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            revisions_before = {
+                record["match_id"]: record["revisions"] for record in history
+            }
+            migrated = memory_store.cmd_migrate_learning_scopes(
+                SimpleNamespace(base_dir=base, write=True)
+            )
+
+            self.assertEqual(
+                migrated["changed_match_ids"],
+                ["primary-learning", "no-primary-learning"],
+            )
+            self.assertEqual(migrated["missing_learning_match_ids"], [])
+            self.assertEqual(migrated["stats"]["reviewed_matches"], 2)
+            self.assertEqual(migrated["stats"]["primary"]["matches"], 1)
+            self.assertEqual(
+                migrated["stats"]["learning_samples"],
+                {
+                    "total": 2,
+                    "primary": 1,
+                    "no_primary_observation": 1,
+                },
+            )
+            saved = memory_store.load_history(path)
+            by_id = {record["match_id"]: record for record in saved}
+            self.assertEqual(
+                by_id["primary-learning"]["learning_scope"], "primary"
+            )
+            self.assertTrue(
+                by_id["primary-learning"]["counts_toward_primary_record"]
+            )
+            self.assertEqual(
+                by_id["no-primary-learning"]["learning_scope"],
+                "no_primary_observation",
+            )
+            self.assertFalse(
+                by_id["no-primary-learning"]["counts_toward_primary_record"]
+            )
+            self.assertEqual(
+                {record["match_id"]: record["revisions"] for record in saved},
+                revisions_before,
+            )
+            calibration = memory_store.cmd_calibrate(
+                SimpleNamespace(
+                    base_dir=base,
+                    guardrail=None,
+                    minimum_graded=20,
+                    write=False,
+                )
+            )["calibration"]
+            self.assertEqual(calibration["primary_record_matches"], 1)
+            self.assertEqual(calibration["no_primary_reviewed_matches"], 1)
+            self.assertEqual(
+                calibration["learning_samples"]["no_primary_observation"], 1
+            )
+            self.assertIn(
+                "无主推1场不计战绩并作为学习样本",
+                calibration["summary"],
+            )
 
     def test_lineup_check_is_not_due_before_t_minus_30(self):
         with tempfile.TemporaryDirectory() as base:
@@ -500,16 +685,27 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("收益-0.15u，ROI -2.50%", calibration["summary"])
             self.assertIn("主推分市场统计6项3胜3负0走", calibration["summary"])
             self.assertIn("次推仅作赛前参考，不结算、不计命中率或金额", calibration["summary"])
-            self.assertTrue(all("主推或全部正式方向" not in item for item in calibration["guardrails"]))
             self.assertTrue(
                 any(
-                    "所有市场主推必须满足EV>=8%" in item
+                    item.startswith("stability-v1")
                     for item in calibration["guardrails"]
                 )
             )
             self.assertTrue(
+                any("唯一rank=1可作主推" in item for item in calibration["guardrails"])
+            )
+            self.assertTrue(
+                any("新方向至少高5分" in item for item in calibration["guardrails"])
+            )
+            self.assertFalse(
                 any(
-                    "当前EV至少比旧方向高4pp" in item
+                    "所有正式方向（主推和正式次推）都必须满足EV>=8%" in item
+                    for item in calibration["guardrails"]
+                )
+            )
+            self.assertFalse(
+                any(
+                    "亚洲盘和大小球正式方向必须满足EV>=8%" in item
                     for item in calibration["guardrails"]
                 )
             )
@@ -539,22 +735,22 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_small_sample_gate_boundaries_and_no_primary(self):
         with tempfile.TemporaryDirectory() as base:
-            with self.assertRaisesRegex(ValueError, "total EV must be at least 0.08"):
+            with self.assertRaisesRegex(ValueError, "total EV must be greater than 0"):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        match_id="ev-low",
+                        match_id="ev-zero",
                         asian_side=None,
-                        total_ev=0.079999,
+                        total_ev=0.0,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "edge .* must be at least 4"):
+            with self.assertRaisesRegex(ValueError, "edge .* greater than 0"):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        match_id="edge-low",
+                        match_id="edge-zero",
                         asian_side=None,
-                        total_edge_pp=3.999,
+                        total_edge_pp=0.0,
                     )
                 )
             with self.assertRaisesRegex(ValueError, "medium or high"):
@@ -567,17 +763,25 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
-            boundary = memory_store.cmd_record(
+            sub_eight = memory_store.cmd_record(
                 record_args(
                     base,
-                    match_id="boundary",
+                    match_id="sub-eight",
                     asian_side=None,
-                    total_ev=0.08,
-                    total_edge_pp=4.0,
+                    total_ev=0.03,
+                    total_edge_pp=1.5,
                 )
             )["record"]
-            self.assertEqual(boundary["primary_pick"]["ev"], 0.08)
-            self.assertEqual(boundary["primary_pick"]["edge_pp"], 4.0)
+            self.assertEqual(sub_eight["primary_pick"]["ev"], 0.03)
+            self.assertEqual(sub_eight["primary_pick"]["edge_pp"], 1.5)
+            self.assertEqual(sub_eight["primary_pick"]["confidence_rank"], 1)
+            self.assertEqual(
+                sub_eight["primary_selection_basis"],
+                "highest_stability_adjusted_confidence",
+            )
+            self.assertEqual(
+                sub_eight["confidence_ranking_version"], "stability-v1"
+            )
 
             no_pick = memory_store.cmd_record(
                 record_args(
@@ -599,15 +803,17 @@ class MemoryStoreTests(unittest.TestCase):
                 "half_line": 1.0,
                 "half_odds": 0.9,
                 "half_probability": 0.55,
-                "half_edge_pp": 4.0,
+                "half_edge_pp": 1.0,
+                "half_market_signal": "aligned",
+                "half_firm_count": 5,
                 "primary_market": "half_time",
             }
-            with self.assertRaisesRegex(ValueError, "half_time primary EV"):
+            with self.assertRaisesRegex(ValueError, "half_time EV must be greater than 0"):
                 memory_store.cmd_record(
                     record_args(
                         base,
                         match_id="half-low",
-                        half_ev=0.079,
+                        half_ev=0.0,
                         **half_overrides,
                     )
                 )
@@ -615,25 +821,26 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(
                     base,
                     match_id="half-boundary",
-                    half_ev=0.08,
+                    half_ev=0.025,
                     **half_overrides,
                 )
             )["record"]
             self.assertEqual(half["primary_market"], "half_time")
+            self.assertEqual(half["primary_pick"]["confidence_rank"], 1)
 
             htft_overrides = {
                 "asian_side": None,
                 "total_side": None,
-                "htft_pick": ["DD:3.40:0.31:0.08"],
+                "htft_pick": ["DD:3.40:0.31:0.054"],
                 "primary_market": "htft",
                 "primary_htft_firm_count": 5,
             }
-            with self.assertRaisesRegex(ValueError, "htft primary .* edge"):
+            with self.assertRaisesRegex(ValueError, "htft .* edge .* greater than 0"):
                 memory_store.cmd_record(
                     record_args(
                         base,
                         match_id="htft-edge-low",
-                        primary_htft_edge_pp=3.9,
+                        primary_htft_edge_pp=0.0,
                         **htft_overrides,
                     )
                 )
@@ -641,14 +848,79 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(
                     base,
                     match_id="htft-boundary",
-                    primary_htft_edge_pp=4.0,
+                    primary_htft_edge_pp=1.2,
                     **htft_overrides,
                 )
             )["record"]
             self.assertEqual(htft["primary_market"], "htft")
 
+    def test_stability_ranking_beats_raw_ev_and_rejects_non_rank_one_primary(self):
+        candidates = {
+            "asian_probability": 0.48,
+            "asian_ev": 0.12,
+            "asian_edge_pp": 5.0,
+            "asian_firm_count": 1,
+            "asian_market_signal": "neutral",
+            "total_probability": 0.65,
+            "total_ev": 0.03,
+            "total_edge_pp": 1.5,
+            "total_firm_count": 8,
+            "total_market_signal": "aligned",
+        }
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "unique stability-v1 confidence rank 1"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="wrong-rank",
+                        primary_market="asian",
+                        **candidates,
+                    )
+                )
+
+            accepted = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="right-rank",
+                    primary_market="total",
+                    **candidates,
+                )
+            )["record"]
+            self.assertGreater(
+                accepted["asian_pick"]["ev"], accepted["total_pick"]["ev"]
+            )
+            self.assertEqual(accepted["total_pick"]["confidence_rank"], 1)
+            self.assertEqual(accepted["asian_pick"]["confidence_rank"], 2)
+            self.assertEqual(accepted["primary_market"], "total")
+            self.assertEqual(
+                accepted["primary_pick"]["confidence_components"]["safety_source"],
+                "model_probability_fallback",
+            )
+
     def test_against_deep_favorite_and_total_evidence_gates(self):
         with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "adverse-signal EV must be at least 0.08"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="against-ev",
+                        asian_side=None,
+                        total_market_signal="against",
+                        total_ev=0.079,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "adverse-signal .* at least 4"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="against-edge",
+                        asian_side=None,
+                        total_market_signal="against",
+                        total_edge_pp=3.9,
+                    )
+                )
             with self.assertRaisesRegex(ValueError, "bookmaker count must be at least 5"):
                 memory_store.cmd_record(
                     record_args(
@@ -704,6 +976,8 @@ class MemoryStoreTests(unittest.TestCase):
                         base,
                         match_id="deep-quality",
                         chance_quality_evidence=False,
+                        fundamental_evidence=False,
+                        attack_configuration_evidence=False,
                         **deep_defaults,
                     )
                 )
@@ -730,6 +1004,18 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(base, match_id="deep-pass", **deep_defaults)
             )["record"]
             self.assertTrue(deep["primary_pick"]["cover_distribution_validated"])
+            deep_consensus = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="deep-consensus-pass",
+                    asian_ev=0.03,
+                    asian_edge_pp=1.5,
+                    chance_quality_evidence=False,
+                    **deep_defaults,
+                )
+            )["record"]
+            self.assertEqual(deep_consensus["primary_pick"]["confidence_rank"], 1)
+            self.assertLess(deep_consensus["primary_pick"]["ev"], 0.08)
             underdog = memory_store.cmd_record(
                 record_args(
                     base,
@@ -750,18 +1036,20 @@ class MemoryStoreTests(unittest.TestCase):
             changed_args = {
                 "analysis_stage": "lineup-check",
                 "primary_market": "asian",
+                "total_side": None,
                 "data_quality": "high",
                 "primary_change_reason": "确认首发直接证伪原大小球逻辑",
                 "previous_primary_current_ev": 0.05,
             }
-            with self.assertRaisesRegex(ValueError, "previous-primary-invalidated"):
+            with self.assertRaisesRegex(
+                ValueError, "previous-primary-current-confidence"
+            ):
                 memory_store.cmd_record(record_args(base, **changed_args))
-            with self.assertRaisesRegex(ValueError, "at least 4 percentage points"):
+            with self.assertRaisesRegex(ValueError, "at least 5 points"):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        previous_primary_invalidated=True,
-                        asian_ev=0.089,
+                        previous_primary_current_confidence=72.75,
                         **changed_args,
                     )
                 )
@@ -770,15 +1058,39 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(
                     base,
                     previous_primary_invalidated=True,
-                    asian_ev=0.09,
+                    asian_ev=0.03,
                     **changed_args,
                 )
             )["record"]
             self.assertEqual(changed["primary_change"]["status"], "changed")
             self.assertEqual(changed["primary_change"]["decision"], "strict_replacement")
-            self.assertAlmostEqual(changed["primary_change"]["ev_improvement"], 0.04)
+            self.assertAlmostEqual(changed["primary_change"]["ev_improvement"], -0.02)
+            self.assertIsNone(
+                changed["primary_change"]["confidence_improvement"]
+            )
+            self.assertTrue(changed["primary_change"]["previous_invalidated"])
             self.assertTrue(changed["primary_change"]["guardrail_passed"])
             self.assertEqual(changed["revisions"][-1]["primary_market"], "total")
+
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(base, asian_side=None, primary_market="total")
+            )
+            improved = memory_store.cmd_record(
+                record_args(
+                    base,
+                    analysis_stage="lineup-check",
+                    primary_market="asian",
+                    total_side=None,
+                    data_quality="high",
+                    primary_change_reason="新方向综合稳定性显著提升",
+                    previous_primary_current_confidence=60.0,
+                )
+            )["record"]
+            self.assertGreaterEqual(
+                improved["primary_change"]["confidence_improvement"], 5.0
+            )
+            self.assertFalse(improved["primary_change"]["previous_invalidated"])
 
         with tempfile.TemporaryDirectory() as base:
             memory_store.cmd_record(
@@ -816,6 +1128,32 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(reviewed["stats"]["reviewed_matches"], 1)
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            self.assertEqual(
+                reviewed["record"]["learning_scope"],
+                "no_primary_observation",
+            )
+            self.assertFalse(
+                reviewed["record"]["counts_toward_primary_record"]
+            )
+            self.assertEqual(
+                reviewed["record"]["learning_sample"]["scope"],
+                "no_primary_observation",
+            )
+            self.assertEqual(reviewed["stats"]["primary_record_matches"], 0)
+            self.assertEqual(
+                reviewed["stats"]["no_primary_reviewed_matches"], 1
+            )
+            self.assertEqual(
+                reviewed["stats"]["learning_samples"],
+                {
+                    "total": 1,
+                    "primary": 0,
+                    "no_primary_observation": 1,
+                },
+            )
+            self.assertEqual(reviewed["stats"]["primary"]["stake_units"], 0)
+            self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
+            self.assertIsNone(reviewed["stats"]["primary"]["roi"])
 
         with tempfile.TemporaryDirectory() as base:
             memory_store.cmd_record(
@@ -884,6 +1222,813 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertTrue(accepted["primary_change"]["worse_line"])
             self.assertEqual(accepted["revisions"][-1]["primary_pick"]["line"], -0.75)
+
+    def test_new_formal_market_guardrails_and_complete_odds(self):
+        goal = {
+            "asian_side": None,
+            "total_side": None,
+            "primary_market": "goal_range",
+            "goal_range_selection": "2-3",
+            "goal_range_odds": 1.90,
+            "goal_range_odds_format": "decimal",
+            "goal_range_probability": 0.58,
+            "goal_range_ev": 0.102,
+            "goal_range_edge_pp": 5.0,
+            "goal_range_firm_count": 4,
+            "goal_range_market_signal": "aligned",
+            "goal_range_market_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            incomplete = dict(goal)
+            incomplete["goal_range_market_complete"] = False
+            with self.assertRaisesRegex(ValueError, "market_complete=true"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="goal-incomplete", **incomplete)
+                )
+            missing_format = dict(goal)
+            missing_format["goal_range_odds_format"] = None
+            with self.assertRaisesRegex(ValueError, "explicit odds_format"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="goal-format", **missing_format)
+                )
+            missing_source = dict(goal)
+            missing_source["goal_range_market_source"] = ""
+            with self.assertRaisesRegex(ValueError, "market_source is required"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="goal-source", **missing_source)
+                )
+            naive_time = dict(goal)
+            naive_time["goal_range_market_collected_at"] = "2026-07-21T19:00:00"
+            with self.assertRaisesRegex(ValueError, "datetime with timezone"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="goal-timezone", **naive_time)
+                )
+            with self.assertRaisesRegex(ValueError, "EV must be greater than 0"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="goal-ev-zero",
+                        goal_range_odds=2.0,
+                        goal_range_probability=0.50,
+                        goal_range_ev=0.0,
+                        goal_range_edge_pp=1.0,
+                        goal_range_market_probability=0.49,
+                        **{
+                            key: value
+                            for key, value in goal.items()
+                            if key
+                            not in {
+                                "goal_range_odds",
+                                "goal_range_probability",
+                                "goal_range_ev",
+                                "goal_range_edge_pp",
+                            }
+                        },
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "edge .* greater than 0"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="goal-edge-zero",
+                        goal_range_edge_pp=0.0,
+                        goal_range_market_probability=0.58,
+                        **{
+                            key: value
+                            for key, value in goal.items()
+                            if key != "goal_range_edge_pp"
+                        },
+                    )
+                )
+            sub_eight_goal = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="goal-sub-eight",
+                    goal_range_probability=0.54,
+                    goal_range_ev=0.026,
+                    goal_range_edge_pp=2.0,
+                    goal_range_market_probability=0.52,
+                    **{
+                        key: value
+                        for key, value in goal.items()
+                        if key
+                        not in {
+                            "goal_range_probability",
+                            "goal_range_ev",
+                            "goal_range_edge_pp",
+                        }
+                    },
+                )
+            )["record"]
+            self.assertEqual(sub_eight_goal["primary_pick"]["confidence_rank"], 1)
+            self.assertLess(sub_eight_goal["primary_pick"]["ev"], 0.08)
+            with self.assertRaisesRegex(ValueError, "medium or high"):
+                memory_store.cmd_record(
+                    record_args(
+                        base, match_id="goal-quality", data_quality="low", **goal
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "attacking-configuration"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="goal-evidence",
+                        lineup_confirmed=False,
+                        chance_quality_evidence=False,
+                        attack_configuration_evidence=True,
+                        **goal,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "Stale injury evidence"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="goal-stale-injury",
+                        injury_evidence_status="stale_conflict",
+                        **goal,
+                    )
+                )
+
+            created = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="goal-ok",
+                    btts_side="yes",
+                    btts_odds=1.95,
+                    btts_odds_format="decimal",
+                    btts_probability=0.57,
+                    btts_ev=0.1115,
+                    btts_edge_pp=5.0,
+                    btts_firm_count=4,
+                    btts_market_signal="neutral",
+                    btts_market_complete=True,
+                    **goal,
+                )
+            )["record"]
+            self.assertEqual(created["primary_market"], "goal_range")
+            self.assertEqual(created["primary_pick"]["selection"], "2-3")
+            self.assertEqual(created["primary_pick"]["odds_format"], "decimal")
+            self.assertTrue(created["primary_pick"]["market_complete"])
+            self.assertEqual(created["primary_pick"]["market_probability"], 0.53)
+            self.assertEqual(
+                created["primary_pick"]["market_collected_at"],
+                "2026-07-21T19:00:00+09:00",
+            )
+            self.assertEqual(created["primary_pick"]["price_basis"], "consensus")
+            self.assertEqual(created["goal_range_pick"]["role"], "primary")
+            self.assertEqual(created["btts_pick"]["role"], "secondary")
+            self.assertTrue(created["btts_pick"]["market_complete"])
+            self.assertEqual(
+                sum(pick["role"] == "primary" for _, pick in memory_store.formal_picks(created)),
+                1,
+            )
+
+            hong_kong = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="btts-hk",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="btts",
+                    btts_side="yes",
+                    btts_odds=0.95,
+                    btts_odds_format="hong_kong",
+                    btts_probability=0.57,
+                    btts_ev=0.1115,
+                    btts_edge_pp=5.0,
+                    btts_firm_count=4,
+                    btts_market_signal="aligned",
+                    btts_market_complete=True,
+                )
+            )["record"]
+            self.assertEqual(
+                hong_kong["primary_pick"]["odds_format"], "hong_kong"
+            )
+            with self.assertRaisesRegex(ValueError, "EV does not match"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="btts-hk-fake-ev",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="btts",
+                        btts_side="yes",
+                        btts_odds=0.95,
+                        btts_odds_format="hong_kong",
+                        btts_probability=0.57,
+                        btts_ev=0.20,
+                        btts_edge_pp=5.0,
+                        btts_firm_count=4,
+                        btts_market_signal="aligned",
+                        btts_market_complete=True,
+                    )
+                )
+
+        corner = {
+            "asian_side": None,
+            "total_side": None,
+            "primary_market": "corner_total",
+            "corner_total_side": "over",
+            "corner_total_line": 9.5,
+            "corner_total_odds": 1.0,
+            "corner_total_odds_format": "hong_kong",
+            "corner_total_probability": 0.56,
+            "corner_total_ev": 0.12,
+            "corner_total_edge_pp": 4.5,
+            "corner_total_firm_count": 3,
+            "corner_total_market_signal": "aligned",
+            "corner_total_market_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "line 9.5 cannot produce settlement states: half_win"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-half-line-state",
+                        corner_total_full_win_probability=0.55,
+                        corner_total_half_win_probability=0.01,
+                        **corner,
+                    )
+                )
+            with self.assertRaisesRegex(
+                ValueError, "line 10 cannot produce settlement states: half_loss"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-integer-state",
+                        corner_total_line=10.0,
+                        corner_total_half_loss_probability=0.01,
+                        corner_total_loss_probability=0.43,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key != "corner_total_line"
+                        },
+                    )
+                )
+            with self.assertRaisesRegex(
+                ValueError, "line 10.75 cannot produce settlement states: push"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-quarter-state",
+                        corner_total_line=10.75,
+                        corner_total_push_probability=0.01,
+                        corner_total_loss_probability=0.43,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key != "corner_total_line"
+                        },
+                    )
+                )
+            missing_distribution = dict(corner)
+            missing_distribution["corner_total_full_win_probability"] = None
+            with self.assertRaisesRegex(ValueError, "full_win is required"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-distribution",
+                        **missing_distribution,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "probabilities must sum to 1"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-distribution-sum",
+                        corner_total_loss_probability=0.31,
+                        **corner,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "EV does not match"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-fake-ev",
+                        corner_total_ev=0.20,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key != "corner_total_ev"
+                        },
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "corner_total EV must be greater than 0"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-ev-zero",
+                        corner_total_odds=0.7857142857,
+                        corner_total_ev=0.0,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key
+                            not in {
+                                "corner_total_odds",
+                                "corner_total_ev",
+                            }
+                        },
+                    )
+                )
+            sub_eight_corner = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="corner-sub-eight",
+                    corner_total_odds=0.8,
+                    corner_total_ev=0.008,
+                    **{
+                        key: value
+                        for key, value in corner.items()
+                        if key not in {"corner_total_odds", "corner_total_ev"}
+                    },
+                )
+            )["record"]
+            self.assertLess(sub_eight_corner["primary_pick"]["ev"], 0.08)
+            self.assertEqual(
+                sub_eight_corner["primary_pick"]["confidence_rank"], 1
+            )
+            with self.assertRaisesRegex(ValueError, "corner-profile evidence"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-evidence",
+                        corner_profile_evidence=False,
+                        **corner,
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "bookmaker count must be at least 3"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-firms",
+                        corner_total_firm_count=2,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key != "corner_total_firm_count"
+                        },
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "adverse-signal .* at least 5"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-against",
+                        corner_total_market_signal="against",
+                        corner_total_firm_count=4,
+                        **{
+                            key: value
+                            for key, value in corner.items()
+                            if key not in {
+                                "corner_total_market_signal",
+                                "corner_total_firm_count",
+                            }
+                        },
+                    )
+                )
+            accepted = memory_store.cmd_record(
+                record_args(base, match_id="corner-ok", **corner)
+            )["record"]
+            self.assertEqual(accepted["primary_pick"]["line"], 9.5)
+            self.assertTrue(accepted["primary_pick"]["market_complete"])
+
+    def test_new_market_settlement_stats_and_corner_score_requirement(self):
+        def review(base, match_id, home, away, **extra):
+            values = {
+                "base_dir": base,
+                "verified_finished": True,
+                "match_id": match_id,
+                "home_score": home,
+                "away_score": away,
+                "half_home_score": None,
+                "half_away_score": None,
+                "home_corners": None,
+                "away_corners": None,
+                "key_learning": "验证新市场结算",
+            }
+            values.update(extra)
+            return memory_store.cmd_review(SimpleNamespace(**values))
+
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="goal",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="goal_range",
+                    goal_range_selection="2-3",
+                    goal_range_odds=1.90,
+                    goal_range_odds_format="decimal",
+                    goal_range_probability=0.58,
+                    goal_range_ev=0.102,
+                    goal_range_edge_pp=5.0,
+                    goal_range_firm_count=4,
+                    goal_range_market_signal="aligned",
+                    goal_range_market_complete=True,
+                    btts_side="yes",
+                    btts_odds=1.95,
+                    btts_odds_format="decimal",
+                    btts_probability=0.57,
+                    btts_ev=0.1115,
+                    btts_edge_pp=5.0,
+                    btts_firm_count=4,
+                    btts_market_signal="aligned",
+                    btts_market_complete=True,
+                )
+            )
+            goal_review = review(base, "goal", 1, 2)
+            self.assertEqual(goal_review["record"]["primary_result"], "win")
+            self.assertEqual(
+                goal_review["record"]["settlement_basis"]["formal_picks"][
+                    "goal_range"
+                ]["selection"],
+                "2-3",
+            )
+            self.assertIsNone(goal_review["record"]["btts_result"])
+            self.assertEqual(goal_review["stats"]["primary"]["profit_units"], 0.9)
+            self.assertEqual(
+                goal_review["stats"]["primary_by_market"]["btts"]["matches"], 0
+            )
+
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="btts",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="btts",
+                    btts_side="no",
+                    btts_odds=2.10,
+                    btts_odds_format="decimal",
+                    btts_probability=0.54,
+                    btts_ev=0.134,
+                    btts_edge_pp=5.0,
+                    btts_market_probability=0.49,
+                    btts_firm_count=4,
+                    btts_market_signal="neutral",
+                    btts_market_complete=True,
+                )
+            )
+            self.assertEqual(review(base, "btts", 2, 0)["record"]["btts_result"], "win")
+
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="corner-total",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="corner_total",
+                    corner_total_side="over",
+                    corner_total_line=10.75,
+                    corner_total_odds=1.20,
+                    corner_total_odds_format="hong_kong",
+                    corner_total_probability=0.56,
+                    corner_total_ev=0.186,
+                    corner_total_edge_pp=4.5,
+                    corner_total_firm_count=3,
+                    corner_total_market_signal="aligned",
+                    corner_total_market_complete=True,
+                    corner_total_full_win_probability=0.45,
+                    corner_total_half_win_probability=0.11,
+                    corner_total_push_probability=0.0,
+                    corner_total_half_loss_probability=0.04,
+                    corner_total_loss_probability=0.40,
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "corner primary requires verified"):
+                review(base, "corner-total", 1, 0)
+            pending = memory_store.find_record(
+                memory_store.load_history(memory_store.data_path(base)),
+                "corner-total",
+            )
+            self.assertEqual(pending["status"], "pending")
+            corner_total_review = review(
+                base,
+                "corner-total",
+                1,
+                0,
+                home_corners=6,
+                away_corners=5,
+            )
+            self.assertEqual(
+                corner_total_review["record"]["corner_total_result"], "half_win"
+            )
+            self.assertEqual(corner_total_review["record"]["corner_score"], "6-5")
+            self.assertEqual(
+                corner_total_review["record"]["primary_pick"][
+                    "settlement_probabilities"
+                ]["half_win"],
+                0.11,
+            )
+
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="corner-handicap",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="corner_handicap",
+                    corner_handicap_side="home",
+                    corner_handicap_line=-2.0,
+                    corner_handicap_odds=1.95,
+                    corner_handicap_odds_format="decimal",
+                    corner_handicap_probability=0.56,
+                    corner_handicap_ev=0.192,
+                    corner_handicap_edge_pp=4.5,
+                    corner_handicap_firm_count=3,
+                    corner_handicap_market_signal="aligned",
+                    corner_handicap_market_complete=True,
+                )
+            )
+            corner_handicap_review = review(
+                base,
+                "corner-handicap",
+                0,
+                0,
+                home_corners=7,
+                away_corners=5,
+            )
+            self.assertEqual(
+                corner_handicap_review["record"]["corner_handicap_result"], "push"
+            )
+
+            stats = corner_handicap_review["stats"]
+            self.assertEqual(stats["primary"]["matches"], 4)
+            self.assertEqual(stats["primary"]["profit_units"], 2.6)
+            self.assertEqual(stats["primary"]["roi"], 0.65)
+            self.assertEqual(stats["primary_by_market"]["goal_range"]["matches"], 1)
+            self.assertEqual(stats["primary_by_market"]["btts"]["matches"], 1)
+            self.assertEqual(stats["primary_by_market"]["corner_total"]["matches"], 1)
+            self.assertEqual(
+                stats["primary_by_market"]["corner_handicap"]["matches"], 1
+            )
+            self.assertEqual(stats["all_formal"]["btts"]["matches"], 1)
+            calibration = memory_store.cmd_calibrate(
+                SimpleNamespace(
+                    base_dir=base,
+                    guardrail=None,
+                    minimum_graded=20,
+                    write=False,
+                )
+            )["calibration"]
+            for market in (
+                "goal_range",
+                "btts",
+                "corner_total",
+                "corner_handicap",
+            ):
+                self.assertIn(market, calibration["weight_change_eligible"])
+                self.assertIn(market, calibration["stats"]["primary_by_market"])
+
+        self.assertEqual(
+            memory_store.settle_goal_range({"selection": "7+"}, 4, 3), "win"
+        )
+        self.assertEqual(
+            memory_store.settle_goal_range({"selection": "2-3"}, 1, 2), "win"
+        )
+        self.assertEqual(
+            memory_store.settle_goal_range({"selection": "2-3"}, 2, 2), "loss"
+        )
+        self.assertEqual(memory_store.settle_btts({"side": "yes"}, 1, 1), "win")
+        self.assertEqual(memory_store.settle_btts({"side": "no"}, 2, 0), "win")
+        self.assertEqual(memory_store.settle_btts({"side": "no"}, 1, 1), "loss")
+        self.assertEqual(
+            memory_store.settle_corner_total(
+                {"side": "over", "line": 10.75}, 6, 5
+            ),
+            "half_win",
+        )
+        self.assertEqual(
+            memory_store.settle_corner_handicap(
+                {"side": "home", "line": -2.0}, 7, 5
+            ),
+            "push",
+        )
+        self.assertEqual(memory_store.settlement_profit("win", 0.90), 0.90)
+        self.assertEqual(
+            memory_store.settlement_profit("half_win", 0.92, "hong_kong"),
+            0.46,
+        )
+        self.assertEqual(
+            memory_store.settlement_profit("push", 1.95, "decimal"), 0.0
+        )
+        self.assertAlmostEqual(
+            memory_store.settlement_profit("win", 1.90, "decimal"), 0.90
+        )
+
+    def test_new_market_lineup_identity_worse_line_and_revisions(self):
+        initial = {
+            "asian_side": None,
+            "total_side": None,
+            "primary_market": "corner_total",
+            "corner_total_side": "over",
+            "corner_total_line": 9.5,
+            "corner_total_odds": 2.0,
+            "corner_total_odds_format": "decimal",
+            "corner_total_probability": 0.56,
+            "corner_total_ev": 0.12,
+            "corner_total_edge_pp": 4.5,
+            "corner_total_firm_count": 3,
+            "corner_total_market_signal": "aligned",
+            "corner_total_market_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            first = memory_store.cmd_record(
+                record_args(base, match_id="lineup-corners", **initial)
+            )["record"]
+            self.assertEqual(
+                memory_store.active_primary_identity(first),
+                ("corner_total", "over", 9.5),
+            )
+            replacement = dict(initial)
+            replacement.update(
+                {
+                    "analysis_stage": "lineup-check",
+                    "data_quality": "high",
+                    "corner_total_line": 10.0,
+                    "corner_total_odds": 2.0,
+                    "corner_total_ev": 0.22,
+                    "corner_total_full_win_probability": 0.56,
+                    "corner_total_half_win_probability": 0.0,
+                    "corner_total_push_probability": 0.10,
+                    "corner_total_half_loss_probability": 0.0,
+                    "corner_total_loss_probability": 0.34,
+                    "primary_change_reason": "确认首发改变角球强度",
+                    "previous_primary_invalidated": True,
+                    "previous_primary_current_ev": 0.12,
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "accept-worse-line"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="lineup-corners", **replacement)
+                )
+            accepted = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="lineup-corners",
+                    accept_worse_line=True,
+                    **replacement,
+                )
+            )["record"]
+            self.assertEqual(
+                accepted["primary_change"]["decision"], "worse_line_replaced"
+            )
+            self.assertEqual(len(accepted["revisions"]), 1)
+            self.assertEqual(
+                accepted["revisions"][0]["corner_total_pick"]["line"], 9.5
+            )
+            self.assertIn("goal_range_pick", accepted["revisions"][0])
+            self.assertIn(
+                "corner_handicap",
+                memory_store.settlement_basis_for_record(accepted)["formal_picks"],
+            )
+            self.assertEqual(
+                memory_store.pick_identity(
+                    "goal_range", {"selection": "2-3"}
+                ),
+                ("goal_range", "2-3"),
+            )
+
+    def test_half_time_primary_review_requires_verified_half_score(self):
+        def review_args(base, match_id):
+            return SimpleNamespace(
+                base_dir=base,
+                verified_finished=True,
+                match_id=match_id,
+                home_score=1,
+                away_score=0,
+                half_home_score=None,
+                half_away_score=None,
+                home_corners=None,
+                away_corners=None,
+                key_learning="半场比分必须可验证",
+            )
+
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="half-primary",
+                    asian_side=None,
+                    total_side=None,
+                    half_market="total",
+                    half_side="under",
+                    half_line=1.0,
+                    half_odds=0.90,
+                    half_probability=0.55,
+                    half_ev=0.08,
+                    half_edge_pp=4.0,
+                    half_firm_count=5,
+                    half_market_signal="aligned",
+                    primary_market="half_time",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "half-time or HT/FT primary"):
+                memory_store.cmd_review(review_args(base, "half-primary"))
+            pending = memory_store.find_record(
+                memory_store.load_history(memory_store.data_path(base)),
+                "half-primary",
+            )
+            self.assertEqual(pending["status"], "pending")
+
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="htft-primary",
+                    asian_side=None,
+                    total_side=None,
+                    htft_pick=["DD:3.40:0.31:0.08"],
+                    primary_market="htft",
+                    primary_htft_edge_pp=4.0,
+                    primary_htft_firm_count=5,
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "half-time or HT/FT primary"):
+                memory_store.cmd_review(review_args(base, "htft-primary"))
+            pending = memory_store.find_record(
+                memory_store.load_history(memory_store.data_path(base)),
+                "htft-primary",
+            )
+            self.assertEqual(pending["status"], "pending")
+
+    def test_reviewed_stats_prefer_frozen_settlement_basis_over_top_level_drift(self):
+        frozen_total = {
+            "side": "under",
+            "line": 2.5,
+            "odds": 0.90,
+            "ev": 0.09,
+            "role": "primary",
+        }
+        drifted_asian = {
+            "side": "away",
+            "line": 0.5,
+            "odds": 5.0,
+            "ev": 0.50,
+            "role": "primary",
+        }
+        record = reviewed_record(
+            "basis-drift",
+            asian=drifted_asian,
+            asian_result="loss",
+            total=frozen_total,
+            total_result="win",
+        )
+        record.update(
+            {
+                "primary_market": "asian",
+                "primary_pick": drifted_asian,
+                "primary_result": "loss",
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "primary_market": "total",
+                    "primary_pick": frozen_total,
+                    "formal_picks": {
+                        "asian": None,
+                        "total": frozen_total,
+                        "half_time": None,
+                        "htft": [],
+                        "goal_range": None,
+                        "btts": None,
+                        "corner_total": None,
+                        "corner_handicap": None,
+                    },
+                },
+            }
+        )
+
+        stats = memory_store.calculate_stats([record])
+
+        self.assertEqual(stats["primary"]["matches"], 1)
+        self.assertEqual(stats["primary"]["profit_units"], 0.9)
+        self.assertEqual(stats["primary_by_market"]["totals"]["matches"], 1)
+        self.assertEqual(stats["primary_by_market"]["asian"]["matches"], 0)
+        self.assertEqual(
+            memory_store.primary_snapshot_for_stats(record),
+            ("total", frozen_total),
+        )
+
+        legacy = reviewed_record(
+            "legacy-no-basis",
+            asian=drifted_asian,
+            asian_result="loss",
+        )
+        legacy.update(
+            {
+                "primary_market": "asian",
+                "primary_pick": drifted_asian,
+                "primary_result": "loss",
+            }
+        )
+        legacy_stats = memory_store.calculate_stats([legacy])
+        self.assertEqual(legacy_stats["primary_by_market"]["asian"]["matches"], 1)
+        self.assertEqual(legacy_stats["primary"]["profit_units"], -1.0)
 
 
 if __name__ == "__main__":

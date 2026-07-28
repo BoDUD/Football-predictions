@@ -39,6 +39,23 @@ Accept either format from user:
 - Fields: over odds, total goals line, under odds
 - Record all available bookmaker data
 
+### Goal Range and Both Teams to Score
+
+- Collect the complete current goal-range outcome set, such as `0-1`, `2-3`, `4-6`, and `7+`, when a verified source publishes it.
+- Collect both BTTS outcomes, Yes and No, from the same source and timestamp.
+- Record the exact outcome labels, odds format, source URL, timezone-aware collection time, bookmaker count, consensus/median price basis, and selected no-vig probability.
+- Titan's historical BTTS percentage is supporting team data, not a current market price.
+- If Titan does not expose these current prices, use a user-supplied platform screenshot or another verifiable source. Without a complete outcome set, keep the model result as observation only.
+
+### Corner Total and Corner Handicap
+
+- Open `https://m.titan007.com/corner/{match_id}.htm`.
+- Collect corner totals from `https://m.titan007.com/HandicapDataInterface.ashx?scheid={match_id}&type=1&oddskind=3&isHalf=0`.
+- Collect corner handicaps from the same endpoint with `oddskind=2`.
+- Extract both sides of each selected line, opening and current prices when available, bookmaker name, timezone-aware source time, consensus/median price basis, selected no-vig probability, and market status.
+- Build and archive the selected side's full-win, half-win, push, half-loss, and loss probability distribution so quarter-line EV is auditable.
+- Use at least three bookmakers for a formal corner direction. Do not treat ordinary football totals or handicap prices as corner prices.
+
 ### 3. European Odds (欧赔胜平负)
 - Extract only rows labeled "即" (instant/live) and "早" (early/opening)
 - Fields: home win odds, draw odds, away win odds
@@ -106,11 +123,13 @@ Accept either format from user:
 3. Extract Asian handicap data from the "亚让" tab/section
 4. Extract over/under data from the "进球数" tab/section
 5. Extract European odds from the "胜平负" tab/section
-6. Extract first-half and half-time/full-time markets and half-time scoring data when available
-7. Extract team fundamentals from the main analysis page
-8. If available near match time, extract lineup data from the lineup section
-9. If lineup not yet published, note this and proceed with available data
-10. Compile all data into a structured format before proceeding to prediction
+6. Extract goal-range and BTTS markets from a verified complete market when available
+7. Extract corner-total and corner-handicap markets plus independent corner-profile data
+8. Extract first-half and half-time/full-time markets and half-time scoring data when available
+9. Extract team fundamentals from the main analysis page
+10. If available near match time, extract lineup data from the lineup section
+11. If lineup not yet published, note this and proceed with available data
+12. Compile all data into a structured format before proceeding to prediction
 
 If the page shows a running clock, half-time, full-time, or a non-empty score, do not treat live odds as the final pre-match odds. Label the result as live analysis and exclude it from archived pre-match accuracy.
 

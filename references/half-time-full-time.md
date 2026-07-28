@@ -37,9 +37,11 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
 - Recommend at most one first-half direction. For HT/FT, always output exactly two ranked suggestions whenever a nine-outcome model matrix is available.
-- Treat first-half advice as actionable only when current odds are available and the probability edge survives lineup-time reanalysis. During the active small-sample protection period, an archived first-half primary requires EV >= 8%, model-versus-market edge >= 4pp, and medium/high data quality; lower positive EV is observation only.
-- Treat HT/FT as high variance. Require model EV of at least 8%, a model-versus-market edge of at least 4 percentage points, and data from at least five bookmakers for a `正式推荐`.
-- Rank all nine outcomes by EV descending. Put threshold-qualified outcomes first; break ties by model-versus-market edge, then model probability. Fill any remaining slot among the top two with the best unqualified outcome and label it `观察候选（未达标）`.
+- Treat first-half advice as actionable only when current odds are available, EV and no-vig edge are positive, data quality is medium/high, and the edge survives lineup-time reanalysis.
+- Treat HT/FT as high variance. A formal path needs positive EV, positive no-vig edge, medium/high data quality, a complete current nine-outcome market, and data from at least five bookmakers. Apply the global 8% EV/4pp edge strict gate only to `against` or materially `conflicting` paths, and apply the HT/FT risk penalty in `stability-v1`.
+- Before ranking, require the matrix row sums to match the displayed first-half H/D/A probabilities and its column sums to match the displayed full-time H/D/A probabilities within 0.5 percentage points. Recalculate the matrix when either marginal check fails; do not publish or rank an inconsistent matrix.
+- Rank the two displayed paths by joint model probability, not by EV. Break an exact probability tie by the corresponding full-time marginal, then the half-time marginal, and use EV only as the final tie-breaker. Use `scripts/htft_ranker.py` for validation and ranking.
+- Positive EV and edge are qualification gates after the two model paths are selected. A selected path becomes formal only when every safety check passes; it must never replace a more probable path with a low-probability long shot. Treat a high-EV outcome outside the model Top 2 as a market anomaly to recheck, not as an automatic recommendation.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a ranked model direction, not an actionable positive-EV bet.
 - If current HT/FT odds are missing, show the two highest model-probability outcomes as `赔率缺失，不可执行`; do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
 - Do not replace the two ranked outputs with a generic `无正EV建议` or `观望`. Preserve the risk warning instead.
@@ -49,7 +51,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 Add these sections after the full-time market analysis:
 
 1. `半场判断`: first-half 1X2 probabilities, likely half-time scores, current half-time Asian/total lines, and the best positive-EV direction.
-2. `半全场矩阵`: a compact 3x3 matrix for HH through AA, with the two ranked suggestions highlighted.
+2. `半全场矩阵`: a compact 3x3 matrix for HH through AA, with row/column marginal checks and the two model-probability-ranked suggestions highlighted.
 3. `组合建议`: show exactly two rows with rank, selection, status, probability, no-vig market probability, edge, odds, and EV. Show combined hit probability only when outcomes are mutually exclusive and show the assumed stake split.
 4. `风险`: missing odds, small samples, lineup uncertainty, and high variance.
 

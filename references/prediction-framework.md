@@ -23,19 +23,19 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- Exactly two ranked exact-score candidates with model probability, plus the mandatory one-line 0-0 audit
+- Exactly two ranked exact-score candidates with model probability; 0-0 appears only when it ranks in that pair
 
 ### Mode B: 可视化模式 (Visual/Detailed)
 Full analysis with compact Markdown tables and probability bars. Use this stable order:
 
 1. Match card: competition, kickoff time/timezone, status, home and away teams
-2. Market movement table: opening vs current Asian handicap and over/under, with direction labels
+2. Market movement table: opening vs current Asian handicap, totals, and available corner lines, with direction labels
 3. 1X2 market table: representative/consensus odds, removed margin, and normalized probabilities
-4. Probability bars: home/draw/away, handicap sides, and over/under sides
-5. EV comparison table: direction, line, odds, model probability, EV, and confidence
+4. Probability bars: home/draw/away plus the strongest available football and corner candidates
+5. Unified EV comparison table: Asian handicap, totals, goal ranges, BTTS, corner totals, corner handicaps, first-half, and qualified HT/FT candidates
 6. Evidence panel: recent form, home/away split, H2H, motivation, lineup/injuries, and data quality
 7. Decision card: primary pick, secondary lean, key reasons, and risks
-8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`, followed by a separate 0-0 probability/rank audit
+8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`; do not add a separate 0-0 row unless explicitly requested
 9. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
 10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two ranked suggestions. Mark each as `正式推荐` or `观察候选（未达标）`.
 
@@ -93,6 +93,13 @@ Organize all collected data into these categories:
 - Half-time goals patterns (半场进球模式)
 - Corner kicks statistics (角球数据)
 - Goal difference distribution (净胜球分布)
+
+### 8. Expanded Markets
+
+- Complete current goal-range and BTTS outcome prices, or an explicit unavailable/incomplete marker
+- Complete two-way corner-total and corner-handicap prices from at least three firms
+- Source URL, timestamp, bookmaker count, odds format, and market-completeness flag
+- Independent corner-profile inputs: home/away corners for and against, width/crossing, dangerous attacks, set pieces, match-state tendency, and confirmed personnel
 
 ---
 
@@ -198,16 +205,16 @@ Classify each candidate against the consensus opening-to-current move:
 - `conflicting`: Asian/total and European signals disagree.
 - `unknown`: insufficient comparable bookmaker data.
 
-During the active small-sample protection period, every Asian-handicap or total-goals formal direction needs EV >= 8%, model-versus-market edge >= 4pp, and medium/high data quality. EV from 5% through less than 8% is observation only. A candidate with an `against` signal additionally needs at least five bookmakers and independent confirmed-lineup or fundamental corroboration. The primary pick gets no exemption. Otherwise show it as `观察候选（未达标）/不下注` and do not archive it as a pick.
+An ordinary formal direction needs positive current EV, positive model-versus-market edge, medium/high data quality, a complete executable current market, and all applicable market-specific evidence. Missing or non-positive inputs, incomplete prices, or an `unknown` signal make it `观察候选（未达标）/不下注`.
 
-Keep this guardrail active until the affected market has at least 20 graded primary selections and a feature-level review explicitly changes it. Do not relax it automatically at 20 and do not convert it into a global weight change without feature-level evidence.
+An `against` or materially `conflicting` direction is the strict exception: require EV >= 8%, edge >= 4pp, at least five bookmakers, and independent confirmed-lineup or fundamental corroboration. Keep these safeguards until a feature-level review explicitly changes them; reaching 20 graded selections does not relax them automatically or create a weight change.
 
 ### Deep-favorite cover gate
 
 For a selected favorite at `-0.75` or deeper:
 
 1. Calculate the goal-margin distribution directly and report the selected line's full-win, half-win, push, half-loss, and loss probabilities when applicable.
-2. Require high data quality, confirmed lineups, and independent chance-quality evidence such as non-penalty xG, big chances, shots on target, or comparable chance creation.
+2. Require high data quality and confirmed lineups. Prefer independent chance-quality evidence such as non-penalty xG, big chances, shots on target, or comparable chance creation. If it is unavailable, accept an aligned market from at least five firms only when confirmed attacking configuration and fundamental evidence also support the favorite.
 3. Stress-test the opponent's counterattack, goalkeeper, set-piece, and early-concession tail risks.
 4. Do not use 1X2 win probability, possession, reputation, or a strong XI as a proxy for cover probability.
 
@@ -215,7 +222,21 @@ If any item is missing, downgrade the deep favorite to observation even when the
 
 ### Totals evidence gate
 
-A total-goals primary needs consensus from at least five firms and either independent chance-quality evidence or a confirmed attacking configuration. Historical over rates, H2H scores, a single price drop, or a stale injury list are context only and cannot satisfy the gate. If a confirmed XI contradicts the injury list, discard the stale injury effect and recalculate before recommending.
+Any formal total-goals direction needs consensus from at least five firms and either independent chance-quality evidence or a confirmed attacking configuration. Historical over rates, H2H scores, a single price drop, or a stale injury list are context only and cannot satisfy the gate. If a confirmed XI contradicts the injury list, discard the stale injury effect and recalculate before recommending.
+
+### Expanded-market evidence gate
+
+Read [expanded-markets.md](expanded-markets.md). Goal ranges and BTTS need a complete mutually exclusive current market plus chance-quality or confirmed attacking-configuration evidence. Corner totals and handicaps need a complete two-way market from at least three firms plus independent corner-profile evidence. A historical percentage, raw goals average, possession figure, or isolated price cannot satisfy these gates alone.
+
+Build one pool from candidates that pass every safety and market-specific gate. Rank it with `stability-v1`:
+
+- settlement/no-loss safety: 55%;
+- bounded EV strength: 10%, saturated at +8%;
+- bounded edge strength: 10%, saturated at +4pp;
+- data quality: 10%;
+- market depth, evidence coverage, and market alignment: 5% each.
+
+Apply the documented high-variance and conflict penalties, then sort by score, settlement safety, market depth, edge, EV, and stable market identity. Select exactly one Rank 1 primary. The saturation points are ranking inputs, not ordinary minimums. If no safe candidate remains, use no primary; never force a negative-EV, incomplete, or contradicted direction.
 
 ### 4.1 Asian Handicap Logistic Regression Model
 
@@ -275,28 +296,37 @@ When a team is missing key defensive players, the over/under model MUST adjust u
 
 ## Step 5: Win Probability & Betting Advice
 
-Read [exact-score.md](exact-score.md) and [half-time-full-time.md](half-time-full-time.md). Calculate two exact-score candidates for every valid pre-match model, then calculate first-half and HT/FT markets when the required data is available.
+Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate the expanded markets from their required distributions, calculate two exact-score candidates for every valid pre-match model, then calculate first-half and HT/FT markets when the required data is available.
 
 ### Win Probability Prediction
 Combine odds analysis and model analysis to predict:
 - Asian Handicap: P(home_win) and P(away_win)
 - Over/Under: P(over_win) and P(under_win)
+- Goal ranges: sum every matching cell in the complete football score matrix
+- BTTS: sum cells where both teams score; the opposite side is its complement
+- Corner total and handicap: derive from independent total-corner and corner-margin distributions
 
 ### Expected Value (EV) Calculation
 
 ```
-Asian Handicap Home EV = P(home_win) * home_odds - P(away_win)
-Asian Handicap Away EV = P(away_win) * away_odds - P(home_win)
-Over EV               = P(over_win) * over_odds - P(under_win)
-Under EV              = P(under_win) * under_odds - P(over_win)
+net_odds(decimal O) = O - 1
+net_odds(Hong Kong O) = O
+No-push EV = P(win) * net_odds - P(loss)
+Quarter-line EV = P(full_win) * net_odds
+                + P(half_win) * net_odds / 2
+                - P(half_loss) / 2
+                - P(loss)
+edge_pp = 100 * (model_probability - no_vig_market_probability)
 ```
 
+Recalculate EV from the archived probability distribution and odds format. Never accept a manually supplied EV that does not match, and never compare a decimal price with the Hong Kong formula.
+
 ### Final Output
-1. Best threshold-qualified betting recommendation; if none qualifies, show the highest-ranked observation as `不下注`
-2. Exactly two ranked exact-score candidates with model probability, plus 0-0 probability and its full-distribution rank
+1. Best threshold-qualified recommendation from the unified market pool; if none qualifies, show the highest-ranked observation as `不下注`
+2. Exactly two ranked exact-score candidates with model probability; include 0-0 only when it ranks in the pair
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
-5. A 3x3 HT/FT probability matrix and exactly two ranked HT/FT suggestions whenever the matrix can be calculated. Use formal recommendations first; otherwise fill with the highest-EV observation candidates and show their negative or sub-threshold EV plainly.
+5. A 3x3 HT/FT probability matrix and exactly two ranked HT/FT suggestions whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, rank the two paths by joint model probability, and use EV only to classify either selected path as formal or observation. Never let a long price promote a lower-probability path into the pair.
 
 Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
 
@@ -316,10 +346,11 @@ Treat both exact scores only as shape/scenario references. Never include Top-1 o
 - 主客队和两个按概率排序的预测比分
 - 亚盘选择方、盘口、赔率
 - 大小球方向、盘口、赔率
+- 合格的总进球区间、双方进球、角球大小或角球让球方向及其真实市场赔率
 - 胜平负概率、推荐概率和 EV
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存波胆候选，并让 `--predicted-score` 等于第一候选。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存波胆候选，并让 `--predicted-score` 等于第一候选。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`goal_range_pick`、`btts_pick`、`corner_total_pick`、`corner_handicap_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

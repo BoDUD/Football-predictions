@@ -28,6 +28,12 @@ RESULT_LABELS = {
 }
 HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
 FORBIDDEN_MARKUP = re.compile(r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I)
+ZERO_ZERO_REFERENCE = re.compile(r"0-0", re.IGNORECASE)
+ZERO_ZERO_CONTINUATION = re.compile(
+    r"^\s*(?:(?:其|该项|对应)\s*)?"
+    r"(?:概率|总?排名|全分布|赔率|EV|期望值|未进前二|进入前二|未进\s*Top-?2)",
+    re.IGNORECASE,
+)
 
 
 def clean_text(value: Any, limit: int | None = None) -> str:
@@ -49,6 +55,27 @@ def percentage(value: Any) -> str:
 
 def price(value: Any) -> str:
     return "" if value is None else f" @{float(value):.2f}"
+
+
+def goal_range_label(pick: dict[str, Any]) -> str:
+    selection = clean_text(pick.get("selection"))
+    if selection != "无":
+        return selection
+    minimum = (
+        pick.get("minimum_goals")
+        if "minimum_goals" in pick
+        else pick.get("min_goals")
+    )
+    maximum = (
+        pick.get("maximum_goals")
+        if "maximum_goals" in pick
+        else pick.get("max_goals")
+    )
+    if minimum is None:
+        return "未取得"
+    if maximum is None:
+        return f"{int(minimum)}+"
+    return f"{int(minimum)}-{int(maximum)}"
 
 
 def format_time(value: Any, timezone_name: str = "Asia/Tokyo") -> str:
@@ -80,6 +107,20 @@ def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[st
     if market == "total":
         side = "大" if pick.get("side") == "over" else "小"
         return f"{side}{float(pick.get('line', 0)):g}{price(pick.get('odds'))}"
+    if market == "goal_range":
+        return f"总进球{goal_range_label(pick)}球{price(pick.get('odds'))}"
+    if market == "btts":
+        side = {"yes": "是", "no": "否"}.get(str(pick.get("side", "")).lower(), clean_text(pick.get("side")))
+        return f"双方进球-{side}{price(pick.get('odds'))}"
+    if market == "corner_total":
+        side = "大" if pick.get("side") == "over" else "小"
+        return f"角球{side}{float(pick.get('line', 0)):g}{price(pick.get('odds'))}"
+    if market == "corner_handicap":
+        side = {"home": "主队", "away": "客队"}.get(
+            str(pick.get("side", "")).lower(),
+            clean_text(pick.get("side")),
+        )
+        return f"{side}角球{float(pick.get('line', 0)):+g}{price(pick.get('odds'))}"
     if market == "half_time":
         half_market = pick.get("market")
         if half_market == "1x2":
@@ -129,16 +170,23 @@ def exact_scores(version: dict[str, Any]) -> str:
     return "、".join(f"{pick.get('score')}（{percentage(pick.get('probability'))}）" for pick in picks)
 
 
-def zero_zero_text(version: dict[str, Any]) -> str:
+def display_text(version: dict[str, Any], field: str) -> str:
+    value = clean_text(version.get(field))
     audit = version.get("zero_zero_audit")
-    if not isinstance(audit, dict):
-        return "未记录"
-    rank = audit.get("rank")
-    status = "进入前二" if audit.get("included_in_top2") else "未进前二"
-    result = f"{percentage(audit.get('probability'))}｜总排名第{rank}｜{status}"
-    if audit.get("odds") is not None:
-        result += f"｜赔率{float(audit['odds']):g}｜EV {percentage(audit.get('ev'))}"
-    return result
+    if not isinstance(audit, dict) or audit.get("included_in_top2"):
+        return value
+    clauses = re.split(r"(?<=[。；！？!?])", value)
+    hidden = {index for index, clause in enumerate(clauses) if ZERO_ZERO_REFERENCE.search(clause)}
+    for index in tuple(hidden):
+        next_index = index + 1
+        while next_index < len(clauses) and ZERO_ZERO_CONTINUATION.search(clauses[next_index]):
+            hidden.add(next_index)
+            next_index += 1
+        previous_index = index - 1
+        while previous_index >= 0 and ZERO_ZERO_CONTINUATION.search(clauses[previous_index]):
+            hidden.add(previous_index)
+            previous_index -= 1
+    return "".join(clause for index, clause in enumerate(clauses) if index not in hidden).strip() or "无"
 
 
 def primary_line(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -149,12 +197,10 @@ def secondary_picks(version: dict[str, Any], record: dict[str, Any]) -> str:
     primary_identity = memory_store.pick_identity(version.get("primary_market"), version.get("primary_pick"))
     values = []
     for market, pick in memory_store.formal_picks(version):
-        if market not in {"asian", "total"}:
-            continue
         if memory_store.pick_identity(market, pick) == primary_identity:
             continue
         values.append(format_pick(market, pick, record))
-    return "、".join(values[:2]) if values else "无"
+    return "、".join(values) if values else "无"
 
 
 def half_time_text(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -189,13 +235,12 @@ def render_initial(record: dict[str, Any]) -> str:
         f"开赛：{format_time(record.get('kickoff'))}",
         f"主推：{primary_line(version, record)}",
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选：{secondary_picks(version, record)}",
+        f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
-        f"0-0核验：{zero_zero_text(version)}",
-        f"核心判断：{clean_text(version.get('recommendation'))}",
-        f"风险：{clean_text(version.get('notes'))}",
+        f"核心判断：{display_text(version, 'recommendation')}",
+        f"风险：{display_text(version, 'notes')}",
         "仅供数据分析参考",
     ])
 
@@ -224,13 +269,12 @@ def render_lineup(record: dict[str, Any]) -> str:
         change_line,
         f"当前主推：{primary_line(version, record)}",
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选：{secondary_picks(version, record)}",
+        f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
         f"半场：{half_time_text(version, record)}",
         f"半全场：{htft_text(version, record)}",
         f"比分参考：{exact_scores(version)}",
-        f"0-0核验：{zero_zero_text(version)}",
-        f"临场判断：{clean_text(version.get('recommendation'))}",
-        f"风险：{clean_text(version.get('notes'))}",
+        f"临场判断：{display_text(version, 'recommendation')}",
+        f"风险：{display_text(version, 'notes')}",
         "仅供数据分析参考",
     ])
 
@@ -243,13 +287,14 @@ def review_secondary_picks(basis: dict[str, Any], record: dict[str, Any]) -> str
     primary_identity = memory_store.pick_identity(basis.get("primary_market"), basis.get("primary_pick"))
     formal = basis.get("formal_picks") if isinstance(basis.get("formal_picks"), dict) else {}
     values = []
-    for market in ("asian", "total", "half_time"):
-        pick = formal.get(market)
-        if isinstance(pick, dict) and memory_store.pick_identity(market, pick) != primary_identity:
+    for market, formal_value in formal.items():
+        picks = formal_value if isinstance(formal_value, list) else [formal_value]
+        for pick in picks:
+            if not isinstance(pick, dict):
+                continue
+            if memory_store.pick_identity(market, pick) == primary_identity:
+                continue
             values.append(format_pick(market, pick, record))
-    for pick in formal.get("htft", []):
-        if isinstance(pick, dict) and memory_store.pick_identity("htft", pick) != primary_identity:
-            values.append(format_pick("htft", pick, record))
     return "、".join(values) if values else "无"
 
 
@@ -279,16 +324,21 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         if primary
         else "主推：无正式推荐（不结算、不计战绩）"
     )
+    learning_scope_line = (
+        "学习归档：主推复盘样本"
+        if primary
+        else "学习归档：无主推观察样本（只用于规则与数据质量复核）"
+    )
     return validate_plain_text([
         f"【赛后复盘｜{league_key}｜{record.get('match_id')}】",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
         f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
         f"结算依据：{basis_label}最终有效推荐",
         primary_result_line,
-        f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩）",
+        learning_scope_line,
+        f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",
         f"比分参考：{exact_scores(record)}｜命中排名：{record.get('exact_score_hit_rank') or '未命中'}",
-        f"0-0核验：{zero_zero_text(record)}",
-        f"本场关键：{clean_text(record.get('key_learning'))}",
+        f"本场关键：{display_text(record, 'key_learning')}",
         f"{league_key}主推：{performance_text(league.get('primary'))}",
         f"累计主推：{performance_text(stats.get('primary'))}",
         "复盘用于校准分析，不代表未来收益",

@@ -21,7 +21,7 @@ class ExactScoreRankerTests(unittest.TestCase):
         self.assertTrue(result["zero_zero_audit"]["included_in_top2"])
         self.assertEqual(result["zero_zero_audit"]["status"], "top_two")
 
-    def test_zero_zero_remains_visible_when_outside_top_two(self):
+    def test_zero_zero_audit_is_retained_when_outside_top_two(self):
         result = ranker.rank_exact_scores(
             1.35,
             1.05,
