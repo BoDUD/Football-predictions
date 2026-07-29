@@ -23,7 +23,7 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- Exactly two ranked exact-score candidates with model probability; 0-0 appears only when it ranks in that pair
+- Exactly two user-facing exact-score scenarios. For a formal total primary, rank them inside the primary's net-profit branch and show both full-match probability and conditional share; otherwise use the unconditional Top 2
 
 ### Mode B: 可视化模式 (Visual/Detailed)
 Full analysis with compact Markdown tables and probability bars. Use this stable order:
@@ -35,9 +35,9 @@ Full analysis with compact Markdown tables and probability bars. Use this stable
 5. Unified EV comparison table: Asian handicap, totals, goal ranges, BTTS, corner totals, corner handicaps, first-half, and qualified HT/FT candidates
 6. Evidence panel: recent form, home/away split, H2H, motivation, lineup/injuries, and data quality
 7. Decision card: primary pick, secondary lean, key reasons, and risks
-8. Exact-score panel: exactly two ranked candidates with model probability and `高方差参考（不计主推）`; do not add a separate 0-0 row unless explicitly requested
+8. Exact-score panel: exactly two user-facing scenarios with unconditional model probability and `高方差参考（不计主推）`. For a formal total primary, also show `主推成立时` conditional share; do not add a separate 0-0 row unless explicitly requested
 9. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
-10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two ranked suggestions. Mark each as `正式推荐` or `观察候选（未达标）`.
+10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two stability-selected scenarios labelled `主稳定形态` and `备选稳定形态`. Mark each as `正式推荐` or `观察候选（未达标）`; do not show a rank column.
 
 Render probability bars with a fixed-width 20-block scale, for example:
 
@@ -323,10 +323,10 @@ Recalculate EV from the archived probability distribution and odds format. Never
 
 ### Final Output
 1. Best threshold-qualified recommendation from the unified market pool; if none qualifies, show the highest-ranked observation as `不下注`
-2. Exactly two ranked exact-score candidates with model probability; include 0-0 only when it ranks in the pair
+2. Exactly two user-facing exact-score scenarios. Preserve the unconditional Top 2 internally; for a formal total primary, display the two highest-probability net-profit scenarios and label the conditioning explicitly
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
-5. A 3x3 HT/FT probability matrix and exactly two ranked HT/FT suggestions whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, rank the two paths by joint model probability, and use EV only to classify either selected path as formal or observation. Never let a long price promote a lower-probability path into the pair.
+5. A 3x3 HT/FT probability matrix and exactly two stability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, select with `scenario_stability_v1`, and use EV only to classify either selected scenario as formal or observation. Never let raw joint probability or a long price choose the pair.
 
 Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
 
@@ -351,6 +351,6 @@ Treat both exact scores only as shape/scenario references. Never include Top-1 o
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存波胆候选，并让 `--predicted-score` 等于第一候选。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`goal_range_pick`、`btts_pick`、`corner_total_pick`、`corner_handicap_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件 Top 2，并让 `--predicted-score` 等于无条件第一项。若唯一主推是全场大小球，再通过两个 `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` 和 `--display-exact-score-event-probability` 保存面向用户的主推条件场景。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`goal_range_pick`、`btts_pick`、`corner_total_pick`、`corner_handicap_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

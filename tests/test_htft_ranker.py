@@ -38,16 +38,16 @@ ODDS = {
 }
 
 
-def market_with_top_two_edges() -> dict[str, float]:
+def market_with_scenario_edges() -> dict[str, float]:
     market = dict(MATRIX)
     market["HH"] -= 0.05
-    market["DH"] -= 0.04
+    market["AA"] -= 0.04
     market["DD"] += 0.09
     return market
 
 
 class HtftRankerTests(unittest.TestCase):
-    def test_joint_probability_prevents_ev_only_incoherent_ranking(self):
+    def test_stability_selection_rejects_mechanical_joint_top_two(self):
         result = ranker.rank_htft(
             MATRIX,
             HALF,
@@ -58,13 +58,77 @@ class HtftRankerTests(unittest.TestCase):
         )
 
         self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "AA"],
+        )
+        self.assertEqual(result["selection_basis"], "scenario_stability_v1")
+        self.assertNotIn("rank", result["scenarios"][0])
+        self.assertEqual(result["ranking_basis"], result["selection_basis"])
+        self.assertEqual(
             [item["selection"] for item in result["top_two"]],
-            ["HH", "DH"],
+            ["HH", "AA"],
+        )
+        self.assertEqual(
+            [item["rank"] for item in result["top_two"]],
+            [1, 2],
+        )
+        self.assertGreater(
+            result["scenarios"][1]["conditional_stability"],
+            MATRIX["DH"] / HALF["D"],
         )
         self.assertTrue(result["marginal_validation"]["passed"])
         self.assertEqual(result["formal_count"], 0)
         self.assertTrue(
-            all(item["status"] == "observation" for item in result["top_two"])
+            all(item["status"] == "observation" for item in result["scenarios"])
+        )
+
+    def test_transition_path_can_be_selected_when_follow_through_is_strong(self):
+        matrix = {
+            "HH": 0.20,
+            "HD": 0.03,
+            "HA": 0.02,
+            "DH": 0.30,
+            "DD": 0.05,
+            "DA": 0.05,
+            "AH": 0.20,
+            "AD": 0.05,
+            "AA": 0.10,
+        }
+        half = {"H": 0.25, "D": 0.40, "A": 0.35}
+        full = {"H": 0.70, "D": 0.13, "A": 0.17}
+
+        result = ranker.rank_htft(matrix, half, full)
+
+        self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "DH"],
+        )
+        self.assertFalse(result["scenarios"][1]["state_continuity"])
+
+    def test_second_slot_is_explicit_when_stability_evidence_is_insufficient(self):
+        matrix = {
+            "HH": 0.64,
+            "HD": 0.08,
+            "HA": 0.08,
+            "DH": 0.08,
+            "DD": 0.01,
+            "DA": 0.01,
+            "AH": 0.08,
+            "AD": 0.01,
+            "AA": 0.01,
+        }
+        half = {"H": 0.80, "D": 0.10, "A": 0.10}
+        full = {"H": 0.80, "D": 0.10, "A": 0.10}
+
+        result = ranker.rank_htft(matrix, half, full)
+
+        self.assertEqual(len(result["scenarios"]), 2)
+        self.assertEqual(result["scenarios"][0]["stability_status"], "supported")
+        self.assertEqual(result["scenarios"][1]["stability_status"], "insufficient")
+        self.assertEqual(result["scenarios"][1]["status"], "observation")
+        self.assertIn(
+            "below threshold",
+            result["scenarios"][1]["selection_reason"],
         )
 
     def test_inconsistent_full_time_marginal_is_rejected(self):
@@ -124,78 +188,78 @@ class HtftRankerTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [item["selection"] for item in result["top_two"]],
-            ["HH", "DH"],
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "AA"],
         )
         self.assertTrue(
-            all(item["status"] == "formal" for item in result["top_two"])
+            all(item["status"] == "formal" for item in result["scenarios"])
         )
-        self.assertGreaterEqual(result["top_two"][0]["ev"], 0.08)
-        self.assertGreaterEqual(result["top_two"][0]["edge_pp"], 4.0)
+        self.assertGreaterEqual(result["scenarios"][0]["ev"], 0.08)
+        self.assertGreaterEqual(result["scenarios"][0]["edge_pp"], 4.0)
         self.assertIn(
-            "AA",
+            "DH",
             [item["selection"] for item in result["value_anomalies"]],
         )
 
     def test_sub_eight_percent_positive_ev_can_qualify(self):
         odds = {
             "HH": 1.05 / MATRIX["HH"],
-            "DH": 1.04 / MATRIX["DH"],
+            "AA": 1.04 / MATRIX["AA"],
         }
         result = ranker.rank_htft(
             MATRIX,
             HALF,
             FULL,
             odds=odds,
-            market_probabilities=market_with_top_two_edges(),
+            market_probabilities=market_with_scenario_edges(),
             firm_count=6,
             data_quality="high",
         )
 
         self.assertEqual(
-            [item["selection"] for item in result["top_two"]],
-            ["HH", "DH"],
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "AA"],
         )
         self.assertTrue(
-            all(item["status"] == "formal" for item in result["top_two"])
+            all(item["status"] == "formal" for item in result["scenarios"])
         )
         self.assertTrue(
-            all(0 < item["ev"] < 0.08 for item in result["top_two"])
+            all(0 < item["ev"] < 0.08 for item in result["scenarios"])
         )
 
     def test_zero_and_negative_ev_do_not_qualify(self):
         odds = {
             "HH": 1.0 / MATRIX["HH"],
-            "DH": 0.99 / MATRIX["DH"],
+            "AA": 0.99 / MATRIX["AA"],
         }
         result = ranker.rank_htft(
             MATRIX,
             HALF,
             FULL,
             odds=odds,
-            market_probabilities=market_with_top_two_edges(),
+            market_probabilities=market_with_scenario_edges(),
             firm_count=6,
             data_quality="high",
         )
 
         self.assertEqual(
-            [item["selection"] for item in result["top_two"]],
-            ["HH", "DH"],
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "AA"],
         )
         self.assertTrue(
-            all(item["status"] == "observation" for item in result["top_two"])
+            all(item["status"] == "observation" for item in result["scenarios"])
         )
         self.assertTrue(
             all(
                 any("is not positive" in failure for failure in item["failed_thresholds"])
-                for item in result["top_two"]
+                for item in result["scenarios"]
             )
         )
 
     def test_zero_market_edge_does_not_qualify(self):
         odds = {
             "HH": 1.05 / MATRIX["HH"],
-            "DH": 1.04 / MATRIX["DH"],
+            "AA": 1.04 / MATRIX["AA"],
         }
         result = ranker.rank_htft(
             MATRIX,
@@ -208,22 +272,22 @@ class HtftRankerTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            all(item["status"] == "observation" for item in result["top_two"])
+            all(item["status"] == "observation" for item in result["scenarios"])
         )
         self.assertTrue(
             all(
                 any("edge" in failure and "not positive" in failure
                     for failure in item["failed_thresholds"])
-                for item in result["top_two"]
+                for item in result["scenarios"]
             )
         )
 
     def test_market_depth_and_data_quality_protections_still_apply(self):
         odds = {
             "HH": 1.05 / MATRIX["HH"],
-            "DH": 1.04 / MATRIX["DH"],
+            "AA": 1.04 / MATRIX["AA"],
         }
-        market = market_with_top_two_edges()
+        market = market_with_scenario_edges()
 
         shallow = ranker.rank_htft(
             MATRIX,
@@ -245,21 +309,21 @@ class HtftRankerTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            all(item["status"] == "observation" for item in shallow["top_two"])
+            all(item["status"] == "observation" for item in shallow["scenarios"])
         )
         self.assertTrue(
-            all(item["status"] == "observation" for item in low_quality["top_two"])
+            all(item["status"] == "observation" for item in low_quality["scenarios"])
         )
         self.assertTrue(
             all(
                 "firm count 4 < 5" in item["failed_thresholds"]
-                for item in shallow["top_two"]
+                for item in shallow["scenarios"]
             )
         )
         self.assertTrue(
             all(
                 "data quality low" in item["failed_thresholds"]
-                for item in low_quality["top_two"]
+                for item in low_quality["scenarios"]
             )
         )
 
@@ -267,15 +331,15 @@ class HtftRankerTests(unittest.TestCase):
         result = ranker.rank_htft(MATRIX, HALF, FULL)
 
         self.assertEqual(
-            [item["selection"] for item in result["top_two"]],
-            ["HH", "DH"],
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "AA"],
         )
         self.assertTrue(
-            all(item["status"] == "observation" for item in result["top_two"])
+            all(item["status"] == "observation" for item in result["scenarios"])
         )
         self.assertIn(
             "current odds unavailable",
-            result["top_two"][0]["failed_thresholds"],
+            result["scenarios"][0]["failed_thresholds"],
         )
 
 

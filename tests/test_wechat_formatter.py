@@ -94,6 +94,46 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("0-0（12.0%）", text)
             self.assert_plain(text)
 
+    def test_primary_conditioned_scores_are_used_in_user_facing_copy(self):
+        record = base_record()
+        record["primary_pick"]["side"] = "over"
+        record["total_pick"]["side"] = "over"
+        record["display_predicted_score"] = "2-1"
+        record["display_exact_score_picks"] = [
+            {
+                "score": "2-1",
+                "probability": 0.0986,
+                "conditional_probability": 0.1802,
+                "display_rank": 1,
+                "unconditional_rank": 3,
+            },
+            {
+                "score": "3-1",
+                "probability": 0.0598,
+                "conditional_probability": 0.1093,
+                "display_rank": 2,
+                "unconditional_rank": 5,
+            },
+        ]
+        record["display_exact_score_basis"] = {
+            "basis": "primary_total_net_profit",
+            "market": "total",
+            "side": "over",
+            "line": 2.5,
+            "event_probability": 0.5471,
+        }
+
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            text = formatter.render(base, "42", "initial")
+            self.assertIn(
+                "比分参考：2-1（全场9.9%，主推成立时18.0%）、"
+                "3-1（全场6.0%，主推成立时10.9%）",
+                text,
+            )
+            self.assertNotIn("比分参考：1-0", text)
+            self.assert_plain(text)
+
     def test_format_pick_supports_expanded_markets(self):
         record = base_record()
         cases = (

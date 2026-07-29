@@ -318,6 +318,110 @@ def parse_exact_score_pick(value: str) -> dict[str, Any]:
     return {"score": f"{home}-{away}", "probability": probability}
 
 
+def parse_display_exact_score_pick(value: str) -> dict[str, Any]:
+    parts = [part.strip() for part in value.split(":")]
+    if len(parts) != 3:
+        raise ValueError(
+            "Display exact-score pick must be "
+            "SCORE:PROBABILITY:UNCONDITIONAL_RANK"
+        )
+    pick = parse_exact_score_pick(":".join(parts[:2]))
+    unconditional_rank = int(parts[2])
+    if unconditional_rank < 1:
+        raise ValueError("Display exact-score unconditional rank must be at least 1")
+    pick["unconditional_rank"] = unconditional_rank
+    return pick
+
+
+def build_display_exact_score_picks(
+    args: argparse.Namespace,
+    exact_score_picks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    supplied = getattr(args, "display_exact_score_pick", None) or []
+    if not supplied:
+        display = deepcopy(exact_score_picks)
+        for pick in display:
+            pick["display_rank"] = int(pick["rank"])
+            pick["unconditional_rank"] = int(pick["rank"])
+            pick["conditional_probability"] = float(pick["probability"])
+            pick["status"] = "unconditional_scenario"
+        return display, {
+            "version": "unconditional-top-two-v1",
+            "basis": "unconditional_top_two",
+            "market": None,
+            "side": None,
+            "line": None,
+            "event": None,
+            "event_probability": 1.0,
+        }
+
+    if len(supplied) != 2:
+        raise ValueError(
+            "Primary-conditioned display requires exactly two "
+            "--display-exact-score-pick values"
+        )
+    display = [parse_display_exact_score_pick(value) for value in supplied]
+    if len({pick["score"] for pick in display}) != 2:
+        raise ValueError("Display exact-score picks must contain two distinct scores")
+    if len({pick["unconditional_rank"] for pick in display}) != 2:
+        raise ValueError("Display exact-score unconditional ranks must be distinct")
+    if getattr(args, "primary_market", None) != "total":
+        raise ValueError(
+            "Primary-conditioned display exact scores currently require a total primary"
+        )
+    side = getattr(args, "total_side", None)
+    line = getattr(args, "total_line", None)
+    if side not in {"over", "under"} or line is None:
+        raise ValueError(
+            "Primary-conditioned display exact scores require total side and line"
+        )
+    line = float(line)
+    event_probability = getattr(
+        args, "display_exact_score_event_probability", None
+    )
+    if event_probability is None:
+        raise ValueError(
+            "Primary-conditioned display exact scores require "
+            "--display-exact-score-event-probability"
+        )
+    event_probability = float(event_probability)
+    if not 0.0 < event_probability <= 1.0:
+        raise ValueError("Display exact-score event probability must be in (0, 1]")
+
+    for pick in display:
+        home, away = (int(part) for part in pick["score"].split("-"))
+        total_goals = home + away
+        supports_primary = (
+            total_goals > line if side == "over" else total_goals < line
+        )
+        if not supports_primary:
+            raise ValueError(
+                f"Display exact score {pick['score']} does not support "
+                f"the net-profit branch of {side} {line:g}"
+            )
+        if float(pick["probability"]) > event_probability + 1e-9:
+            raise ValueError(
+                "Display exact-score probability cannot exceed event probability"
+            )
+
+    display.sort(key=lambda pick: (-float(pick["probability"]), pick["score"]))
+    for rank, pick in enumerate(display, start=1):
+        pick["display_rank"] = rank
+        pick["conditional_probability"] = (
+            float(pick["probability"]) / event_probability
+        )
+        pick["status"] = "primary_conditioned_scenario"
+    return display, {
+        "version": "primary-conditioned-v1",
+        "basis": "primary_total_net_profit",
+        "market": "total",
+        "side": side,
+        "line": line,
+        "event": "net_profit",
+        "event_probability": event_probability,
+    }
+
+
 def build_zero_zero_audit(
     args: argparse.Namespace,
     exact_score_picks: list[dict[str, Any]],
@@ -1340,6 +1444,9 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "archived_at": record.get("updated_at", record.get("created_at")),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": record.get("exact_score_picks", []),
+        "display_predicted_score": record.get("display_predicted_score"),
+        "display_exact_score_picks": record.get("display_exact_score_picks", []),
+        "display_exact_score_basis": record.get("display_exact_score_basis"),
         "zero_zero_audit": record.get("zero_zero_audit"),
         "recommendation": record.get("recommendation"),
         "notes": record.get("notes"),
@@ -1391,6 +1498,13 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         },
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
+        "display_predicted_score": record.get("display_predicted_score"),
+        "display_exact_score_picks": deepcopy(
+            record.get("display_exact_score_picks", [])
+        ),
+        "display_exact_score_basis": deepcopy(
+            record.get("display_exact_score_basis")
+        ),
         "zero_zero_audit": deepcopy(record.get("zero_zero_audit")),
         "revision_count": len(record.get("revisions", [])),
     }
@@ -1423,6 +1537,12 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     if str(args.predicted_score).strip() != exact_score_picks[0]["score"]:
         raise ValueError("--predicted-score must equal the highest-probability exact-score pick")
     zero_zero_audit = build_zero_zero_audit(args, exact_score_picks)
+    display_exact_score_picks, display_exact_score_basis = (
+        build_display_exact_score_picks(args, exact_score_picks)
+    )
+    zero_zero_audit["included_in_display_top2"] = any(
+        pick.get("score") == "0-0" for pick in display_exact_score_picks
+    )
 
     record: dict[str, Any] = {
         "match_id": str(args.match_id),
@@ -1436,6 +1556,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "away_team": args.away_team,
         "predicted_score": args.predicted_score,
         "exact_score_picks": exact_score_picks,
+        "display_predicted_score": display_exact_score_picks[0]["score"],
+        "display_exact_score_picks": display_exact_score_picks,
+        "display_exact_score_basis": display_exact_score_basis,
         "zero_zero_audit": zero_zero_audit,
         "recommendation": args.recommendation,
         "source_url": args.source_url,
@@ -1949,6 +2072,26 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         ),
         1 if predicted_exact else None,
     )
+    display_picks = record.get("display_exact_score_picks")
+    if not isinstance(display_picks, list) or not display_picks:
+        display_picks = record.get("exact_score_picks", [])
+    display_predicted = str(
+        record.get("display_predicted_score")
+        or (
+            display_picks[0].get("score")
+            if display_picks and isinstance(display_picks[0], dict)
+            else predicted
+        )
+    )
+    display_predicted_exact = display_predicted == actual_score
+    display_exact_score_hit_rank = next(
+        (
+            int(pick.get("display_rank", pick.get("rank", index)))
+            for index, pick in enumerate(display_picks, start=1)
+            if isinstance(pick, dict) and str(pick.get("score")) == actual_score
+        ),
+        1 if display_predicted_exact else None,
+    )
     half_scores_available = args.half_home_score is not None and args.half_away_score is not None
     half_home = int(args.half_home_score) if half_scores_available else None
     half_away = int(args.half_away_score) if half_scores_available else None
@@ -1998,6 +2141,9 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         "score_exact": predicted_exact,
         "exact_score_hit_rank": exact_score_hit_rank,
         "exact_score_any_hit": exact_score_hit_rank in {1, 2},
+        "display_score_exact": display_predicted_exact,
+        "display_exact_score_hit_rank": display_exact_score_hit_rank,
+        "display_exact_score_any_hit": display_exact_score_hit_rank in {1, 2},
         "asian_result": primary_result if primary_market == "asian" else None,
         "total_result": primary_result if primary_market == "total" else None,
         "half_time_score": f"{half_home}-{half_away}" if half_scores_available else None,
@@ -2205,11 +2351,25 @@ def primary_market_performance(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def exact_score_diagnostics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    top1 = sum((r.get("exact_score_hit_rank") == 1) or bool(r.get("score_exact")) for r in records)
+def exact_score_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    display: bool = False,
+) -> dict[str, Any]:
+    def rank_for(record: dict[str, Any]) -> Any:
+        if display and "display_exact_score_hit_rank" in record:
+            return record.get("display_exact_score_hit_rank")
+        return record.get("exact_score_hit_rank")
+
+    def exact_for(record: dict[str, Any]) -> bool:
+        if display and "display_score_exact" in record:
+            return bool(record.get("display_score_exact"))
+        return bool(record.get("score_exact"))
+
+    top1 = sum((rank_for(r) == 1) or exact_for(r) for r in records)
     top2 = sum(
-        (r.get("exact_score_hit_rank") in {1, 2})
-        or (r.get("exact_score_hit_rank") is None and bool(r.get("score_exact")))
+        (rank_for(r) in {1, 2})
+        or (rank_for(r) is None and exact_for(r))
         for r in records
     )
     return {
@@ -2289,6 +2449,7 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         "corner_total": primary_by_market["corner_total"],
         "corner_handicap": primary_by_market["corner_handicap"],
         "exact_scores": exact_score_diagnostics(records),
+        "display_exact_scores": exact_score_diagnostics(records, display=True),
         "recent_learnings": learnings,
     }
 
@@ -2299,6 +2460,7 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     primary = performance_block(primary_pairs_all)
     learning_samples = learning_sample_summary(reviewed)
     exact_scores = exact_score_diagnostics(reviewed)
+    display_exact_scores = exact_score_diagnostics(reviewed, display=True)
     leagues: dict[str, dict[str, Any]] = {}
     for league_key in sorted({league_key_for_record(record) for record in reviewed}):
         subset = [record for record in reviewed if league_key_for_record(record) == league_key]
@@ -2332,6 +2494,10 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "exact_score_top1_rate": exact_scores["top1_rate"],
         "exact_score_top2_hits": exact_scores["top2_hits"],
         "exact_score_top2_rate": exact_scores["top2_rate"],
+        "display_exact_score_top1_hits": display_exact_scores["top1_hits"],
+        "display_exact_score_top1_rate": display_exact_scores["top1_rate"],
+        "display_exact_score_top2_hits": display_exact_scores["top2_hits"],
+        "display_exact_score_top2_rate": display_exact_scores["top2_rate"],
         "learnings_recorded": sum(bool(str(r.get("key_learning", "")).strip()) for r in reviewed),
         "leagues": leagues,
     }
@@ -2494,6 +2660,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--exact-score-pick",
         action="append",
         help="Required exactly twice as SCORE:PROBABILITY; rank is derived from probability",
+    )
+    record.add_argument(
+        "--display-exact-score-pick",
+        action="append",
+        help=(
+            "Optional user-facing primary-conditioned scenario as "
+            "SCORE:PROBABILITY:UNCONDITIONAL_RANK; required exactly twice "
+            "when supplied"
+        ),
+    )
+    record.add_argument(
+        "--display-exact-score-event-probability",
+        type=float,
+        help=(
+            "Probability mass of the formal total primary's net-profit branch "
+            "used to calculate conditional scenario shares"
+        ),
     )
     record.add_argument(
         "--zero-zero-probability",

@@ -36,26 +36,27 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Hong Kong odds: `EV = probability * hk_odds - (1 - probability)`.
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
-- Recommend at most one first-half direction. For HT/FT, always output exactly two ranked suggestions whenever a nine-outcome model matrix is available.
+- Recommend at most one first-half direction. For HT/FT, always output exactly two stability-selected scenarios whenever a nine-outcome model matrix is available.
 - Treat first-half advice as actionable only when current odds are available, EV and no-vig edge are positive, data quality is medium/high, and the edge survives lineup-time reanalysis.
 - Treat HT/FT as high variance. A formal path needs positive EV, positive no-vig edge, medium/high data quality, a complete current nine-outcome market, and data from at least five bookmakers. Apply the global 8% EV/4pp edge strict gate only to `against` or materially `conflicting` paths, and apply the HT/FT risk penalty in `stability-v1`.
-- Before ranking, require the matrix row sums to match the displayed first-half H/D/A probabilities and its column sums to match the displayed full-time H/D/A probabilities within 0.5 percentage points. Recalculate the matrix when either marginal check fails; do not publish or rank an inconsistent matrix.
-- Rank the two displayed paths by joint model probability, not by EV. Break an exact probability tie by the corresponding full-time marginal, then the half-time marginal, and use EV only as the final tie-breaker. Use `scripts/htft_ranker.py` for validation and ranking.
-- Positive EV and edge are qualification gates after the two model paths are selected. A selected path becomes formal only when every safety check passes; it must never replace a more probable path with a low-probability long shot. Treat a high-EV outcome outside the model Top 2 as a market anomaly to recheck, not as an automatic recommendation.
-- Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a ranked model direction, not an actionable positive-EV bet.
-- If current HT/FT odds are missing, show the two highest model-probability outcomes as `赔率缺失，不可执行`; do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
-- Do not replace the two ranked outputs with a generic `无正EV建议` or `观望`. Preserve the risk warning instead.
+- Before selection, require the matrix row sums to match the displayed first-half H/D/A probabilities and its column sums to match the displayed full-time H/D/A probabilities within 0.5 percentage points. Recalculate the matrix when either marginal check fails; do not publish or select from an inconsistent matrix.
+- Use `scripts/htft_ranker.py` and `scenario_stability_v1`, not raw joint-probability order or EV order. Score each path using conditional follow-through `P(full-time result | half-time state)` at 45%, joint support at 30%, full-time marginal support at 15%, and a 10% same-state continuity bonus. This favors a result that remains credible after its half-time state without blindly forcing only diagonal paths.
+- Require half-time state support of at least 15%, joint support of at least 5%, and conditional follow-through of at least 25% for a fully supported scenario. If fewer than two paths pass, preserve two output slots but mark the fallback slot `稳定证据不足`; never fill it because of a long price or high EV.
+- Positive EV and edge are qualification gates only after the two stable scenarios are selected. A selected scenario becomes formal only when every safety check passes. Treat a high-EV outcome outside the stable pair as a market anomaly to recheck, not as an automatic recommendation.
+- Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a stable match shape, not an actionable positive-EV bet.
+- If current HT/FT odds are missing, keep the same two stability-selected scenarios as `赔率缺失，不可执行`; do not switch back to probability ranking and do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
+- Do not replace the two stable outputs with a generic `无正EV建议` or `观望`. Preserve the risk warning instead.
 
 ## Visual output
 
 Add these sections after the full-time market analysis:
 
 1. `半场判断`: first-half 1X2 probabilities, likely half-time scores, current half-time Asian/total lines, and the best positive-EV direction.
-2. `半全场矩阵`: a compact 3x3 matrix for HH through AA, with row/column marginal checks and the two model-probability-ranked suggestions highlighted.
-3. `组合建议`: show exactly two rows with rank, selection, status, probability, no-vig market probability, edge, odds, and EV. Show combined hit probability only when outcomes are mutually exclusive and show the assumed stake split.
+2. `半全场矩阵`: a compact 3x3 matrix for HH through AA, with row/column marginal checks and the two stability-selected scenarios highlighted.
+3. `稳定形态`: show exactly two rows labelled `主稳定形态` and `备选稳定形态`, with selection, status, joint probability, conditional follow-through, state continuity, no-vig market probability, edge, odds, and EV. Do not show a rank column. Show combined hit probability only when outcomes are mutually exclusive and show the assumed stake split.
 4. `风险`: missing odds, small samples, lineup uncertainty, and high variance.
 
-Concise mode includes the best first-half direction plus both ranked HT/FT suggestions. Keep `观察候选（未达标）` labels even in concise mode.
+Concise mode includes the best first-half direction plus both stability-selected HT/FT scenarios. Keep `观察候选（未达标）` labels even in concise mode.
 
 ## Calibration note from the supplied betting log
 
