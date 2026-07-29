@@ -59,6 +59,70 @@ class ExactScoreRankerTests(unittest.TestCase):
         self.assertGreater(result["captured_mass"], 0.999)
         self.assertLessEqual(result["captured_mass"], 1.0 + 1e-12)
 
+    def test_total_primary_uses_conditioned_display_scores_without_rewriting_distribution(self):
+        result = ranker.rank_exact_scores(
+            1.82,
+            1.05,
+            display_total_side="over",
+            display_total_line=2.5,
+        )
+
+        self.assertEqual(
+            [pick["score"] for pick in result["top_two"]],
+            ["1-1", "1-0"],
+        )
+        self.assertEqual(
+            [pick["score"] for pick in result["display_top_two"]],
+            ["2-1", "3-1"],
+        )
+        self.assertEqual(
+            [pick["unconditional_rank"] for pick in result["display_top_two"]],
+            [3, 5],
+        )
+        self.assertAlmostEqual(
+            result["display_selection"]["event_probability"],
+            0.5470618833421336,
+        )
+        first = result["display_top_two"][0]
+        self.assertAlmostEqual(first["probability"], 0.0986003435271168)
+        self.assertAlmostEqual(
+            first["conditional_probability"],
+            first["probability"] / result["display_selection"]["event_probability"],
+        )
+        self.assertEqual(result["zero_zero_audit"]["rank"], 9)
+        self.assertFalse(result["zero_zero_audit"]["included_in_display_top2"])
+
+    def test_integer_total_display_excludes_push_scores(self):
+        over = ranker.rank_exact_scores(
+            1.8,
+            1.2,
+            display_total_side="over",
+            display_total_line=3.0,
+        )
+        under = ranker.rank_exact_scores(
+            1.8,
+            1.2,
+            display_total_side="under",
+            display_total_line=3.0,
+        )
+
+        self.assertTrue(
+            all(
+                sum(int(part) for part in pick["score"].split("-")) > 3
+                for pick in over["display_top_two"]
+            )
+        )
+        self.assertTrue(
+            all(
+                sum(int(part) for part in pick["score"].split("-")) < 3
+                for pick in under["display_top_two"]
+            )
+        )
+
+    def test_total_display_arguments_must_be_paired(self):
+        with self.assertRaisesRegex(ValueError, "must be supplied together"):
+            ranker.rank_exact_scores(1.4, 1.1, display_total_side="over")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.1] - 2026-07-29
+
+### Changed
+- Preserved the unconditional exact-score Top 2 for model audit while displaying two primary-consistent score scenarios when the formal main pick is a full-time total.
+- Added explicit full-match and primary-conditioned probabilities for user-facing score scenarios, with integer-line pushes excluded from the supporting branch.
+- Replaced mechanical HT/FT probability ranking with two `scenario_stability_v1` selections based on conditional follow-through, joint support, full-time support, and state continuity.
+- Retained the legacy HT/FT `ranking_basis` and `top_two` JSON fields as compatibility aliases.
+
 ## [2.2.0] - 2026-07-28
 
 ### Changed

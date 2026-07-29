@@ -164,16 +164,40 @@ def merged_version(record: dict[str, Any], version: dict[str, Any]) -> dict[str,
 
 
 def exact_scores(version: dict[str, Any]) -> str:
-    picks = [pick for pick in version.get("exact_score_picks", []) if isinstance(pick, dict)][:2]
+    raw_picks = version.get("display_exact_score_picks")
+    if not isinstance(raw_picks, list) or not raw_picks:
+        raw_picks = version.get("exact_score_picks", [])
+    picks = [pick for pick in raw_picks if isinstance(pick, dict)][:2]
     if not picks:
         return "未取得"
-    return "、".join(f"{pick.get('score')}（{percentage(pick.get('probability'))}）" for pick in picks)
+    conditioned = (
+        isinstance(version.get("display_exact_score_basis"), dict)
+        and version["display_exact_score_basis"].get("basis")
+        == "primary_total_net_profit"
+    )
+    if conditioned:
+        return "、".join(
+            (
+                f"{pick.get('score')}（全场{percentage(pick.get('probability'))}，"
+                f"主推成立时{percentage(pick.get('conditional_probability'))}）"
+            )
+            for pick in picks
+        )
+    return "、".join(
+        f"{pick.get('score')}（{percentage(pick.get('probability'))}）"
+        for pick in picks
+    )
 
 
 def display_text(version: dict[str, Any], field: str) -> str:
     value = clean_text(version.get(field))
     audit = version.get("zero_zero_audit")
-    if not isinstance(audit, dict) or audit.get("included_in_top2"):
+    audit_visible = (
+        audit.get("included_in_display_top2", audit.get("included_in_top2"))
+        if isinstance(audit, dict)
+        else None
+    )
+    if not isinstance(audit, dict) or audit_visible:
         return value
     clauses = re.split(r"(?<=[。；！？!?])", value)
     hidden = {index for index, clause in enumerate(clauses) if ZERO_ZERO_REFERENCE.search(clause)}
@@ -337,7 +361,8 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         primary_result_line,
         learning_scope_line,
         f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",
-        f"比分参考：{exact_scores(record)}｜命中排名：{record.get('exact_score_hit_rank') or '未命中'}",
+        f"比分参考：{exact_scores(record)}｜命中排名："
+        f"{record.get('display_exact_score_hit_rank', record.get('exact_score_hit_rank')) or '未命中'}",
         f"本场关键：{display_text(record, 'key_learning')}",
         f"{league_key}主推：{performance_text(league.get('primary'))}",
         f"累计主推：{performance_text(stats.get('primary'))}",

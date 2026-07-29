@@ -214,6 +214,81 @@ class MemoryStoreTests(unittest.TestCase):
                     record_args(base, predicted_score="2-0", exact_score_pick=["1-0:0.20", "2-0:0.15"])
                 )
 
+    def test_primary_conditioned_display_scores_are_separate_and_reviewed(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                record_args(
+                    base,
+                    predicted_score="1-1",
+                    exact_score_pick=["1-1:0.20", "1-0:0.15"],
+                    zero_zero_probability=0.10,
+                    zero_zero_rank=4,
+                    total_side="over",
+                    total_line=2.5,
+                    display_exact_score_pick=[
+                        "2-1:0.14:3",
+                        "3-1:0.10:5",
+                    ],
+                    display_exact_score_event_probability=0.55,
+                )
+            )["record"]
+
+            self.assertEqual(
+                [pick["score"] for pick in created["exact_score_picks"]],
+                ["1-1", "1-0"],
+            )
+            self.assertEqual(
+                [pick["score"] for pick in created["display_exact_score_picks"]],
+                ["2-1", "3-1"],
+            )
+            self.assertEqual(created["display_predicted_score"], "2-1")
+            self.assertEqual(
+                created["display_exact_score_basis"]["basis"],
+                "primary_total_net_profit",
+            )
+            self.assertAlmostEqual(
+                created["display_exact_score_picks"][0]["conditional_probability"],
+                0.14 / 0.55,
+            )
+
+            reviewed = memory_store.cmd_review(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    match_id="1",
+                    home_score=2,
+                    away_score=1,
+                    half_home_score=1,
+                    half_away_score=0,
+                    home_corners=None,
+                    away_corners=None,
+                    key_learning="主推成立时的条件波胆第一项命中",
+                )
+            )
+            self.assertIsNone(reviewed["record"]["exact_score_hit_rank"])
+            self.assertEqual(reviewed["record"]["display_exact_score_hit_rank"], 1)
+            self.assertEqual(reviewed["stats"]["exact_score_top1_hits"], 0)
+            self.assertEqual(reviewed["stats"]["display_exact_score_top1_hits"], 1)
+
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "does not support"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        predicted_score="1-1",
+                        exact_score_pick=["1-1:0.20", "1-0:0.15"],
+                        zero_zero_probability=0.10,
+                        zero_zero_rank=4,
+                        total_side="over",
+                        total_line=2.5,
+                        display_exact_score_pick=[
+                            "1-1:0.20:1",
+                            "2-1:0.14:3",
+                        ],
+                        display_exact_score_event_probability=0.55,
+                    )
+                )
+
     def test_zero_zero_audit_is_required_consistent_and_revisioned(self):
         with tempfile.TemporaryDirectory() as base:
             top_one = memory_store.cmd_record(
@@ -235,6 +310,7 @@ class MemoryStoreTests(unittest.TestCase):
                     "probability": 0.30,
                     "rank": 1,
                     "included_in_top2": True,
+                    "included_in_display_top2": True,
                     "status": "top_two",
                     "odds": 12.0,
                     "ev": 2.60,
