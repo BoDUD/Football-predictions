@@ -11,6 +11,8 @@ from typing import Any
 HALF_RESULTS = ("H", "D", "A")
 FULL_RESULTS = ("H", "D", "A")
 OUTCOMES = tuple(f"{half}{full}" for half in HALF_RESULTS for full in FULL_RESULTS)
+SELECTION_BASIS = "scenario_stability_v2"
+FULL_TIME_TIE_TOLERANCE = 1e-9
 
 STABILITY_WEIGHTS = {
     "conditional_follow_through": 0.45,
@@ -21,6 +23,14 @@ STABILITY_WEIGHTS = {
 MIN_SCENARIO_HALF_PROBABILITY = 0.15
 MIN_SCENARIO_JOINT_PROBABILITY = 0.05
 MIN_SCENARIO_CONDITIONAL_STABILITY = 0.25
+EXACT_RESULT_ALIASES = {
+    "H": "H",
+    "HOME": "H",
+    "D": "D",
+    "DRAW": "D",
+    "A": "A",
+    "AWAY": "A",
+}
 
 
 def parse_assignments(
@@ -88,6 +98,26 @@ def _market_probabilities_from_odds(
     return {key: inverse[key] / overround for key in OUTCOMES}
 
 
+def _normalize_exact_score_results(
+    values: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    if values is None:
+        return []
+    if len(values) != 2:
+        raise ValueError(
+            "exact_score_results must contain exactly two Top-2 result labels"
+        )
+    normalized: list[str] = []
+    for value in values:
+        result = EXACT_RESULT_ALIASES.get(str(value).strip().upper())
+        if result is None:
+            raise ValueError(
+                "exact_score_results values must be home/H, draw/D, or away/A"
+            )
+        normalized.append(result)
+    return normalized
+
+
 def rank_htft(
     matrix: dict[str, float],
     half_probabilities: dict[str, float],
@@ -100,6 +130,7 @@ def rank_htft(
     tolerance_pp: float = 0.5,
     edge_threshold_pp: float = 0.0,
     minimum_firms: int = 5,
+    exact_score_results: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     _require_keys(matrix, OUTCOMES, "matrix")
     _require_keys(half_probabilities, HALF_RESULTS, "half probabilities")
@@ -114,6 +145,9 @@ def rank_htft(
         raise ValueError("edge_threshold_pp must be finite and non-negative")
     if minimum_firms < 0:
         raise ValueError("minimum_firms must be non-negative")
+    normalized_exact_results = _normalize_exact_score_results(
+        exact_score_results
+    )
 
     tolerance = tolerance_pp / 100
     _validate_probability_total(matrix, label="matrix", tolerance=tolerance)
@@ -154,6 +188,29 @@ def rank_htft(
             f"max difference {max_difference_pp:.3f}pp exceeds "
             f"{tolerance_pp:.3f}pp"
         )
+
+    full_time_order = sorted(
+        FULL_RESULTS,
+        key=lambda result: (
+            -full_probabilities[result],
+            FULL_RESULTS.index(result),
+        ),
+    )
+    second_highest_full_probability = sorted(
+        full_probabilities.values(),
+        reverse=True,
+    )[1]
+    coherent_full_time_results = [
+        result
+        for result in full_time_order
+        if (
+            full_probabilities[result]
+            >= second_highest_full_probability - FULL_TIME_TIE_TOLERANCE
+        )
+    ]
+    coherent_full_time_set = set(coherent_full_time_results)
+    distinct_exact_results = list(dict.fromkeys(normalized_exact_results))
+    exact_result_set = set(distinct_exact_results)
 
     supplied_odds = odds or {}
     for selection, decimal_odds in supplied_odds.items():
@@ -196,6 +253,20 @@ def rank_htft(
             probability / half_probability if half_probability > 0 else 0.0
         )
         state_continuity = half_result == full_result
+        full_time_thesis_rank = full_time_order.index(full_result) + 1
+        coherence_gate_passed = full_result in coherent_full_time_set
+        exact_score_result_aligned = (
+            full_result in exact_result_set
+            if normalized_exact_results
+            else None
+        )
+        coherence_failures: list[str] = []
+        if not coherence_gate_passed:
+            coherence_failures.append(
+                "terminal result "
+                f"{full_result} ranks {full_time_thesis_rank} in the "
+                "aggregate full-time model"
+            )
         stability_components = {
             "conditional_follow_through": (
                 STABILITY_WEIGHTS["conditional_follow_through"]
@@ -258,6 +329,9 @@ def rank_htft(
         failed.extend(
             f"scenario stability: {failure}" for failure in stability_failures
         )
+        failed.extend(
+            f"scenario coherence: {failure}" for failure in coherence_failures
+        )
 
         candidates.append(
             {
@@ -267,6 +341,10 @@ def rank_htft(
                 "half_time_probability": half_probability,
                 "conditional_stability": conditional_stability,
                 "state_continuity": state_continuity,
+                "full_time_thesis_rank": full_time_thesis_rank,
+                "coherence_gate_passed": coherence_gate_passed,
+                "coherence_gate_failures": coherence_failures,
+                "exact_score_result_aligned": exact_score_result_aligned,
                 "stability_score": round(stability_score, 4),
                 "stability_components": {
                     key: round(value * 100, 4)
@@ -283,8 +361,11 @@ def rank_htft(
             }
         )
 
-    # Select coherent scenarios by follow-through stability and match-shape
-    # support. Odds and EV qualify a selected scenario but never choose it.
+    # First restrict selection to paths whose terminal result belongs to the
+    # aggregate full-time Top 2, including exact ties at the cutoff. Exact-score
+    # Top 2 result classes are an audit annotation only: modal score cells must
+    # not receive a second vote in the scenario selector. Odds and EV qualify
+    # selected scenarios but never choose them.
     candidates.sort(
         key=lambda item: (
             -item["stability_score"],
@@ -295,8 +376,31 @@ def rank_htft(
             item["selection"],
         )
     )
-    eligible = [item for item in candidates if item["stability_gate_passed"]]
-    selected = eligible[:2]
+    eligible = [
+        item
+        for item in candidates
+        if item["stability_gate_passed"]
+        and item["coherence_gate_passed"]
+    ]
+    selected: list[dict[str, Any]] = eligible[:2]
+    if len(selected) < 2:
+        selected_keys = {item["selection"] for item in selected}
+        selected.extend(
+            item
+            for item in candidates
+            if item["stability_gate_passed"]
+            and item["selection"] not in selected_keys
+        )
+        selected = selected[:2]
+    if len(selected) < 2:
+        selected_keys = {item["selection"] for item in selected}
+        selected.extend(
+            item
+            for item in candidates
+            if item["coherence_gate_passed"]
+            and item["selection"] not in selected_keys
+        )
+        selected = selected[:2]
     if len(selected) < 2:
         selected_keys = {item["selection"] for item in selected}
         selected.extend(
@@ -316,9 +420,24 @@ def rank_htft(
             if item["stability_gate_passed"]
             else "insufficient"
         )
+        scenario["coherence_status"] = (
+            "on_thesis"
+            if item["coherence_gate_passed"]
+            else "off_thesis_fallback"
+        )
         if not item["stability_gate_passed"]:
             scenario["selection_reason"] = (
                 "fallback slot; scenario stability evidence is below threshold"
+            )
+        elif not item["coherence_gate_passed"]:
+            scenario["selection_reason"] = (
+                "fallback slot; terminal result is outside the aggregate "
+                "full-time Top 2"
+            )
+        elif item["exact_score_result_aligned"] is True:
+            scenario["selection_reason"] = (
+                "stable path inside the aggregate full-time thesis; its "
+                "terminal result also appears in the exact-score Top 2"
             )
         elif item["state_continuity"]:
             scenario["selection_reason"] = (
@@ -348,9 +467,17 @@ def rank_htft(
     ]
 
     return {
-        "selection_basis": "scenario_stability_v1",
-        "ranking_basis": "scenario_stability_v1",
+        "selection_basis": SELECTION_BASIS,
+        "ranking_basis": SELECTION_BASIS,
         "stability_weights": STABILITY_WEIGHTS,
+        "coherence_policy": {
+            "version": SELECTION_BASIS,
+            "aggregate_full_time_order": full_time_order,
+            "allowed_terminal_results": coherent_full_time_results,
+            "exact_score_top_two_results": normalized_exact_results,
+            "exact_score_distinct_results": distinct_exact_results,
+            "exact_score_audit_only": True,
+        },
         "marginal_validation": {
             "passed": True,
             "tolerance_pp": tolerance_pp,
@@ -399,6 +526,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Optional no-vig market probability as HH=0.20; repeat for all outcomes",
     )
+    parser.add_argument(
+        "--exact-result",
+        action="append",
+        choices=("home", "draw", "away"),
+        help=(
+            "Audit-only result class of one unconditional exact-score Top-2 "
+            "candidate; supply exactly twice when used"
+        ),
+    )
     parser.add_argument("--firm-count", type=int, default=0)
     parser.add_argument(
         "--data-quality",
@@ -429,6 +565,7 @@ def main() -> int:
         firm_count=args.firm_count,
         data_quality=args.data_quality,
         tolerance_pp=args.tolerance_pp,
+        exact_score_results=args.exact_result,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0
