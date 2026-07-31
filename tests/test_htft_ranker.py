@@ -61,7 +61,7 @@ class HtftRankerTests(unittest.TestCase):
             [item["selection"] for item in result["scenarios"]],
             ["HH", "AA"],
         )
-        self.assertEqual(result["selection_basis"], "scenario_stability_v1")
+        self.assertEqual(result["selection_basis"], "scenario_stability_v2")
         self.assertNotIn("rank", result["scenarios"][0])
         self.assertEqual(result["ranking_basis"], result["selection_basis"])
         self.assertEqual(
@@ -82,6 +82,148 @@ class HtftRankerTests(unittest.TestCase):
             all(item["status"] == "observation" for item in result["scenarios"])
         )
 
+    def test_full_time_coherence_blocks_third_result_without_exact_score_input(self):
+        matrix = {
+            "HH": 0.2886997689,
+            "HD": 0.0446901288,
+            "HA": 0.0108984219,
+            "DH": 0.1769962122,
+            "DD": 0.2006526807,
+            "DA": 0.0979046617,
+            "AH": 0.0176019081,
+            "AD": 0.0416661843,
+            "AA": 0.1208899510,
+        }
+        half = {
+            "H": 0.3442883195,
+            "D": 0.4755535546,
+            "A": 0.1801580434,
+        }
+        full = {
+            "H": 0.4832978892,
+            "D": 0.2870089938,
+            "A": 0.2296930346,
+        }
+
+        result = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+        )
+
+        self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "DD"],
+        )
+        self.assertEqual(
+            result["coherence_policy"]["allowed_terminal_results"],
+            ["H", "D"],
+        )
+        self.assertTrue(
+            all(
+                item["coherence_status"] == "on_thesis"
+                for item in result["scenarios"]
+            )
+        )
+
+    def test_exact_score_results_are_audit_only(self):
+        matrix = {
+            "HH": 0.2886997689,
+            "HD": 0.0446901288,
+            "HA": 0.0108984219,
+            "DH": 0.1769962122,
+            "DD": 0.2006526807,
+            "DA": 0.0979046617,
+            "AH": 0.0176019081,
+            "AD": 0.0416661843,
+            "AA": 0.1208899510,
+        }
+        half = {
+            "H": 0.3442883195,
+            "D": 0.4755535546,
+            "A": 0.1801580434,
+        }
+        full = {
+            "H": 0.4832978892,
+            "D": 0.2870089938,
+            "A": 0.2296930346,
+        }
+
+        result = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            exact_score_results=["home", "away"],
+        )
+
+        self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "DD"],
+        )
+        self.assertTrue(result["coherence_policy"]["exact_score_audit_only"])
+        self.assertEqual(
+            [
+                item["exact_score_result_aligned"]
+                for item in result["scenarios"]
+            ],
+            [True, False],
+        )
+
+    def test_second_place_full_time_tie_does_not_arbitrarily_exclude_a_result(self):
+        matrix = {
+            "HH": 0.30,
+            "HD": 0.02,
+            "HA": 0.03,
+            "DH": 0.15,
+            "DD": 0.16,
+            "DA": 0.14,
+            "AH": 0.05,
+            "AD": 0.07,
+            "AA": 0.08,
+        }
+        half = {"H": 0.35, "D": 0.45, "A": 0.20}
+        full = {"H": 0.50, "D": 0.25, "A": 0.25}
+
+        result = ranker.rank_htft(matrix, half, full)
+
+        self.assertEqual(
+            result["coherence_policy"]["allowed_terminal_results"],
+            ["H", "D", "A"],
+        )
+
+    def test_coherent_pool_shortfall_prefers_supported_off_thesis_fallback(self):
+        matrix = {
+            "HH": 0.038068613135096914,
+            "HD": 0.1081065306610073,
+            "HA": 0.0030697434075369462,
+            "DH": 0.07019623096012545,
+            "DD": 0.051244833813134404,
+            "DA": 0.18027816059764792,
+            "AH": 0.37027203941340314,
+            "AD": 0.13304601045625775,
+            "AA": 0.04571783755579024,
+        }
+        half = {
+            result: sum(matrix[f"{result}{full}"] for full in ranker.FULL_RESULTS)
+            for result in ranker.HALF_RESULTS
+        }
+        full = {
+            result: sum(matrix[f"{half}{result}"] for half in ranker.HALF_RESULTS)
+            for result in ranker.FULL_RESULTS
+        }
+
+        result = ranker.rank_htft(matrix, half, full)
+
+        self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["AH", "DA"],
+        )
+        self.assertEqual(
+            result["scenarios"][1]["coherence_status"],
+            "off_thesis_fallback",
+        )
+        self.assertEqual(result["scenarios"][1]["stability_status"], "supported")
+
     def test_transition_path_can_be_selected_when_follow_through_is_strong(self):
         matrix = {
             "HH": 0.20,
@@ -97,13 +239,41 @@ class HtftRankerTests(unittest.TestCase):
         half = {"H": 0.25, "D": 0.40, "A": 0.35}
         full = {"H": 0.70, "D": 0.13, "A": 0.17}
 
-        result = ranker.rank_htft(matrix, half, full)
+        result = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            exact_score_results=["home", "home"],
+        )
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
             ["HH", "DH"],
         )
         self.assertFalse(result["scenarios"][1]["state_continuity"])
+        self.assertTrue(result["coherence_policy"]["exact_score_audit_only"])
+        self.assertTrue(
+            all(
+                item["exact_score_result_aligned"]
+                for item in result["scenarios"]
+            )
+        )
+
+    def test_exact_score_result_audit_requires_exactly_two_valid_results(self):
+        with self.assertRaisesRegex(ValueError, "exactly two"):
+            ranker.rank_htft(
+                MATRIX,
+                HALF,
+                FULL,
+                exact_score_results=["home"],
+            )
+        with self.assertRaisesRegex(ValueError, "home/H"):
+            ranker.rank_htft(
+                MATRIX,
+                HALF,
+                FULL,
+                exact_score_results=["home", "unknown"],
+            )
 
     def test_second_slot_is_explicit_when_stability_evidence_is_insufficient(self):
         matrix = {

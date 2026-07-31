@@ -326,7 +326,7 @@ Recalculate EV from the archived probability distribution and odds format. Never
 2. Exactly two user-facing exact-score scenarios. Preserve the unconditional Top 2 internally; for a formal total primary, display the two highest-probability net-profit scenarios and label the conditioning explicitly
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
-5. A 3x3 HT/FT probability matrix and exactly two stability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, select with `scenario_stability_v1`, and use EV only to classify either selected scenario as formal or observation. Never let raw joint probability or a long price choose the pair.
+5. A 3x3 HT/FT probability matrix and exactly two stability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, select with `scenario_stability_v2`, and gate terminal results to the aggregate full-time Top 2 before stability ranking, including ties at the cutoff. Use exact-score result classes only as a consistency audit and EV only to classify either selected scenario as formal or observation. Never let raw joint probability, exact-score slot coverage, or a long price choose the pair.
 
 Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
 
