@@ -902,6 +902,8 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )["record"]
             self.assertEqual(half["primary_market"], "half_time")
+            self.assertEqual(half["primary_pick"]["primary_market"], "half_time")
+            self.assertEqual(half["primary_pick"]["market"], "total")
             self.assertEqual(half["primary_pick"]["confidence_rank"], 1)
 
             htft_overrides = {

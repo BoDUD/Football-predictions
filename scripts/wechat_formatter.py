@@ -214,11 +214,29 @@ def display_text(version: dict[str, Any], field: str) -> str:
 
 
 def primary_line(version: dict[str, Any], record: dict[str, Any]) -> str:
-    return format_pick(version.get("primary_market"), version.get("primary_pick"), record)
+    return format_pick(
+        version.get("primary_market"), resolved_primary_pick(version), record
+    )
+
+
+def resolved_primary_pick(version: dict[str, Any]) -> dict[str, Any] | None:
+    pick = version.get("primary_pick")
+    if not isinstance(pick, dict):
+        return None
+    if (
+        version.get("primary_market") == "half_time"
+        and pick.get("market") not in {"1x2", "asian", "total"}
+    ):
+        half_time_pick = version.get("half_time_pick")
+        if isinstance(half_time_pick, dict):
+            return half_time_pick
+    return pick
 
 
 def secondary_picks(version: dict[str, Any], record: dict[str, Any]) -> str:
-    primary_identity = memory_store.pick_identity(version.get("primary_market"), version.get("primary_pick"))
+    primary_identity = memory_store.pick_identity(
+        version.get("primary_market"), resolved_primary_pick(version)
+    )
     values = []
     for market, pick in memory_store.formal_picks(version):
         if memory_store.pick_identity(market, pick) == primary_identity:
