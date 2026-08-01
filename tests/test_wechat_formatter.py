@@ -94,6 +94,34 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("0-0（12.0%）", text)
             self.assert_plain(text)
 
+    def test_legacy_half_time_primary_uses_executable_submarket(self):
+        with tempfile.TemporaryDirectory() as base:
+            record = base_record()
+            half_pick = {
+                "market": "total",
+                "side": "over",
+                "line": 1.0,
+                "odds": 0.98,
+                "probability": 0.33,
+                "ev": 0.016,
+                "role": "primary",
+            }
+            record["primary_market"] = "half_time"
+            record["half_time_pick"] = dict(half_pick)
+            record["primary_pick"] = {
+                **half_pick,
+                "market": "half_time",
+            }
+            write_history(base, [record])
+
+            text = formatter.render(base, "42", "initial")
+
+            self.assertIn("主推：半场大1 @0.98", text)
+            self.assertIn("次选参考：客队 +0.25 @0.86、小2.5 @0.92", text)
+            self.assertNotIn("次选参考：半场大1", text)
+            self.assertNotIn("半场 客队 +1", text)
+            self.assert_plain(text)
+
     def test_primary_conditioned_scores_are_used_in_user_facing_copy(self):
         record = base_record()
         record["primary_pick"]["side"] = "over"

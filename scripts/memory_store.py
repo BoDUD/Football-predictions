@@ -1358,7 +1358,12 @@ def apply_primary_role(
         raise ValueError(f"Primary pick {primary_market}{suffix} is not present among formal picks")
     selected["role"] = "primary"
     snapshot = deepcopy(selected)
-    snapshot["market"] = primary_market
+    # Half-time picks already use ``market`` for their executable submarket
+    # (1x2/asian/total).  Preserve it so formatting and settlement do not
+    # mistake a half-time total for a half-time handicap.  Keep the outer
+    # market identity in a separate field for every primary snapshot.
+    snapshot.setdefault("market", primary_market)
+    snapshot["primary_market"] = primary_market
     snapshot["role"] = "primary"
     record["primary_market"] = primary_market
     record["primary_pick"] = snapshot
