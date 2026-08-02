@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
-  short_description: "Auditable score-model football predictions"
-  default_prompt: "Use $soccer-predict to generate one auditable score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."
+  short_description: "League-trained HT/FT and score predictions"
+  default_prompt: "Use $soccer-predict to generate an auditable league-trained HT/FT matrix and canonical full-time score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."

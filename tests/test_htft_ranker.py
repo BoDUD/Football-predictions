@@ -36,6 +36,14 @@ ODDS = {
     "AD": 13.5,
     "AA": 4.9,
 }
+ODDS_CONTEXT = {
+    "kind": "current_htft_nine_way_market",
+    "complete": True,
+    "source": "verified current nine-way consensus",
+    "firm_count": 6,
+    "captured_at": "2026-08-02T12:00:00Z",
+    "kickoff": "2026-08-02T13:00:00Z",
+}
 
 
 def market_with_scenario_edges() -> dict[str, float]:
@@ -47,7 +55,7 @@ def market_with_scenario_edges() -> dict[str, float]:
 
 
 class HtftRankerTests(unittest.TestCase):
-    def test_stability_selection_rejects_mechanical_joint_top_two(self):
+    def test_v3_selects_raw_joint_probability_top_two(self):
         result = ranker.rank_htft(
             MATRIX,
             HALF,
@@ -59,30 +67,40 @@ class HtftRankerTests(unittest.TestCase):
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
-        self.assertEqual(result["selection_basis"], "scenario_stability_v2")
+        self.assertEqual(
+            result["selection_basis"],
+            "probability_top2_v3_post_selection",
+        )
         self.assertNotIn("rank", result["scenarios"][0])
         self.assertEqual(result["ranking_basis"], result["selection_basis"])
         self.assertEqual(
             [item["selection"] for item in result["top_two"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
         self.assertEqual(
             [item["rank"] for item in result["top_two"]],
             [1, 2],
         )
-        self.assertGreater(
+        self.assertAlmostEqual(
             result["scenarios"][1]["conditional_stability"],
             MATRIX["DH"] / HALF["D"],
         )
         self.assertTrue(result["marginal_validation"]["passed"])
+        self.assertAlmostEqual(
+            result["pair_probability_mass"],
+            MATRIX["HH"] + MATRIX["DH"],
+        )
+        self.assertEqual(result["pair_mass_threshold"], 0.46)
+        self.assertFalse(result["pair_mass_gate_passed"])
+        self.assertEqual(result["confidence_status"], "low_pair_probability_mass")
         self.assertEqual(result["formal_count"], 0)
         self.assertTrue(
             all(item["status"] == "observation" for item in result["scenarios"])
         )
 
-    def test_full_time_coherence_blocks_third_result_without_exact_score_input(self):
+    def test_coherence_is_audit_only_and_cannot_replace_a_probability_slot(self):
         matrix = {
             "HH": 0.2886997689,
             "HD": 0.0446901288,
@@ -191,7 +209,7 @@ class HtftRankerTests(unittest.TestCase):
             ["H", "D", "A"],
         )
 
-    def test_coherent_pool_shortfall_prefers_supported_off_thesis_fallback(self):
+    def test_off_thesis_joint_top_two_path_remains_in_its_slot(self):
         matrix = {
             "HH": 0.038068613135096914,
             "HD": 0.1081065306610073,
@@ -224,7 +242,7 @@ class HtftRankerTests(unittest.TestCase):
         )
         self.assertEqual(result["scenarios"][1]["stability_status"], "supported")
 
-    def test_transition_path_can_be_selected_when_follow_through_is_strong(self):
+    def test_conditional_follow_through_cannot_replace_probability_top_two(self):
         matrix = {
             "HH": 0.20,
             "HD": 0.03,
@@ -248,9 +266,9 @@ class HtftRankerTests(unittest.TestCase):
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "DH"],
+            ["DH", "HH"],
         )
-        self.assertFalse(result["scenarios"][1]["state_continuity"])
+        self.assertFalse(result["scenarios"][0]["state_continuity"])
         self.assertTrue(result["coherence_policy"]["exact_score_audit_only"])
         self.assertTrue(
             all(
@@ -275,7 +293,7 @@ class HtftRankerTests(unittest.TestCase):
                 exact_score_results=["home", "unknown"],
             )
 
-    def test_second_slot_is_explicit_when_stability_evidence_is_insufficient(self):
+    def test_second_slot_is_still_shown_when_pair_mass_is_below_gate(self):
         matrix = {
             "HH": 0.64,
             "HD": 0.08,
@@ -296,10 +314,200 @@ class HtftRankerTests(unittest.TestCase):
         self.assertEqual(result["scenarios"][0]["stability_status"], "supported")
         self.assertEqual(result["scenarios"][1]["stability_status"], "insufficient")
         self.assertEqual(result["scenarios"][1]["status"], "observation")
+        self.assertEqual(
+            result["scenarios"][1]["confidence_status"],
+            "league_context_required",
+        )
+        self.assertTrue(result["pair_mass_threshold_crossed"])
+        self.assertFalse(result["pair_mass_gate_passed"])
         self.assertIn(
-            "below threshold",
+            "stability evidence is below",
             result["scenarios"][1]["selection_reason"],
         )
+
+    def test_probability_ties_use_canonical_outcome_order(self):
+        matrix = {selection: 1 / 9 for selection in ranker.OUTCOMES}
+        marginals = {result: 1 / 3 for result in ranker.HALF_RESULTS}
+
+        result = ranker.rank_htft(matrix, marginals, marginals)
+
+        self.assertEqual(
+            [item["selection"] for item in result["scenarios"]],
+            ["HH", "HD"],
+        )
+        self.assertEqual(
+            result["selection_policy"]["canonical_outcome_order"],
+            list(ranker.OUTCOMES),
+        )
+
+    def test_policy_pause_and_anchor_provenance_cannot_be_bypassed(self):
+        matrix = {
+            "HH": 0.26,
+            "HD": 0.04,
+            "HA": 0.03,
+            "DH": 0.10,
+            "DD": 0.22,
+            "DA": 0.08,
+            "AH": 0.08,
+            "AD": 0.07,
+            "AA": 0.12,
+        }
+        half = {"H": 0.33, "D": 0.40, "A": 0.27}
+        full = {"H": 0.44, "D": 0.33, "A": 0.23}
+        market = dict(matrix)
+        market["HH"] -= 0.04
+        market["DD"] -= 0.04
+        market["AA"] += 0.08
+        odds = {selection: 1.0 / probability for selection, probability in market.items()}
+
+        model_only = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            odds=odds,
+            market_probabilities=market,
+            firm_count=6,
+            data_quality="high",
+            league_key="brazil_serie_a",
+        )
+        self.assertAlmostEqual(model_only["pair_mass"], 0.48)
+        self.assertEqual(model_only["pair_mass_threshold"], 0.46)
+        self.assertTrue(model_only["pair_mass_threshold_crossed"])
+        self.assertFalse(model_only["pair_mass_gate_passed"])
+        self.assertTrue(
+            all(item["status"] == "observation" for item in model_only["scenarios"])
+        )
+        self.assertEqual(model_only["formal_count"], 0)
+        self.assertEqual(model_only["diagnostically_qualified_count"], 0)
+        self.assertEqual(
+            model_only["league_gate_evidence"]["status"],
+            "league_gate_lower_bound_not_above_chance",
+        )
+        self.assertTrue(
+            all(
+                any(
+                    "odds provenance unavailable" in failure
+                    for failure in item["diagnostic_failed_thresholds"]
+                )
+                for item in model_only["scenarios"]
+            )
+        )
+        self.assertFalse(model_only["market_policy"]["htft_formal_enabled"])
+        self.assertTrue(
+            all(
+                "pauses HT/FT formal picks" in item["failed_thresholds"][-1]
+                for item in model_only["scenarios"]
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "research-only"):
+            ranker.rank_htft(
+                matrix,
+                half,
+                full,
+                odds=odds,
+                market_probabilities=market,
+                firm_count=6,
+                data_quality="high",
+                market_anchored=True,
+            )
+
+        anchored = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            odds=odds,
+            market_probabilities=market,
+            firm_count=6,
+            data_quality="high",
+            anchor_context={
+                "kind": "half_time_current_market",
+                "complete": True,
+                "de_vigged": True,
+                "source": "verified current first-half consensus",
+                "captured_at": "2026-08-02T12:00:00Z",
+            },
+        )
+        self.assertEqual(
+            anchored["matrix_mode"], "half_time_market_anchor_unvalidated"
+        )
+        self.assertIsNone(anchored["pair_mass_threshold"])
+        self.assertFalse(anchored["pair_mass_gate_passed"])
+        self.assertEqual(anchored["confidence_status"], "anchor_gate_unvalidated")
+        self.assertTrue(
+            all(
+                item["diagnostic_qualification_status"] == "unqualified"
+                and item["status"] == "observation"
+                for item in anchored["scenarios"]
+            )
+        )
+
+    def test_league_evidence_prevents_global_gate_from_being_generalized(self):
+        matrix = {
+            "HH": 0.26,
+            "HD": 0.04,
+            "HA": 0.03,
+            "DH": 0.10,
+            "DD": 0.22,
+            "DA": 0.08,
+            "AH": 0.08,
+            "AD": 0.07,
+            "AA": 0.12,
+        }
+        half = {"H": 0.33, "D": 0.40, "A": 0.27}
+        full = {"H": 0.44, "D": 0.33, "A": 0.23}
+
+        japan = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            league_key="japan_j1",
+        )
+        korea = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            league_key="korea_k1",
+        )
+
+        self.assertTrue(japan["pair_mass_threshold_crossed"])
+        self.assertFalse(japan["pair_mass_gate_passed"])
+        self.assertEqual(
+            japan["confidence_status"],
+            "competition_regime_shift_unconfirmed",
+        )
+        self.assertAlmostEqual(
+            japan["league_gate_evidence"]["hit_rate_when_covered"],
+            32 / 66,
+        )
+        self.assertEqual(
+            korea["confidence_status"],
+            "unsupported_league_no_training_evidence",
+        )
+        self.assertEqual(korea["formal_count"], 0)
+
+    def test_odds_context_requires_pre_kickoff_provenance(self):
+        with self.assertRaisesRegex(ValueError, "strictly before kickoff"):
+            ranker.rank_htft(
+                MATRIX,
+                HALF,
+                FULL,
+                odds=ODDS,
+                firm_count=6,
+                odds_context={
+                    **ODDS_CONTEXT,
+                    "captured_at": ODDS_CONTEXT["kickoff"],
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "must match firm_count"):
+            ranker.rank_htft(
+                MATRIX,
+                HALF,
+                FULL,
+                odds=ODDS,
+                firm_count=5,
+                odds_context=ODDS_CONTEXT,
+            )
 
     def test_inconsistent_full_time_marginal_is_rejected(self):
         bad_full = {"H": 0.40, "D": 0.30, "A": 0.30}
@@ -355,23 +563,23 @@ class HtftRankerTests(unittest.TestCase):
             odds=value_odds,
             firm_count=6,
             data_quality="high",
+            odds_context=ODDS_CONTEXT,
         )
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
-        self.assertTrue(
-            all(item["status"] == "formal" for item in result["scenarios"])
-        )
+        self.assertTrue(all(item["status"] == "observation" for item in result["scenarios"]))
+        self.assertTrue(all(not item["pair_mass_gate_passed"] for item in result["scenarios"]))
         self.assertGreaterEqual(result["scenarios"][0]["ev"], 0.08)
         self.assertGreaterEqual(result["scenarios"][0]["edge_pp"], 4.0)
         self.assertIn(
-            "DH",
+            "AA",
             [item["selection"] for item in result["value_anomalies"]],
         )
 
-    def test_sub_eight_percent_positive_ev_can_qualify(self):
+    def test_sub_eight_percent_positive_ev_still_needs_pair_mass_gate(self):
         odds = {
             "HH": 1.05 / MATRIX["HH"],
             "AA": 1.04 / MATRIX["AA"],
@@ -388,13 +596,16 @@ class HtftRankerTests(unittest.TestCase):
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
+        self.assertFalse(result["pair_mass_gate_passed"])
+        self.assertTrue(all(item["status"] == "observation" for item in result["scenarios"]))
         self.assertTrue(
-            all(item["status"] == "formal" for item in result["scenarios"])
-        )
-        self.assertTrue(
-            all(0 < item["ev"] < 0.08 for item in result["scenarios"])
+            all(
+                "complete current 9-way HT/FT odds unavailable"
+                in item["diagnostic_failed_thresholds"]
+                for item in result["scenarios"]
+            )
         )
 
     def test_zero_and_negative_ev_do_not_qualify(self):
@@ -414,7 +625,7 @@ class HtftRankerTests(unittest.TestCase):
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
         self.assertTrue(
             all(item["status"] == "observation" for item in result["scenarios"])
@@ -502,7 +713,7 @@ class HtftRankerTests(unittest.TestCase):
 
         self.assertEqual(
             [item["selection"] for item in result["scenarios"]],
-            ["HH", "AA"],
+            ["HH", "DH"],
         )
         self.assertTrue(
             all(item["status"] == "observation" for item in result["scenarios"])
