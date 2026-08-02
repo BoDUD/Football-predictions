@@ -47,6 +47,63 @@ print(json.dumps(payload))
 
 
 class SoccerWatchdogTests(unittest.TestCase):
+    def test_default_workspace_uses_current_project_for_installed_skill(self):
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            installed_skill = root / "codex-skills" / "soccer-predict"
+            (workspace / ".codex" / "soccer-predict").mkdir(parents=True)
+            installed_skill.mkdir(parents=True)
+            with (
+                mock.patch.object(
+                    soccer_watchdog, "default_skill_dir", return_value=installed_skill
+                ),
+                mock.patch.object(soccer_watchdog.Path, "cwd", return_value=workspace),
+            ):
+                self.assertEqual(
+                    soccer_watchdog.default_workspace(), workspace.resolve()
+                )
+
+    def test_default_workspace_uses_standalone_repository_root(self):
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            repo = Path(directory) / "Football-predictions"
+            (repo / ".codex" / "soccer-predict").mkdir(parents=True)
+            with (
+                mock.patch.object(
+                    soccer_watchdog, "default_skill_dir", return_value=repo
+                ),
+                mock.patch.object(soccer_watchdog.Path, "cwd", return_value=repo),
+            ):
+                self.assertEqual(soccer_watchdog.default_workspace(), repo.resolve())
+
+    def test_default_workspace_keeps_legacy_parent_state_compatible(self):
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            workspace = Path(directory) / "workspace"
+            repo = workspace / "Football-predictions"
+            repo.mkdir(parents=True)
+            (workspace / ".codex" / "soccer-predict").mkdir(parents=True)
+            with (
+                mock.patch.object(
+                    soccer_watchdog, "default_skill_dir", return_value=repo
+                ),
+                mock.patch.object(soccer_watchdog.Path, "cwd", return_value=repo),
+            ):
+                self.assertEqual(
+                    soccer_watchdog.default_workspace(), workspace.resolve()
+                )
+
+    def test_default_workspace_defaults_to_repository_without_state(self):
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            repo = Path(directory) / "Football-predictions"
+            repo.mkdir()
+            with (
+                mock.patch.object(
+                    soccer_watchdog, "default_skill_dir", return_value=repo
+                ),
+                mock.patch.object(soccer_watchdog.Path, "cwd", return_value=repo),
+            ):
+                self.assertEqual(soccer_watchdog.default_workspace(), repo.resolve())
+
     def make_layout(
         self,
         lineup_due=None,

@@ -93,9 +93,20 @@ def default_skill_dir() -> Path:
 
 
 def default_workspace() -> Path:
-    # Repository layout: <workspace>/Football-predictions/scripts/this-file.
-    # This is explicit and deterministic; it never depends on HOME or cwd.
-    return default_skill_dir().parent.resolve()
+    skill_dir = default_skill_dir().resolve()
+    state_relative = Path(".codex") / "soccer-predict"
+    current_dir = Path.cwd().resolve()
+
+    # The repository is the canonical workspace after a standalone install.
+    # Retain compatibility with the former <workspace>/Football-predictions
+    # layout and with an installed Skill invoked from a project workspace.
+    if (current_dir / state_relative).exists():
+        return current_dir
+    if (skill_dir / state_relative).exists():
+        return skill_dir
+    if (skill_dir.parent / state_relative).exists():
+        return skill_dir.parent
+    return skill_dir
 
 
 def resolve_existing_directory(value: str | os.PathLike[str], label: str) -> Path:
