@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -15,6 +17,91 @@ memory_store = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(memory_store)
 
 
+DEFAULT_SCORE_MATRIX = [
+    [0.10, 0.05, 0.0, 0.10],
+    [0.20, 0.05, 0.0, 0.10],
+    [0.15, 0.0, 0.10, 0.0],
+    [0.15, 0.0, 0.0, 0.0],
+]
+
+
+def write_score_prediction(
+    base_dir: str,
+    match_id: str,
+    *,
+    matrix=None,
+    home_team="主队",
+    away_team="客队",
+    kickoff="2026-07-21T19:30:00+09:00",
+):
+    artifact = {
+        "artifact_type": "soccer_score_prediction",
+        "schema_version": "1.0.0",
+        "model_version": "dixon-coles-time-decay/1.0.0",
+        "model_hash": "sha256:" + "1" * 64,
+        "generated_at": "2026-07-21T18:55:00+09:00",
+        "fixture": {
+            "home_team": home_team,
+            "away_team": away_team,
+            "kickoff": kickoff,
+            "unknown_team_policy": "error",
+        },
+        "provenance": {
+            "model_schema_version": "1.0.0",
+            "training": {
+                "source_data_hash": "sha256:" + "2" * 64,
+                "match_count": 100,
+                "start_date": "2025-01-01",
+                "end_date": "2026-07-20",
+            },
+            "training_cutoff_date": "2026-07-20",
+            "strictly_before_kickoff_utc_date": True,
+            "generated_before_kickoff": True,
+        },
+        "score_matrix": {"probabilities": matrix or DEFAULT_SCORE_MATRIX},
+        "tail_mass": {
+            "tolerance_met": True,
+            "raw_omitted_probability": 0.0,
+            "tolerance": 1e-8,
+        },
+        "one_x_two": {"home": 0.5, "draw": 0.25, "away": 0.25},
+        "totals": {},
+        "asian_handicaps": {},
+    }
+    path = Path(base_dir) / f"score-prediction-{match_id}.json"
+    path.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def synthesize_market_odds(values, prefix, outcomes, selected):
+    odds = values.get(f"{prefix}_odds")
+    market_probability = values.get(f"{prefix}_market_probability")
+    odds_format = values.get(f"{prefix}_odds_format")
+    if odds is None or market_probability is None or not selected or odds_format is None:
+        return None
+    selected_raw = 1.0 / (float(odds) if odds_format == "decimal" else 1.0 + float(odds))
+    scale = selected_raw / float(market_probability)
+    remaining = (1.0 - float(market_probability)) / (len(outcomes) - 1)
+    result = []
+    for outcome in outcomes:
+        probability = float(market_probability) if outcome == selected else remaining
+        raw = scale * probability
+        price = 1.0 / raw if odds_format == "decimal" else 1.0 / raw - 1.0
+        result.append(f"{outcome}:{price:.12f}")
+    return result
+
+
+def review_command(args):
+    previous = memory_store.utc_now
+    memory_store.utc_now = lambda: datetime(
+        2026, 7, 21, 13, 0, tzinfo=timezone.utc
+    )
+    try:
+        return memory_store.cmd_review(args)
+    finally:
+        memory_store.utc_now = previous
+
+
 def record_args(base_dir: str, match_id: str = "1", **overrides):
     values = {
         "base_dir": base_dir,
@@ -22,6 +109,11 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "analysis_stage": "initial",
         "league": "测试联赛",
         "kickoff": "2026-07-21T19:30:00+09:00",
+        "page_status": "prematch",
+        "source_kickoff": "2026-07-21T18:30:00+08:00",
+        "source_timezone": "Asia/Shanghai",
+        "user_local_kickoff": "2026-07-21T19:30:00+09:00",
+        "user_timezone": "Asia/Tokyo",
         "home_team": "主队",
         "away_team": "客队",
         "predicted_score": "1-0",
@@ -33,6 +125,8 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "recommendation": "测试",
         "source_url": "https://example.test/match",
         "notes": "",
+        "model_version": "dixon-coles-time-decay/1.0.0",
+        "score_model_file": None,
         "data_quality": "medium",
         "lineup_confirmed": True,
         "fundamental_evidence": True,
@@ -53,25 +147,47 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "away_win_probability": 0.25,
         "primary_market": "total",
         "primary_htft_selection": None,
-        "asian_side": "home",
-        "asian_line": -0.25,
+        "asian_side": None,
+        "asian_line": -0.5,
         "asian_odds": 0.9,
-        "asian_odds_format": None,
+        "asian_odds_format": "hong_kong",
         "asian_probability": 0.54,
-        "asian_ev": 0.09,
+        "asian_ev": 0.026,
         "asian_edge_pp": 4.5,
         "asian_firm_count": 8,
+        "asian_market_complete": True,
+        "asian_market_odds": None,
+        "asian_market_probability": 0.495,
+        "asian_market_source": "https://example.test/asian",
+        "asian_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "asian_price_basis": "consensus",
+        "asian_full_win_probability": 0.54,
+        "asian_half_win_probability": 0.0,
+        "asian_push_probability": 0.0,
+        "asian_half_loss_probability": 0.0,
+        "asian_loss_probability": 0.46,
         "asian_cover_probability": 0.55,
         "asian_cover_distribution_validated": True,
         "asian_market_signal": "aligned",
         "total_side": "under",
         "total_line": 2.5,
         "total_odds": 0.9,
-        "total_odds_format": None,
+        "total_odds_format": "hong_kong",
         "total_probability": 0.55,
-        "total_ev": 0.09,
+        "total_ev": 0.045,
         "total_edge_pp": 4.5,
         "total_firm_count": 8,
+        "total_market_complete": True,
+        "total_market_odds": None,
+        "total_market_probability": 0.505,
+        "total_market_source": "https://example.test/total",
+        "total_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "total_price_basis": "consensus",
+        "total_full_win_probability": 0.55,
+        "total_half_win_probability": 0.0,
+        "total_push_probability": 0.0,
+        "total_half_loss_probability": 0.0,
+        "total_loss_probability": 0.45,
         "total_market_signal": "aligned",
         "half_market": None,
         "half_side": None,
@@ -82,9 +198,29 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "half_ev": None,
         "half_edge_pp": None,
         "half_firm_count": None,
+        "half_market_complete": False,
+        "half_market_odds": None,
+        "half_market_probability": None,
+        "half_market_source": "https://example.test/half",
+        "half_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "half_price_basis": "consensus",
+        "half_full_win_probability": None,
+        "half_half_win_probability": None,
+        "half_push_probability": None,
+        "half_half_loss_probability": None,
+        "half_loss_probability": None,
         "half_market_signal": "unknown",
         "htft_pick": None,
         "htft_odds_format": None,
+        "htft_market_complete": False,
+        "htft_market_odds": None,
+        "htft_market_probability": None,
+        "htft_edge_pp": None,
+        "htft_market_source": "https://example.test/htft",
+        "htft_market_collected_at": "2026-07-21T19:00:00+09:00",
+        "htft_price_basis": "consensus",
+        "htft_firm_count": None,
+        "htft_market_signal": "neutral",
         "goal_range_selection": None,
         "goal_range_odds": None,
         "goal_range_odds_format": None,
@@ -94,7 +230,8 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "goal_range_firm_count": None,
         "goal_range_market_signal": "unknown",
         "goal_range_market_complete": False,
-        "goal_range_market_probability": 0.53,
+        "goal_range_market_odds": None,
+        "goal_range_market_probability": 0.40,
         "goal_range_market_source": "https://example.test/goal-range",
         "goal_range_market_collected_at": "2026-07-21T19:00:00+09:00",
         "goal_range_price_basis": "consensus",
@@ -107,6 +244,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "btts_firm_count": None,
         "btts_market_signal": "unknown",
         "btts_market_complete": False,
+        "btts_market_odds": None,
         "btts_market_probability": 0.52,
         "btts_market_source": "https://example.test/btts",
         "btts_market_collected_at": "2026-07-21T19:00:00+09:00",
@@ -121,6 +259,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "corner_total_firm_count": None,
         "corner_total_market_signal": "unknown",
         "corner_total_market_complete": False,
+        "corner_total_market_odds": None,
         "corner_total_market_probability": 0.515,
         "corner_total_market_source": "https://example.test/corner-total",
         "corner_total_market_collected_at": "2026-07-21T19:00:00+09:00",
@@ -140,6 +279,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "corner_handicap_firm_count": None,
         "corner_handicap_market_signal": "unknown",
         "corner_handicap_market_complete": False,
+        "corner_handicap_market_odds": None,
         "corner_handicap_market_probability": 0.515,
         "corner_handicap_market_source": "https://example.test/corner-handicap",
         "corner_handicap_market_collected_at": "2026-07-21T19:00:00+09:00",
@@ -152,6 +292,117 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "force": False,
     }
     values.update(overrides)
+    if values["score_model_file"] is None:
+        values["score_model_file"] = write_score_prediction(
+            base_dir,
+            match_id,
+            home_team=values["home_team"],
+            away_team=values["away_team"],
+            kickoff=values["kickoff"],
+        )
+    if (
+        values.get("primary_market") == "total"
+        and values.get("total_side") in {"over", "under"}
+        and "display_exact_score_pick" not in overrides
+    ):
+        artifact = json.loads(
+            Path(values["score_model_file"]).read_text(encoding="utf-8")
+        )
+        matrix = artifact["score_matrix"]["probabilities"]
+        ranked = sorted(
+            (
+                {
+                    "score": f"{home}-{away}",
+                    "probability": float(probability),
+                    "home": home,
+                    "away": away,
+                }
+                for home, row in enumerate(matrix)
+                for away, probability in enumerate(row)
+            ),
+            key=lambda item: (-item["probability"], item["home"], item["away"]),
+        )
+        unconditional_ranks = {
+            item["score"]: rank for rank, item in enumerate(ranked, start=1)
+        }
+        total_pick = {
+            "side": values["total_side"],
+            "line": values["total_line"],
+        }
+        branch = [
+            item
+            for item in ranked
+            if item["probability"] > 0.0
+            and memory_store.settle_total(
+                total_pick, item["home"], item["away"]
+            )
+            in {"win", "half_win"}
+        ]
+        event_probability = sum(
+            float(probability)
+            for home, row in enumerate(matrix)
+            for away, probability in enumerate(row)
+            if memory_store.settle_total(total_pick, home, away)
+            in {"win", "half_win"}
+        )
+        values["display_exact_score_pick"] = [
+            f"{item['score']}:{item['probability']:.12g}:"
+            f"{unconditional_ranks[item['score']]}"
+            for item in branch[:2]
+        ]
+        values["display_exact_score_event_probability"] = event_probability
+    market_specs = {
+        "asian": (["home", "away"], values.get("asian_side")),
+        "total": (["over", "under"], values.get("total_side")),
+        "half": (
+            ["home", "draw", "away"]
+            if values.get("half_market") == "1x2"
+            else ["home", "away"]
+            if values.get("half_market") == "asian"
+            else ["over", "under"],
+            values.get("half_side"),
+        ),
+        "btts": (["yes", "no"], values.get("btts_side")),
+        "corner_total": (["over", "under"], values.get("corner_total_side")),
+        "corner_handicap": (["home", "away"], values.get("corner_handicap_side")),
+    }
+    for prefix, (outcomes, selected) in market_specs.items():
+        key = f"{prefix}_market_odds"
+        if values.get(key) is None and selected:
+            values[key] = synthesize_market_odds(values, prefix, outcomes, selected)
+    if values.get("goal_range_market_odds") is None and values.get("goal_range_selection"):
+        values["goal_range_market_odds"] = synthesize_market_odds(
+            values,
+            "goal_range",
+            ["0-1", "2-3", "4-6", "7+"],
+            values["goal_range_selection"],
+        )
+    if values.get("htft_market_odds") is None and values.get("htft_pick"):
+        selected = values["htft_pick"][0].split(":", 1)[0].upper()
+        probabilities = {
+            item.split(":", 1)[0].upper(): float(item.split(":", 1)[1])
+            for item in values.get("htft_market_probability") or []
+        }
+        if selected in probabilities:
+            values["htft_market_probability"] = [
+                f"{key}:{value}" for key, value in probabilities.items()
+            ]
+            selected_odds = float(values["htft_pick"][0].split(":")[1])
+            selected_raw = 1.0 / (
+                selected_odds
+                if values.get("htft_odds_format") == "decimal"
+                else 1.0 + selected_odds
+            )
+            scale = selected_raw / probabilities[selected]
+            values["htft_market_odds"] = []
+            for outcome, probability in probabilities.items():
+                raw = scale * probability
+                price = (
+                    1.0 / raw
+                    if values.get("htft_odds_format") == "decimal"
+                    else 1.0 / raw - 1.0
+                )
+                values["htft_market_odds"].append(f"{outcome}:{price:.12f}")
     return SimpleNamespace(**values)
 
 
@@ -174,7 +425,136 @@ def reviewed_record(match_id, asian=None, asian_result=None, total=None, total_r
     }
 
 
+def strict_metric_record(
+    match_id,
+    *,
+    probabilities,
+    final_score,
+    selected,
+    validated_model=True,
+    league="Strict Test League",
+    exact_score_hit_rank=None,
+):
+    primary = (
+        {
+            "market": "total",
+            "side": "under",
+            "line": 2.5,
+            "odds": 0.9,
+            "role": "primary",
+        }
+        if selected
+        else None
+    )
+    record = reviewed_record(
+        match_id,
+        total=primary,
+        total_result="win" if selected else None,
+    )
+    record.update(
+        {
+            "league": league,
+            "probabilities": probabilities,
+            "final_score": final_score,
+            "evaluation_eligibility": {
+                "policy_version": memory_store.STRICT_OOS_POLICY_VERSION,
+                "strict_forward_oos": True,
+                "reason": (
+                    "validated_score_model_provenance"
+                    if validated_model
+                    else "no_formal_core_pick"
+                ),
+            },
+            "score_model_provenance": (
+                {
+                    "model_hash": "sha256:" + "1" * 64,
+                    "artifact_sha256": "sha256:" + "2" * 64,
+                    "snapshot": {
+                        "artifact_type": "soccer_score_prediction",
+                        "score_matrix": {"probabilities": [[1.0]]},
+                    },
+                    "score_matrix": [[1.0]],
+                }
+                if validated_model
+                else None
+            ),
+            "primary_market": "total" if selected else None,
+            "primary_pick": primary,
+            "primary_result": "win" if selected else None,
+            "learning_scope": (
+                "primary" if selected else "no_primary_observation"
+            ),
+            "exact_score_hit_rank": exact_score_hit_rank,
+            "score_exact": exact_score_hit_rank == 1,
+        }
+    )
+    return record
+
+
 class MemoryStoreTests(unittest.TestCase):
+    def setUp(self):
+        self._real_utc_now = memory_store.utc_now
+        memory_store.utc_now = lambda: datetime(
+            2026, 7, 21, 10, 0, tzinfo=timezone.utc
+        )
+
+    def tearDown(self):
+        memory_store.utc_now = self._real_utc_now
+
+    def test_archive_time_state_is_strict_and_forward_only(self):
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "page_status=prematch"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="live-page", page_status="live")
+                )
+
+            with self.assertRaisesRegex(ValueError, "at or after kickoff"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="at-kickoff",
+                        kickoff="2026-07-21T19:00:00+09:00",
+                        source_kickoff="2026-07-21T18:00:00+08:00",
+                        user_local_kickoff="2026-07-21T19:00:00+09:00",
+                    )
+                )
+
+            with self.assertRaisesRegex(ValueError, "T-30"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="early-lineup",
+                        analysis_stage="lineup-check",
+                        kickoff="2026-07-21T20:00:00+09:00",
+                        source_kickoff="2026-07-21T19:00:00+08:00",
+                        user_local_kickoff="2026-07-21T20:00:00+09:00",
+                    )
+                )
+
+            with self.assertRaisesRegex(ValueError, "same instant"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="zone-mismatch",
+                        user_local_kickoff="2026-07-21T19:31:00+09:00",
+                        kickoff="2026-07-21T19:31:00+09:00",
+                    )
+                )
+
+            with self.assertRaisesRegex(ValueError, "cannot be in the future"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="future-market",
+                        total_market_collected_at="2026-07-21T19:05:00+09:00",
+                    )
+                )
+
+            with self.assertRaisesRegex(ValueError, "force is disabled"):
+                memory_store.cmd_record(
+                    record_args(base, match_id="force-disabled", force=True)
+                )
+
     def test_two_exact_scores_are_ranked_archived_and_diagnostic_only(self):
         with tempfile.TemporaryDirectory() as base:
             created = memory_store.cmd_record(
@@ -187,10 +567,12 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(created["league_key"], "测试联赛")
             self.assertTrue(all(pick["status"] == "scenario_only" for pick in created["exact_score_picks"]))
 
-            reviewed = memory_store.cmd_review(
+            reviewed = review_command(
                 SimpleNamespace(
                     base_dir=base,
                     verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
                     match_id="1",
                     home_score=2,
                     away_score=0,
@@ -205,6 +587,9 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(reviewed["stats"]["exact_score_top1_hits"], 0)
             self.assertEqual(reviewed["stats"]["exact_score_top2_hits"], 1)
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 1)
+            self.assertEqual(
+                reviewed["stats"]["excluded_from_strict_forward"]["matches"], 0
+            )
 
         with tempfile.TemporaryDirectory() as base:
             with self.assertRaisesRegex(ValueError, "exactly two"):
@@ -219,45 +604,52 @@ class MemoryStoreTests(unittest.TestCase):
             created = memory_store.cmd_record(
                 record_args(
                     base,
-                    predicted_score="1-1",
-                    exact_score_pick=["1-1:0.20", "1-0:0.15"],
                     zero_zero_probability=0.10,
                     zero_zero_rank=4,
                     total_side="over",
                     total_line=2.5,
+                    total_odds=1.30,
+                    total_probability=0.45,
+                    total_market_probability=0.40,
+                    total_edge_pp=5.0,
+                    total_full_win_probability=0.45,
+                    total_loss_probability=0.55,
+                    total_ev=0.035,
                     display_exact_score_pick=[
-                        "2-1:0.14:3",
-                        "3-1:0.10:5",
+                        "3-0:0.15:3",
+                        "0-3:0.10:5",
                     ],
-                    display_exact_score_event_probability=0.55,
+                    display_exact_score_event_probability=0.45,
                 )
             )["record"]
 
             self.assertEqual(
                 [pick["score"] for pick in created["exact_score_picks"]],
-                ["1-1", "1-0"],
+                ["1-0", "2-0"],
             )
             self.assertEqual(
                 [pick["score"] for pick in created["display_exact_score_picks"]],
-                ["2-1", "3-1"],
+                ["3-0", "0-3"],
             )
-            self.assertEqual(created["display_predicted_score"], "2-1")
+            self.assertEqual(created["display_predicted_score"], "3-0")
             self.assertEqual(
                 created["display_exact_score_basis"]["basis"],
                 "primary_total_net_profit",
             )
             self.assertAlmostEqual(
                 created["display_exact_score_picks"][0]["conditional_probability"],
-                0.14 / 0.55,
+                0.15 / 0.45,
             )
 
-            reviewed = memory_store.cmd_review(
+            reviewed = review_command(
                 SimpleNamespace(
                     base_dir=base,
                     verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
                     match_id="1",
-                    home_score=2,
-                    away_score=1,
+                    home_score=3,
+                    away_score=0,
                     half_home_score=1,
                     half_away_score=0,
                     home_corners=None,
@@ -289,46 +681,65 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "requires canonical primary-conditioned display scores"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        display_exact_score_pick=[],
+                        display_exact_score_event_probability=None,
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "conditioned display score rank 1"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        display_exact_score_pick=[
+                            "1-0:0.19:1",
+                            "2-0:0.15:2",
+                        ],
+                        display_exact_score_event_probability=0.55,
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "canonical branch Top 2"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        display_exact_score_pick=[
+                            "1-0:0.20:1",
+                            "2-0:0.15:3",
+                        ],
+                        display_exact_score_event_probability=0.55,
+                    )
+                )
+
     def test_zero_zero_audit_is_required_consistent_and_revisioned(self):
         with tempfile.TemporaryDirectory() as base:
-            top_one = memory_store.cmd_record(
-                record_args(
-                    base,
-                    predicted_score="0-0",
-                    exact_score_pick=["1-0:0.20", "0-0:0.30"],
-                    zero_zero_probability=0.30,
-                    zero_zero_rank=1,
-                    zero_zero_odds=12.0,
-                    zero_zero_ev=2.60,
-                )
-            )["record"]
-            self.assertEqual(top_one["exact_score_picks"][0]["score"], "0-0")
-            self.assertEqual(
-                top_one["zero_zero_audit"],
-                {
-                    "score": "0-0",
-                    "probability": 0.30,
-                    "rank": 1,
-                    "included_in_top2": True,
-                    "included_in_display_top2": True,
-                    "status": "top_two",
-                    "odds": 12.0,
-                    "ev": 2.60,
-                },
-            )
+            initial = memory_store.cmd_record(record_args(base))["record"]
+            self.assertEqual(initial["zero_zero_audit"]["rank"], 4)
+            self.assertEqual(initial["zero_zero_audit"]["probability"], 0.10)
+            self.assertFalse(initial["zero_zero_audit"]["included_in_top2"])
 
             lineup = memory_store.cmd_record(
                 record_args(
                     base,
                     analysis_stage="lineup-check",
-                    zero_zero_probability=0.11,
+                    zero_zero_probability=0.10,
                     zero_zero_rank=4,
                 )
             )["record"]
             self.assertEqual(lineup["zero_zero_audit"]["rank"], 4)
             self.assertEqual(
                 lineup["revisions"][-1]["zero_zero_audit"]["rank"],
-                1,
+                4,
             )
 
         with tempfile.TemporaryDirectory() as base:
@@ -362,30 +773,27 @@ class MemoryStoreTests(unittest.TestCase):
             initial = memory_store.cmd_record(record_args(base))
             self.assertEqual(initial["record"]["primary_market"], "total")
             self.assertEqual(initial["record"]["total_pick"]["role"], "primary")
-            self.assertEqual(initial["record"]["asian_pick"]["role"], "secondary")
+            self.assertIsNone(initial["record"]["asian_pick"])
 
             maintained = memory_store.cmd_record(
-                record_args(base, analysis_stage="lineup-check", total_odds=0.86)
-            )
-            self.assertEqual(maintained["record"]["primary_change"]["status"], "maintained")
-
-            changed = memory_store.cmd_record(
                 record_args(
                     base,
                     analysis_stage="lineup-check",
-                    primary_market="asian",
-                    asian_odds=0.95,
-                    asian_probability=0.60,
-                    data_quality="high",
-                    primary_change_reason="确认首发直接否定原大小球逻辑",
-                    previous_primary_invalidated=True,
-                    previous_primary_current_ev=0.04,
+                    total_odds=0.86,
+                    total_ev=0.023,
                 )
             )
-            self.assertEqual(changed["record"]["primary_change"]["status"], "changed")
-            self.assertEqual(changed["record"]["asian_pick"]["role"], "primary")
-            self.assertEqual(changed["record"]["total_pick"]["role"], "secondary")
-            self.assertGreaterEqual(len(changed["record"]["revisions"]), 2)
+            self.assertEqual(maintained["record"]["primary_change"]["status"], "maintained")
+
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        analysis_stage="lineup-check",
+                        total_odds=0.84,
+                        total_ev=0.012,
+                    )
+                )
 
             with self.assertRaisesRegex(ValueError, "valid only when there are no formal picks"):
                 memory_store.cmd_record(record_args(base, match_id="2", primary_market="none"))
@@ -395,10 +803,12 @@ class MemoryStoreTests(unittest.TestCase):
     def test_review_persists_primary_result(self):
         with tempfile.TemporaryDirectory() as base:
             memory_store.cmd_record(record_args(base, asian_side=None, primary_market="total"))
-            result = memory_store.cmd_review(
+            result = review_command(
                 SimpleNamespace(
                     base_dir=base,
                     verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
                     match_id="1",
                     home_score=0,
                     away_score=0,
@@ -438,7 +848,13 @@ class MemoryStoreTests(unittest.TestCase):
                     primary_market="total",
                     total_side="over",
                     total_line=2.5,
-                    total_odds=0.92,
+                    total_odds=1.30,
+                    total_probability=0.45,
+                    total_market_probability=0.40,
+                    total_edge_pp=5.0,
+                    total_full_win_probability=0.45,
+                    total_loss_probability=0.55,
+                    total_ev=0.035,
                     data_quality="high",
                     primary_change_reason="确认首发提升进攻配置并否定原小球逻辑",
                     previous_primary_invalidated=True,
@@ -448,10 +864,12 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(lineup["total_pick"]["side"], "over")
             self.assertEqual(lineup["revisions"][-1]["total_pick"]["side"], "under")
 
-            reviewed = memory_store.cmd_review(
+            reviewed = review_command(
                 SimpleNamespace(
                     base_dir=base,
                     verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
                     match_id="1",
                     home_score=3,
                     away_score=0,
@@ -543,9 +961,10 @@ class MemoryStoreTests(unittest.TestCase):
         league = stats["leagues"]["芬超"]
         self.assertEqual(league["source_labels"], ["2026芬超第16轮", "芬超"])
         self.assertEqual(league["reviewed_matches"], 2)
-        self.assertEqual(league["primary"]["wins"], 1)
-        self.assertEqual(league["primary"]["losses"], 1)
-        self.assertEqual(league["primary_by_market"]["combined"]["matches"], 2)
+        self.assertEqual(league["primary"]["wins"], 0)
+        self.assertEqual(league["primary"]["losses"], 0)
+        self.assertEqual(league["primary_by_market"]["combined"]["matches"], 0)
+        self.assertEqual(league["excluded_from_strict_forward"], 2)
         self.assertEqual(len(league["recent_learnings"]), 2)
         self.assertEqual(
             {item["learning_scope"] for item in league["recent_learnings"]},
@@ -579,7 +998,10 @@ class MemoryStoreTests(unittest.TestCase):
             )["calibration"]
             profile = calibration["league_profiles"]["芬超"]
             self.assertEqual(profile["sample_tier"], "anecdotal")
-            self.assertEqual(profile["decision"], "hold_weights_insufficient_league_sample")
+            self.assertEqual(
+                profile["decision"], "hold_insufficient_strict_league_sample"
+            )
+            self.assertFalse(profile["parameter_change_authorized"])
             self.assertEqual(profile["active_weight_adjustments"], {})
             self.assertIn("按1个联赛归类", calibration["summary"])
 
@@ -641,7 +1063,11 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(migrated["missing_learning_match_ids"], [])
             self.assertEqual(migrated["stats"]["reviewed_matches"], 2)
-            self.assertEqual(migrated["stats"]["primary"]["matches"], 1)
+            self.assertEqual(migrated["stats"]["primary"]["matches"], 0)
+            self.assertEqual(
+                migrated["stats"]["legacy_or_quarantined"]["primary"]["matches"],
+                1,
+            )
             self.assertEqual(
                 migrated["stats"]["learning_samples"],
                 {
@@ -677,13 +1103,17 @@ class MemoryStoreTests(unittest.TestCase):
                     write=False,
                 )
             )["calibration"]
-            self.assertEqual(calibration["primary_record_matches"], 1)
+            self.assertEqual(calibration["primary_record_matches"], 0)
+            self.assertEqual(
+                calibration["stats"]["legacy_or_quarantined"]["primary"]["matches"],
+                1,
+            )
             self.assertEqual(calibration["no_primary_reviewed_matches"], 1)
             self.assertEqual(
                 calibration["learning_samples"]["no_primary_observation"], 1
             )
             self.assertIn(
-                "无主推1场不计战绩并作为学习样本",
+                "无主推学习样本1场，不计战绩",
                 calibration["summary"],
             )
 
@@ -731,19 +1161,18 @@ class MemoryStoreTests(unittest.TestCase):
                 SimpleNamespace(base_dir=base, primary=assignments, write=True)
             )
             stats = migrated["stats"]
-            self.assertEqual(stats["primary"]["matches"], 6)
-            self.assertEqual(stats["primary"]["wins"], 3)
-            self.assertEqual(stats["primary"]["losses"], 3)
+            self.assertEqual(stats["primary"]["matches"], 0)
+            self.assertEqual(stats["primary"]["wins"], 0)
+            self.assertEqual(stats["primary"]["losses"], 0)
             self.assertEqual(stats["primary"]["pushes"], 0)
-            self.assertEqual(stats["primary"]["accuracy"], 0.5)
-            self.assertEqual(stats["primary"]["profit_units"], -0.15)
-            self.assertEqual(stats["primary"]["roi"], -0.025)
-            self.assertEqual(stats["primary_by_market"]["combined"]["matches"], 6)
-            self.assertEqual(stats["primary_by_market"]["combined"]["wins"], 3)
-            self.assertEqual(stats["primary_by_market"]["combined"]["losses"], 3)
-            self.assertEqual(stats["all_formal"]["combined"]["monetary_scope"], "not_tracked")
-            self.assertIsNone(stats["all_formal"]["combined"]["stake_units"])
-            self.assertIsNone(stats["all_formal"]["combined"]["profit_units"])
+            self.assertIsNone(stats["primary"]["accuracy"])
+            self.assertEqual(stats["primary"]["profit_units"], 0)
+            self.assertIsNone(stats["primary"]["roi"])
+            self.assertEqual(stats["primary_by_market"]["combined"]["matches"], 0)
+            self.assertEqual(stats["excluded_from_strict_forward"]["matches"], 6)
+            self.assertEqual(stats["all_formal"]["combined"]["monetary_scope"], "primary_only")
+            self.assertEqual(stats["all_formal"]["combined"]["stake_units"], 0)
+            self.assertEqual(stats["all_formal"]["combined"]["profit_units"], 0)
             self.assertIsNone(stats["all_formal"]["combined"]["roi"])
             self.assertEqual(stats["combined"], stats["all_formal"]["combined"])
 
@@ -757,18 +1186,26 @@ class MemoryStoreTests(unittest.TestCase):
                 SimpleNamespace(base_dir=base, guardrail=None, minimum_graded=20, write=True)
             )["calibration"]
             self.assertEqual(calibration["reviewed_matches"], 6)
-            self.assertIn("主推6场3胜3负0走", calibration["summary"])
-            self.assertIn("收益-0.15u，ROI -2.50%", calibration["summary"])
-            self.assertIn("主推分市场统计6项3胜3负0走", calibration["summary"])
-            self.assertIn("次推仅作赛前参考，不结算、不计命中率或金额", calibration["summary"])
+            self.assertEqual(calibration["primary_record_matches"], 0)
+            self.assertEqual(
+                calibration["stats"]["excluded_from_strict_forward"]["matches"], 6
+            )
+            self.assertEqual(
+                calibration["market_status"]["asian"]["status"],
+                "observation_only",
+            )
             self.assertTrue(
                 any(
-                    item.startswith("stability-v1")
+                    item.startswith("stability-v2")
                     for item in calibration["guardrails"]
                 )
             )
             self.assertTrue(
-                any("唯一rank=1可作主推" in item for item in calibration["guardrails"])
+                any(
+                    "EV and no-vig edge are positive eligibility gates only"
+                    in item
+                    for item in calibration["guardrails"]
+                )
             )
             self.assertTrue(
                 any("新方向至少高5分" in item for item in calibration["guardrails"])
@@ -800,14 +1237,18 @@ class MemoryStoreTests(unittest.TestCase):
 
         stats = memory_store.calculate_stats([record])
 
-        self.assertEqual(stats["primary"]["profit_units"], 0.9)
-        self.assertEqual(stats["primary"]["roi"], 0.9)
-        self.assertEqual(stats["all_formal"]["combined"]["matches"], 1)
-        self.assertEqual(stats["all_formal"]["combined"]["wins"], 1)
+        self.assertEqual(stats["primary"]["profit_units"], 0)
+        self.assertIsNone(stats["primary"]["roi"])
+        self.assertEqual(stats["all_formal"]["combined"]["matches"], 0)
+        self.assertEqual(stats["all_formal"]["combined"]["wins"], 0)
         self.assertEqual(stats["all_formal"]["combined"]["losses"], 0)
-        self.assertIsNone(stats["all_formal"]["combined"]["profit_units"])
-        self.assertIsNone(stats["all_formal"]["asian"]["profit_units"])
-        self.assertIsNone(stats["all_formal"]["totals"]["profit_units"])
+        self.assertEqual(stats["all_formal"]["combined"]["profit_units"], 0)
+        self.assertIsNone(stats["all_formal"]["combined"]["roi"])
+        self.assertEqual(stats["all_formal"]["asian"]["profit_units"], 0)
+        self.assertEqual(stats["all_formal"]["totals"]["profit_units"], 0)
+        self.assertEqual(
+            stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9
+        )
 
     def test_small_sample_gate_boundaries_and_no_primary(self):
         with tempfile.TemporaryDirectory() as base:
@@ -845,18 +1286,20 @@ class MemoryStoreTests(unittest.TestCase):
                     match_id="sub-eight",
                     asian_side=None,
                     total_ev=0.03,
+                    total_odds=0.8727272727,
                     total_edge_pp=1.5,
+                    total_market_probability=0.535,
                 )
             )["record"]
-            self.assertEqual(sub_eight["primary_pick"]["ev"], 0.03)
-            self.assertEqual(sub_eight["primary_pick"]["edge_pp"], 1.5)
+            self.assertAlmostEqual(sub_eight["primary_pick"]["ev"], 0.03)
+            self.assertAlmostEqual(sub_eight["primary_pick"]["edge_pp"], 1.5)
             self.assertEqual(sub_eight["primary_pick"]["confidence_rank"], 1)
             self.assertEqual(
                 sub_eight["primary_selection_basis"],
-                "highest_stability_adjusted_confidence",
+                "highest_independent_settlement_risk_confidence",
             )
             self.assertEqual(
-                sub_eight["confidence_ranking_version"], "stability-v1"
+                sub_eight["confidence_ranking_version"], "stability-v2"
             )
 
             no_pick = memory_store.cmd_record(
@@ -878,13 +1321,21 @@ class MemoryStoreTests(unittest.TestCase):
                 "half_side": "under",
                 "half_line": 1.0,
                 "half_odds": 0.9,
+                "half_odds_format": "hong_kong",
                 "half_probability": 0.55,
                 "half_edge_pp": 1.0,
                 "half_market_signal": "aligned",
                 "half_firm_count": 5,
+                "half_market_complete": True,
+                "half_market_probability": 0.54,
+                "half_full_win_probability": 0.55,
+                "half_half_win_probability": 0.0,
+                "half_push_probability": 0.0,
+                "half_half_loss_probability": 0.0,
+                "half_loss_probability": 0.45,
                 "primary_market": "half_time",
             }
-            with self.assertRaisesRegex(ValueError, "half_time EV must be greater than 0"):
+            with self.assertRaisesRegex(ValueError, "observation_only"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -893,89 +1344,108 @@ class MemoryStoreTests(unittest.TestCase):
                         **half_overrides,
                     )
                 )
-            half = memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="half-boundary",
-                    half_ev=0.025,
-                    **half_overrides,
+            with self.assertRaisesRegex(ValueError, "observation_only"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="half-boundary",
+                        half_ev=0.045,
+                        **half_overrides,
+                    )
                 )
-            )["record"]
-            self.assertEqual(half["primary_market"], "half_time")
-            self.assertEqual(half["primary_pick"]["primary_market"], "half_time")
-            self.assertEqual(half["primary_pick"]["market"], "total")
-            self.assertEqual(half["primary_pick"]["confidence_rank"], 1)
 
             htft_overrides = {
                 "asian_side": None,
                 "total_side": None,
                 "htft_pick": ["DD:3.40:0.31:0.054"],
+                "htft_odds_format": "decimal",
+                "htft_market_complete": True,
+                "htft_market_probability": [
+                    "HH:0.08775", "HD:0.08775", "HA:0.08775",
+                    "DH:0.08775", "DD:0.298", "DA:0.08775",
+                    "AH:0.08775", "AD:0.08775", "AA:0.08775",
+                ],
+                "htft_market_source": "https://example.test/htft",
+                "htft_market_collected_at": "2026-07-21T19:00:00+09:00",
+                "htft_price_basis": "consensus",
+                "htft_firm_count": 5,
+                "htft_market_signal": "neutral",
                 "primary_market": "htft",
                 "primary_htft_firm_count": 5,
             }
-            with self.assertRaisesRegex(ValueError, "htft .* edge .* greater than 0"):
+            with self.assertRaisesRegex(ValueError, "observation_only"):
                 memory_store.cmd_record(
                     record_args(
                         base,
                         match_id="htft-edge-low",
                         primary_htft_edge_pp=0.0,
-                        **htft_overrides,
+                        **{
+                            **htft_overrides,
+                            "htft_market_probability": [
+                                "HH:0.08625", "HD:0.08625", "HA:0.08625",
+                                "DH:0.08625", "DD:0.31", "DA:0.08625",
+                                "AH:0.08625", "AD:0.08625", "AA:0.08625",
+                            ],
+                        },
                     )
                 )
-            htft = memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="htft-boundary",
-                    primary_htft_edge_pp=1.2,
-                    **htft_overrides,
-                )
-            )["record"]
-            self.assertEqual(htft["primary_market"], "htft")
-
-    def test_stability_ranking_beats_raw_ev_and_rejects_non_rank_one_primary(self):
-        candidates = {
-            "asian_probability": 0.48,
-            "asian_ev": 0.12,
-            "asian_edge_pp": 5.0,
-            "asian_firm_count": 1,
-            "asian_market_signal": "neutral",
-            "total_probability": 0.65,
-            "total_ev": 0.03,
-            "total_edge_pp": 1.5,
-            "total_firm_count": 8,
-            "total_market_signal": "aligned",
-        }
-        with tempfile.TemporaryDirectory() as base:
-            with self.assertRaisesRegex(
-                ValueError, "unique stability-v1 confidence rank 1"
-            ):
+            with self.assertRaisesRegex(ValueError, "observation_only"):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        match_id="wrong-rank",
-                        primary_market="asian",
-                        **candidates,
+                        match_id="htft-boundary",
+                        primary_htft_edge_pp=1.2,
+                        **htft_overrides,
                     )
                 )
 
+    def test_stability_ranking_beats_raw_ev_and_rejects_non_rank_one_primary(self):
+        candidates_v2 = {
+            "total_side": None,
+            "goal_range_selection": "2-3",
+            "goal_range_odds": 3.0,
+            "goal_range_odds_format": "decimal",
+            "goal_range_probability": 0.45,
+            "goal_range_market_probability": 0.40,
+            "goal_range_ev": 0.35,
+            "goal_range_edge_pp": 5.0,
+            "goal_range_firm_count": 1,
+            "goal_range_market_signal": "neutral",
+            "goal_range_market_complete": True,
+            "btts_side": "yes",
+            "btts_odds": 4.5,
+            "btts_odds_format": "decimal",
+            "btts_probability": 0.25,
+            "btts_market_probability": 0.23,
+            "btts_ev": 0.125,
+            "btts_edge_pp": 2.0,
+            "btts_firm_count": 8,
+            "btts_market_signal": "aligned",
+            "btts_market_complete": True,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "stability-v2"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="wrong-rank-v2",
+                        primary_market="goal_range",
+                        **candidates_v2,
+                    )
+                )
             accepted = memory_store.cmd_record(
                 record_args(
                     base,
-                    match_id="right-rank",
-                    primary_market="total",
-                    **candidates,
+                    match_id="right-rank-v2",
+                    primary_market="btts",
+                    **candidates_v2,
                 )
             )["record"]
-            self.assertGreater(
-                accepted["asian_pick"]["ev"], accepted["total_pick"]["ev"]
-            )
-            self.assertEqual(accepted["total_pick"]["confidence_rank"], 1)
-            self.assertEqual(accepted["asian_pick"]["confidence_rank"], 2)
-            self.assertEqual(accepted["primary_market"], "total")
-            self.assertEqual(
-                accepted["primary_pick"]["confidence_components"]["safety_source"],
-                "model_probability_fallback",
-            )
+            self.assertGreater(accepted["goal_range_pick"]["ev"], accepted["btts_pick"]["ev"])
+            self.assertEqual(accepted["btts_pick"]["confidence_rank"], 1)
+            gates = accepted["primary_pick"]["confidence_components"]["eligibility_gates"]
+            self.assertFalse(gates["contributes_to_score"])
+            self.assertEqual(accepted["confidence_ranking_version"], "stability-v2")
 
     def test_against_deep_favorite_and_total_evidence_gates(self):
         with tempfile.TemporaryDirectory() as base:
@@ -996,6 +1466,7 @@ class MemoryStoreTests(unittest.TestCase):
                         match_id="against-edge",
                         asian_side=None,
                         total_market_signal="against",
+                        total_ev=0.08,
                         total_edge_pp=3.9,
                     )
                 )
@@ -1006,6 +1477,7 @@ class MemoryStoreTests(unittest.TestCase):
                         match_id="against-firms",
                         asian_side=None,
                         total_market_signal="against",
+                        total_ev=0.08,
                         total_firm_count=4,
                     )
                 )
@@ -1016,6 +1488,7 @@ class MemoryStoreTests(unittest.TestCase):
                         match_id="against-evidence",
                         asian_side=None,
                         total_market_signal="against",
+                        total_ev=0.08,
                         lineup_confirmed=False,
                         fundamental_evidence=False,
                     )
@@ -1039,159 +1512,45 @@ class MemoryStoreTests(unittest.TestCase):
                 "primary_market": "asian",
                 "data_quality": "high",
             }
-            with self.assertRaisesRegex(ValueError, "confirmed lineups"):
+            with self.assertRaisesRegex(ValueError, "observation_only"):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        match_id="deep-lineup",
-                        lineup_confirmed=False,
+                        match_id="asian-paused",
                         **deep_defaults,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "chance-quality evidence"):
-                memory_store.cmd_record(
-                    record_args(
-                        base,
-                        match_id="deep-quality",
-                        chance_quality_evidence=False,
-                        fundamental_evidence=False,
-                        attack_configuration_evidence=False,
-                        **deep_defaults,
-                    )
-                )
-            with self.assertRaisesRegex(ValueError, "cover distribution"):
-                memory_store.cmd_record(
-                    record_args(
-                        base,
-                        match_id="deep-cover",
-                        asian_cover_distribution_validated=False,
-                        **deep_defaults,
-                    )
-                )
-            with self.assertRaisesRegex(ValueError, "tail-risk check"):
-                memory_store.cmd_record(
-                    record_args(
-                        base,
-                        match_id="deep-tail",
-                        opponent_tail_risk_checked=False,
-                        **deep_defaults,
-                    )
-                )
-
-            deep = memory_store.cmd_record(
-                record_args(base, match_id="deep-pass", **deep_defaults)
-            )["record"]
-            self.assertTrue(deep["primary_pick"]["cover_distribution_validated"])
-            deep_consensus = memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="deep-consensus-pass",
-                    asian_ev=0.03,
-                    asian_edge_pp=1.5,
-                    chance_quality_evidence=False,
-                    **deep_defaults,
-                )
-            )["record"]
-            self.assertEqual(deep_consensus["primary_pick"]["confidence_rank"], 1)
-            self.assertLess(deep_consensus["primary_pick"]["ev"], 0.08)
-            underdog = memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="underdog",
-                    asian_side="away",
-                    asian_line=1.25,
-                    total_side=None,
-                    primary_market="asian",
-                )
-            )["record"]
-            self.assertEqual(underdog["primary_pick"]["line"], 1.25)
 
     def test_lineup_change_hysteresis_cancellation_and_no_bet_review(self):
         with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(
-                record_args(base, asian_side=None, primary_market="total")
-            )
-            changed_args = {
-                "analysis_stage": "lineup-check",
-                "primary_market": "asian",
-                "total_side": None,
-                "data_quality": "high",
-                "primary_change_reason": "确认首发直接证伪原大小球逻辑",
-                "previous_primary_current_ev": 0.05,
-            }
-            with self.assertRaisesRegex(
-                ValueError, "previous-primary-current-confidence"
-            ):
-                memory_store.cmd_record(record_args(base, **changed_args))
-            with self.assertRaisesRegex(ValueError, "at least 5 points"):
-                memory_store.cmd_record(
-                    record_args(
-                        base,
-                        previous_primary_current_confidence=72.75,
-                        **changed_args,
-                    )
-                )
-
-            changed = memory_store.cmd_record(
-                record_args(
-                    base,
-                    previous_primary_invalidated=True,
-                    asian_ev=0.03,
-                    **changed_args,
-                )
-            )["record"]
-            self.assertEqual(changed["primary_change"]["status"], "changed")
-            self.assertEqual(changed["primary_change"]["decision"], "strict_replacement")
-            self.assertAlmostEqual(changed["primary_change"]["ev_improvement"], -0.02)
-            self.assertIsNone(
-                changed["primary_change"]["confidence_improvement"]
-            )
-            self.assertTrue(changed["primary_change"]["previous_invalidated"])
-            self.assertTrue(changed["primary_change"]["guardrail_passed"])
-            self.assertEqual(changed["revisions"][-1]["primary_market"], "total")
-
-        with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(
-                record_args(base, asian_side=None, primary_market="total")
-            )
-            improved = memory_store.cmd_record(
-                record_args(
-                    base,
-                    analysis_stage="lineup-check",
-                    primary_market="asian",
-                    total_side=None,
-                    data_quality="high",
-                    primary_change_reason="新方向综合稳定性显著提升",
-                    previous_primary_current_confidence=60.0,
-                )
-            )["record"]
-            self.assertGreaterEqual(
-                improved["primary_change"]["confidence_improvement"], 5.0
-            )
-            self.assertFalse(improved["primary_change"]["previous_invalidated"])
-
-        with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(
-                record_args(base, asian_side=None, primary_market="total")
-            )
+            memory_store.cmd_record(record_args(base))
             cancelled = memory_store.cmd_record(
                 record_args(
                     base,
                     analysis_stage="lineup-check",
-                    asian_side=None,
                     total_side=None,
                     primary_market="none",
-                    primary_change_reason="确认首发后原主推失效且无替代方向过门槛",
+                    primary_change_reason="confirmed information invalidated the only formal direction",
                 )
             )["record"]
             self.assertEqual(cancelled["primary_change"]["decision"], "cancelled_to_none")
-            self.assertIsNone(cancelled["primary_pick"])
-            self.assertEqual(len(cancelled["revisions"]), 1)
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        analysis_stage="lineup-check",
+                        total_side=None,
+                        primary_market="none",
+                        notes="different second lineup payload",
+                    )
+                )
 
-            reviewed = memory_store.cmd_review(
+            reviewed = review_command(
                 SimpleNamespace(
                     base_dir=base,
                     verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
                     match_id="1",
                     home_score=1,
                     away_score=0,
@@ -1233,73 +1592,18 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
             self.assertIsNone(reviewed["stats"]["primary"]["roi"])
 
+    def test_paused_asian_worse_line_cannot_be_archived(self):
         with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(
-                record_args(
-                    base,
-                    asian_side=None,
-                    total_side=None,
-                    primary_market="none",
+            with self.assertRaisesRegex(ValueError, "observation_only"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        asian_side="home",
+                        asian_line=-0.75,
+                        total_side=None,
+                        primary_market="asian",
+                    )
                 )
-            )
-            maintained_none = memory_store.cmd_record(
-                record_args(
-                    base,
-                    analysis_stage="lineup-check",
-                    asian_side=None,
-                    total_side=None,
-                    primary_market="none",
-                )
-            )["record"]
-            self.assertEqual(
-                maintained_none["primary_change"]["status"], "maintained"
-            )
-            newly_qualified = memory_store.cmd_record(
-                record_args(
-                    base,
-                    analysis_stage="lineup-check",
-                    asian_side=None,
-                    primary_market="total",
-                    data_quality="high",
-                    primary_change_reason="确认首发后大小球方向首次达到正式门槛",
-                )
-            )["record"]
-            self.assertEqual(
-                newly_qualified["primary_change"]["decision"], "newly_qualified"
-            )
-
-    def test_worse_line_requires_explicit_strict_replacement(self):
-        with tempfile.TemporaryDirectory() as base:
-            initial = record_args(
-                base,
-                asian_line=-0.75,
-                total_side=None,
-                primary_market="asian",
-                data_quality="high",
-            )
-            memory_store.cmd_record(initial)
-            replacement = {
-                "analysis_stage": "lineup-check",
-                "asian_line": -1.0,
-                "asian_ev": 0.13,
-                "total_side": None,
-                "primary_market": "asian",
-                "data_quality": "high",
-                "primary_change_reason": "确认首发和机会质量证据直接提升穿盘分布",
-                "previous_primary_invalidated": True,
-                "previous_primary_current_ev": 0.08,
-            }
-            with self.assertRaisesRegex(ValueError, "accept-worse-line"):
-                memory_store.cmd_record(record_args(base, **replacement))
-
-            accepted = memory_store.cmd_record(
-                record_args(base, accept_worse_line=True, **replacement)
-            )["record"]
-            self.assertEqual(
-                accepted["primary_change"]["decision"], "worse_line_replaced"
-            )
-            self.assertTrue(accepted["primary_change"]["worse_line"])
-            self.assertEqual(accepted["revisions"][-1]["primary_pick"]["line"], -0.75)
 
     def test_new_formal_market_guardrails_and_complete_odds(self):
         goal = {
@@ -1307,10 +1611,10 @@ class MemoryStoreTests(unittest.TestCase):
             "total_side": None,
             "primary_market": "goal_range",
             "goal_range_selection": "2-3",
-            "goal_range_odds": 1.90,
+            "goal_range_odds": 2.50,
             "goal_range_odds_format": "decimal",
-            "goal_range_probability": 0.58,
-            "goal_range_ev": 0.102,
+            "goal_range_probability": 0.45,
+            "goal_range_ev": 0.125,
             "goal_range_edge_pp": 5.0,
             "goal_range_firm_count": 4,
             "goal_range_market_signal": "aligned",
@@ -1368,9 +1672,9 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                        match_id="goal-edge-zero",
-                        goal_range_edge_pp=0.0,
-                        goal_range_market_probability=0.58,
+                    match_id="goal-edge-zero",
+                    goal_range_edge_pp=0.0,
+                    goal_range_market_probability=0.45,
                         **{
                             key: value
                             for key, value in goal.items()
@@ -1382,16 +1686,18 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(
                     base,
                     match_id="goal-sub-eight",
-                    goal_range_probability=0.54,
-                    goal_range_ev=0.026,
+                    goal_range_odds=2.30,
+                    goal_range_probability=0.45,
+                    goal_range_ev=0.035,
                     goal_range_edge_pp=2.0,
-                    goal_range_market_probability=0.52,
+                    goal_range_market_probability=0.43,
                     **{
                         key: value
                         for key, value in goal.items()
                         if key
                         not in {
                             "goal_range_probability",
+                            "goal_range_odds",
                             "goal_range_ev",
                             "goal_range_edge_pp",
                         }
@@ -1432,10 +1738,11 @@ class MemoryStoreTests(unittest.TestCase):
                     base,
                     match_id="goal-ok",
                     btts_side="yes",
-                    btts_odds=1.95,
+                    btts_odds=4.50,
                     btts_odds_format="decimal",
-                    btts_probability=0.57,
-                    btts_ev=0.1115,
+                    btts_probability=0.25,
+                    btts_market_probability=0.20,
+                    btts_ev=0.125,
                     btts_edge_pp=5.0,
                     btts_firm_count=4,
                     btts_market_signal="neutral",
@@ -1447,7 +1754,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(created["primary_pick"]["selection"], "2-3")
             self.assertEqual(created["primary_pick"]["odds_format"], "decimal")
             self.assertTrue(created["primary_pick"]["market_complete"])
-            self.assertEqual(created["primary_pick"]["market_probability"], 0.53)
+            self.assertAlmostEqual(created["primary_pick"]["market_probability"], 0.40)
             self.assertEqual(
                 created["primary_pick"]["market_collected_at"],
                 "2026-07-21T19:00:00+09:00",
@@ -1469,10 +1776,11 @@ class MemoryStoreTests(unittest.TestCase):
                     total_side=None,
                     primary_market="btts",
                     btts_side="yes",
-                    btts_odds=0.95,
+                    btts_odds=3.50,
                     btts_odds_format="hong_kong",
-                    btts_probability=0.57,
-                    btts_ev=0.1115,
+                    btts_probability=0.25,
+                    btts_market_probability=0.20,
+                    btts_ev=0.125,
                     btts_edge_pp=5.0,
                     btts_firm_count=4,
                     btts_market_signal="aligned",
@@ -1491,9 +1799,10 @@ class MemoryStoreTests(unittest.TestCase):
                         total_side=None,
                         primary_market="btts",
                         btts_side="yes",
-                        btts_odds=0.95,
+                        btts_odds=3.50,
                         btts_odds_format="hong_kong",
-                        btts_probability=0.57,
+                        btts_probability=0.25,
+                        btts_market_probability=0.20,
                         btts_ev=0.20,
                         btts_edge_pp=5.0,
                         btts_firm_count=4,
@@ -1681,6 +1990,8 @@ class MemoryStoreTests(unittest.TestCase):
             values = {
                 "base_dir": base,
                 "verified_finished": True,
+                "verification_source": "https://example.test/final",
+                "verification_collected_at": "2026-07-21T21:00:00+09:00",
                 "match_id": match_id,
                 "home_score": home,
                 "away_score": away,
@@ -1691,7 +2002,7 @@ class MemoryStoreTests(unittest.TestCase):
                 "key_learning": "验证新市场结算",
             }
             values.update(extra)
-            return memory_store.cmd_review(SimpleNamespace(**values))
+            return review_command(SimpleNamespace(**values))
 
         with tempfile.TemporaryDirectory() as base:
             memory_store.cmd_record(
@@ -1702,19 +2013,21 @@ class MemoryStoreTests(unittest.TestCase):
                     total_side=None,
                     primary_market="goal_range",
                     goal_range_selection="2-3",
-                    goal_range_odds=1.90,
+                    goal_range_odds=2.50,
                     goal_range_odds_format="decimal",
-                    goal_range_probability=0.58,
-                    goal_range_ev=0.102,
+                    goal_range_probability=0.45,
+                    goal_range_market_probability=0.40,
+                    goal_range_ev=0.125,
                     goal_range_edge_pp=5.0,
-                    goal_range_firm_count=4,
+                    goal_range_firm_count=5,
                     goal_range_market_signal="aligned",
                     goal_range_market_complete=True,
                     btts_side="yes",
-                    btts_odds=1.95,
+                    btts_odds=4.50,
                     btts_odds_format="decimal",
-                    btts_probability=0.57,
-                    btts_ev=0.1115,
+                    btts_probability=0.25,
+                    btts_market_probability=0.20,
+                    btts_ev=0.125,
                     btts_edge_pp=5.0,
                     btts_firm_count=4,
                     btts_market_signal="aligned",
@@ -1730,7 +2043,7 @@ class MemoryStoreTests(unittest.TestCase):
                 "2-3",
             )
             self.assertIsNone(goal_review["record"]["btts_result"])
-            self.assertEqual(goal_review["stats"]["primary"]["profit_units"], 0.9)
+            self.assertEqual(goal_review["stats"]["primary"]["profit_units"], 1.5)
             self.assertEqual(
                 goal_review["stats"]["primary_by_market"]["btts"]["matches"], 0
             )
@@ -1743,12 +2056,12 @@ class MemoryStoreTests(unittest.TestCase):
                     total_side=None,
                     primary_market="btts",
                     btts_side="no",
-                    btts_odds=2.10,
+                    btts_odds=1.50,
                     btts_odds_format="decimal",
-                    btts_probability=0.54,
-                    btts_ev=0.134,
+                    btts_probability=0.75,
+                    btts_ev=0.125,
                     btts_edge_pp=5.0,
-                    btts_market_probability=0.49,
+                    btts_market_probability=0.70,
                     btts_firm_count=4,
                     btts_market_signal="neutral",
                     btts_market_complete=True,
@@ -1974,67 +2287,219 @@ class MemoryStoreTests(unittest.TestCase):
                 ("goal_range", "2-3"),
             )
 
-    def test_half_time_primary_review_requires_verified_half_score(self):
-        def review_args(base, match_id):
-            return SimpleNamespace(
-                base_dir=base,
-                verified_finished=True,
-                match_id=match_id,
-                home_score=1,
-                away_score=0,
-                half_home_score=None,
-                half_away_score=None,
-                home_corners=None,
-                away_corners=None,
-                key_learning="半场比分必须可验证",
-            )
-
+    def test_paused_markets_cannot_be_formal_or_bypass_with_missing_provenance(self):
         with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="half-primary",
-                    asian_side=None,
-                    total_side=None,
-                    half_market="total",
-                    half_side="under",
-                    half_line=1.0,
-                    half_odds=0.90,
-                    half_probability=0.55,
-                    half_ev=0.08,
-                    half_edge_pp=4.0,
-                    half_firm_count=5,
-                    half_market_signal="aligned",
-                    primary_market="half_time",
-                )
+            cases = (
+                {
+                    "match_id": "paused-asian",
+                    "asian_side": "home",
+                    "total_side": None,
+                    "primary_market": "asian",
+                },
+                {
+                    "match_id": "paused-half",
+                    "total_side": None,
+                    "half_market": "total",
+                    "half_side": "under",
+                    "half_line": 1.0,
+                    "primary_market": "half_time",
+                },
+                {
+                    "match_id": "paused-htft",
+                    "total_side": None,
+                    "htft_pick": ["DD:3.40:0.31:0.054"],
+                    "primary_market": "htft",
+                },
             )
-            with self.assertRaisesRegex(ValueError, "half-time or HT/FT primary"):
-                memory_store.cmd_review(review_args(base, "half-primary"))
-            pending = memory_store.find_record(
-                memory_store.load_history(memory_store.data_path(base)),
-                "half-primary",
-            )
-            self.assertEqual(pending["status"], "pending")
+            for case in cases:
+                with self.subTest(case=case["match_id"]):
+                    with self.assertRaisesRegex(ValueError, "observation_only"):
+                        memory_store.cmd_record(
+                            record_args(
+                                base,
+                                score_model_file="",
+                                model_version=None,
+                                **case,
+                            )
+                        )
 
-            memory_store.cmd_record(
-                record_args(
-                    base,
-                    match_id="htft-primary",
-                    asian_side=None,
-                    total_side=None,
-                    htft_pick=["DD:3.40:0.31:0.08"],
-                    primary_market="htft",
-                    primary_htft_edge_pp=4.0,
-                    primary_htft_firm_count=5,
-                )
-            )
-            with self.assertRaisesRegex(ValueError, "half-time or HT/FT primary"):
-                memory_store.cmd_review(review_args(base, "htft-primary"))
-            pending = memory_store.find_record(
-                memory_store.load_history(memory_store.data_path(base)),
-                "htft-primary",
-            )
-            self.assertEqual(pending["status"], "pending")
+    def test_strict_selection_policy_and_one_x_two_proper_scores(self):
+        selected = strict_metric_record(
+            "strict-selected",
+            probabilities={"home_win": 0.6, "draw": 0.25, "away_win": 0.15},
+            final_score="1-0",
+            selected=True,
+            exact_score_hit_rank=1,
+        )
+        abstained = strict_metric_record(
+            "strict-abstained",
+            probabilities={"home_win": 0.5, "draw": 0.3, "away_win": 0.2},
+            final_score="0-0",
+            selected=False,
+            exact_score_hit_rank=2,
+        )
+        quarantined = strict_metric_record(
+            "quarantined",
+            probabilities={"home_win": 0.01, "draw": 0.01, "away_win": 0.98},
+            final_score="0-1",
+            selected=True,
+            exact_score_hit_rank=1,
+        )
+        quarantined["evaluation_eligibility"] = {
+            "policy_version": memory_store.STRICT_OOS_POLICY_VERSION,
+            "strict_forward_oos": False,
+            "reason": "legacy_or_backfill",
+        }
+
+        stats = memory_store.calculate_stats([selected, abstained, quarantined])
+
+        policy = stats["selection_policy"]
+        self.assertEqual(policy["eligible_reviewed_matches"], 2)
+        self.assertEqual(policy["selected_primary_matches"], 1)
+        self.assertEqual(policy["abstained_matches"], 1)
+        self.assertEqual(policy["coverage"], 0.5)
+        self.assertEqual(policy["abstention_rate"], 0.5)
+        league_key = memory_store.normalize_league_name("Strict Test League")
+        league_policy = stats["leagues"][league_key]["selection_policy"]
+        self.assertEqual(league_policy["eligible_reviewed_matches"], 2)
+        self.assertEqual(league_policy["coverage"], 0.5)
+        self.assertEqual(league_policy["abstention_rate"], 0.5)
+
+        metrics = stats["one_x_two_metrics"]
+        expected_log_loss = (-math.log(0.6) - math.log(0.3)) / 2
+        self.assertEqual(metrics["strict_reviewed_matches"], 2)
+        self.assertEqual(metrics["sample_count"], 2)
+        self.assertEqual(metrics["excluded_count"], 0)
+        self.assertEqual(metrics["excluded_reasons"], {})
+        self.assertAlmostEqual(
+            metrics["one_x_two_multiclass_brier"], 0.5125
+        )
+        self.assertAlmostEqual(
+            metrics["one_x_two_multiclass_log_loss"], expected_log_loss
+        )
+        league_metrics = stats["leagues"][league_key]["one_x_two_metrics"]
+        self.assertEqual(league_metrics["sample_count"], 2)
+        self.assertAlmostEqual(
+            league_metrics["one_x_two_multiclass_brier"], 0.5125
+        )
+        self.assertEqual(stats["excluded_from_strict_forward"]["matches"], 1)
+        self.assertEqual(stats["exact_score_diagnostics"]["samples"], 2)
+        self.assertEqual(stats["exact_score_diagnostics"]["excluded"], 0)
+
+    def test_no_model_abstention_counts_coverage_but_not_model_metrics(self):
+        no_model = strict_metric_record(
+            "strict-no-model-abstention",
+            probabilities={"home_win": 0.9, "draw": 0.05, "away_win": 0.05},
+            final_score="1-0",
+            selected=False,
+            validated_model=False,
+            exact_score_hit_rank=1,
+        )
+        # A trusted-looking label without the immutable artifact is not enough.
+        no_model["evaluation_eligibility"]["reason"] = (
+            "validated_score_model_provenance"
+        )
+
+        stats = memory_store.calculate_stats([no_model])
+
+        self.assertEqual(
+            stats["selection_policy"],
+            {
+                "evaluation_scope": "strict_forward_oos_reviewed",
+                "policy_version": memory_store.CONFIDENCE_POLICY_VERSION,
+                "selection_basis": memory_store.PRIMARY_SELECTION_BASIS,
+                "eligible_reviewed_matches": 1,
+                "selected_primary_matches": 0,
+                "abstained_matches": 1,
+                "coverage": 0.0,
+                "abstention_rate": 1.0,
+            },
+        )
+        metrics = stats["one_x_two_metrics"]
+        self.assertEqual(metrics["sample_count"], 0)
+        self.assertEqual(metrics["excluded_count"], 1)
+        self.assertEqual(
+            metrics["excluded_reasons"],
+            {"missing_validated_score_model_provenance": 1},
+        )
+        self.assertIsNone(metrics["one_x_two_multiclass_brier"])
+        self.assertIsNone(metrics["one_x_two_multiclass_log_loss"])
+        self.assertEqual(stats["exact_score_diagnostics"]["samples"], 0)
+        self.assertEqual(stats["exact_score_diagnostics"]["excluded"], 1)
+        self.assertEqual(stats["exact_score_top1_hits"], 0)
+
+    def test_frozen_evaluation_eligibility_controls_reviewed_cohort(self):
+        frozen = strict_metric_record(
+            "frozen-eligibility",
+            probabilities={"home_win": 0.6, "draw": 0.25, "away_win": 0.15},
+            final_score="1-0",
+            selected=True,
+        )
+        frozen["settlement_basis"] = {
+            "evaluation_eligibility": dict(frozen["evaluation_eligibility"]),
+            "score_model_provenance": frozen["score_model_provenance"],
+            "primary_market": "total",
+            "primary_pick": frozen["primary_pick"],
+        }
+        frozen["evaluation_eligibility"] = {
+            "strict_forward_oos": False,
+            "reason": "top_level_drift_must_not_win",
+        }
+        frozen_stats = memory_store.calculate_stats([frozen])
+        self.assertEqual(frozen_stats["strict_forward_reviewed_matches"], 1)
+        self.assertEqual(frozen_stats["primary"]["matches"], 1)
+        self.assertEqual(frozen_stats["one_x_two_metrics"]["sample_count"], 1)
+
+        missing_frozen_metadata = strict_metric_record(
+            "missing-frozen-eligibility",
+            probabilities={"home_win": 0.6, "draw": 0.25, "away_win": 0.15},
+            final_score="1-0",
+            selected=True,
+        )
+        missing_frozen_metadata["settlement_basis"] = {
+            "primary_market": "total",
+            "primary_pick": missing_frozen_metadata["primary_pick"],
+        }
+        missing_stats = memory_store.calculate_stats([missing_frozen_metadata])
+        self.assertEqual(missing_stats["strict_forward_reviewed_matches"], 0)
+        self.assertEqual(missing_stats["excluded_from_strict_forward"]["matches"], 1)
+
+    def test_one_x_two_metrics_quarantine_bad_or_missing_strict_rows(self):
+        missing_probabilities = strict_metric_record(
+            "missing-probabilities",
+            probabilities=None,
+            final_score="1-0",
+            selected=False,
+        )
+        invalid_score = strict_metric_record(
+            "invalid-score",
+            probabilities={"home_win": 0.6, "draw": 0.25, "away_win": 0.15},
+            final_score="not-a-score",
+            selected=False,
+        )
+        non_normalized = strict_metric_record(
+            "non-normalized",
+            probabilities={"home_win": 0.6, "draw": 0.3, "away_win": 0.2},
+            final_score="1-0",
+            selected=False,
+        )
+
+        metrics = memory_store.calculate_stats(
+            [missing_probabilities, invalid_score, non_normalized]
+        )["one_x_two_metrics"]
+
+        self.assertEqual(metrics["sample_count"], 0)
+        self.assertEqual(metrics["excluded_count"], 3)
+        self.assertEqual(
+            metrics["excluded_reasons"],
+            {
+                "invalid_final_score": 1,
+                "missing_1x2_probabilities": 1,
+                "non_normalized_1x2_probabilities": 1,
+            },
+        )
+        self.assertIsNone(metrics["one_x_two_multiclass_brier"])
+        self.assertIsNone(metrics["one_x_two_multiclass_log_loss"])
 
     def test_reviewed_stats_prefer_frozen_settlement_basis_over_top_level_drift(self):
         frozen_total = {
@@ -2083,10 +2548,17 @@ class MemoryStoreTests(unittest.TestCase):
 
         stats = memory_store.calculate_stats([record])
 
-        self.assertEqual(stats["primary"]["matches"], 1)
-        self.assertEqual(stats["primary"]["profit_units"], 0.9)
-        self.assertEqual(stats["primary_by_market"]["totals"]["matches"], 1)
+        self.assertEqual(stats["primary"]["matches"], 0)
+        self.assertEqual(stats["primary"]["profit_units"], 0)
+        self.assertEqual(stats["primary_by_market"]["totals"]["matches"], 0)
         self.assertEqual(stats["primary_by_market"]["asian"]["matches"], 0)
+        self.assertEqual(
+            stats["legacy_or_quarantined"]["primary_by_market"]["totals"]["matches"],
+            1,
+        )
+        self.assertEqual(
+            stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9
+        )
         self.assertEqual(
             memory_store.primary_snapshot_for_stats(record),
             ("total", frozen_total),
@@ -2105,8 +2577,16 @@ class MemoryStoreTests(unittest.TestCase):
             }
         )
         legacy_stats = memory_store.calculate_stats([legacy])
-        self.assertEqual(legacy_stats["primary_by_market"]["asian"]["matches"], 1)
-        self.assertEqual(legacy_stats["primary"]["profit_units"], -1.0)
+        self.assertEqual(legacy_stats["primary_by_market"]["asian"]["matches"], 0)
+        self.assertEqual(legacy_stats["primary"]["profit_units"], 0)
+        self.assertEqual(
+            legacy_stats["legacy_or_quarantined"]["primary_by_market"]["asian"]["matches"],
+            1,
+        )
+        self.assertEqual(
+            legacy_stats["legacy_or_quarantined"]["primary"]["profit_units"],
+            -1.0,
+        )
 
 
 if __name__ == "__main__":

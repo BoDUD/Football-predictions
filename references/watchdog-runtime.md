@@ -52,9 +52,9 @@ Moving an outbox event to `processed` records dispatch, not analytical success. 
 - Lineup title: `临场复查 <match_id>｜<home_team> vs <away_team>`.
 - Review title: `复盘｜<league_key>｜<match_id>｜<home_team> vs <away_team>`.
 - Resolve the current task ID from `nodeRepl.requestMeta.threadId` before claiming. Refuse to continue if it is absent; never invent or reuse an originating task ID.
-- Read the Skill, claim the exact scheduler item, and stop/archive on a refused claim.
+- Read the Skill, claim the exact scheduler item with `--thread-id <current_thread_id>`, and stop/archive on a refused claim.
 - Persist a complete non-empty result artifact and call `complete` with the current task ID and artifact path.
 - Send the final answer immediately after `complete`. Do not delete automations or call `mark-delivered` in the result task.
 - A later user-initiated invocation, explicit one-time cleanup task, or optional dispatcher run verifies the final answer and performs cleanup.
 
-If a review check finds no explicit finished status, call `review_scheduler.py wait`; archive that no-result check and create exactly one fresh `COUNT=1` follow-up automation for 30 minutes later. Do not start a recurring retry loop.
+If a review check finds no explicit finished status, call `review_scheduler.py wait --thread-id <current_thread_id>`; archive that no-result check and create exactly one fresh `COUNT=1` follow-up automation for 30 minutes later. Do not start a recurring retry loop.

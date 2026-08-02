@@ -108,9 +108,11 @@ Organize all collected data into these categories:
 Perform deep analysis based on collected data:
 
 ### 2.1 Handicap Rationality Check
-Use machine learning baseline model to analyze whether the handicap is reasonable.
-- Determine if handicap is set deep (high) or shallow (low)
-- Output the analyzed fair handicap value
+Use the fitted score-distribution baseline to calculate a goal-margin distribution and
+the settlement probabilities of the current line. A fair handicap is a model diagnostic,
+not a manually chosen label. If there is no fitted model artifact or the home/away team is
+outside its supported population, mark the model unavailable and do not publish a formal
+handicap direction.
 
 ### 2.2 Line Movement Tracking (盘口走势分析)
 - Record early odds ("早" = opening line) and instant odds ("即" = current line)
@@ -126,18 +128,22 @@ Use machine learning baseline model to analyze whether the handicap is reasonabl
 - If an injury list conflicts with the confirmed starting XI, trust the confirmed XI and discard the stale injury item as support for handicap or totals conclusions.
 - Never use a totals price drop alone as primary-pick evidence. Require consistency across multiple firms plus corroborating attacking configuration or chance-quality evidence.
 
-### 2.4 Bookmaker Intent Analysis
-- Analyze the real intention behind bookmaker adjustments
-- Look for patterns in how lines have moved from opening ("早") to current ("即")
+### 2.4 Market-movement interpretation
+- Report only observable changes in line, price, bookmaker coverage, and timestamp.
+- Do not claim to know bookmaker intent, sharp money, public money, or a trap unless a
+  named source actually provides that information.
 
 ### 2.5 Betting Volume Analysis
-- Use odds data to analyze betting volume changes
-- Capture abnormal movements (sharp money, public money divergence)
+- Use betting-volume data only when a named source, collection time, and definition are
+  available. Price movement is not a substitute for volume data.
+- Mark unsupported sharp/public-money narratives as unavailable rather than using them as
+  evidence or model features.
 
 ### 2.6 European-to-Asian Odds Conversion
 - Convert European odds to Asian handicap and odds
 - Check if Asian handicap matches the converted values
-- Identify potential trap lines (诱盘) where there's a mismatch
+- Treat a mismatch as a reproducible cross-market diagnostic. Do not label it a trap or
+  convert it directly into a recommendation.
 
 ---
 
@@ -145,57 +151,86 @@ Use machine learning baseline model to analyze whether the handicap is reasonabl
 
 **CRITICAL**: Use INSTANT odds ("即") for final calculation - this represents the final odds before match kickoff.
 
-### Asian Handicap Probability
-Calculate from latest (instant) Asian handicap data ("即" row):
+### Odds-format-safe no-vig probabilities
 
-```
-1. Home win implied probability:    P(home) = 1 / (1 + home_odds)
-2. Away win implied probability:    P(away) = 1 / (1 + away_odds)
-3. Total implied probability:       P(total) = P(home) + P(away)
-4. Home true implied probability:   P(true_home) = P(home) / P(total)
-5. Away true implied probability:   P(true_away) = P(away) / P(total)
-6. Margin (juice):                 P(margin) = 1 - 1 / P(total)
+Never apply one formula to an unspecified price. Convert each price to decimal first:
+
+```text
+decimal_price = quoted_price                 # decimal odds
+decimal_price = 1 + quoted_price             # Hong Kong odds
+raw_implied_i = 1 / decimal_price_i
+no_vig_market_probability_i = raw_implied_i / sum(raw_implied_all_outcomes)
+overround = sum(raw_implied_all_outcomes) - 1
 ```
 
-### Over/Under Probability
-Same calculation method applied to instant over/under odds ("即" row):
+Use only a complete mutually exclusive market collected from the same source and time
+window. For two-way Asian handicap and totals rows, preserve both sides, the exact line,
+odds format, bookmaker count, price basis, source URL, and timezone-aware collection time.
+For 1X2 and HT/FT, all three or all nine outcomes are required respectively.
 
-```
-1. Over implied probability:        P(over) = 1 / (1 + over_odds)
-2. Under implied probability:       P(under) = 1 / (1 + under_odds)
-3. Total implied probability:       P(total) = P(over) + P(under)
-4. Over true implied probability:  P(true_over) = P(over) / P(total)
-5. Under true implied probability: P(true_under) = P(under) / P(total)
-6. Margin (juice):                 P(margin) = 1 - 1 / P(total)
-```
+The no-vig number is a market comparison baseline, not the model's probability and not a
+literal win probability on lines with push or split settlement. The fitted score matrix
+supplies `full_win`, `half_win`, `push`, `half_loss`, and `full_loss`; the current market
+supplies price and no-vig comparison probability. Keep those concepts separate.
 
 ---
 
 ## Step 4: Model Prediction
 
-Before applying weights, read `<workspace>/.codex/soccer-predict/calibration.json` when present. Use its guardrails immediately. Use `active_weight_adjustments` only when that market is marked eligible and the adjustment is tied to feature-level review evidence.
+Do not invent a Logistic Regression result from prose weights. The executable baseline is
+`scripts/score_model.py`: a time-decayed attack/defence Poisson model with the Dixon-Coles
+low-score correction. It produces one canonical regulation-time score matrix from which
+every football-goal market is derived.
 
-### Initial Weight Allocation (Based on AI Probability Assessment)
+### 4.1 Fit a versioned baseline
 
-**Weight principles**: Allocate from the baseline below. Post-match reviews may change durable weights only after at least 20 graded selections in that market and a feature-level error analysis. Until then, preserve these weights and update only provisional guardrails.
+Use completed matches whose event time is strictly earlier than the fixture being predicted.
+The minimum CSV columns are `date,home_team,away_team,home_goals,away_goals`.
 
-Default weights (initial):
-| Feature | Asian Handicap | Over/Under |
-|---------|:-------------:|:----------:|
-| Odds implied probability | 0.35 | 0.15 |
-| Fundamental analysis | 0.20 | 0.10 |
-| Team fundamentals | 0.20 | 0.10 |
-| Squad power decay | 0.20 | 0.05 | <!-- v1.1: up from 0.15 -->
-| Motivation | 0.10 | 0.05 |
-| Enhanced data (half-goals/corners) | - | 0.15 |
-| Environment factor | - | 0.10 |
-| League factor | - | 0.10 |
-| **Defense injury coefficient** | - | **0.15** | <!-- v1.1: new -->
-| Other | - | 0.05 |
+```text
+python scripts/score_model.py fit --input history.csv --output model.json \
+  --half-life-days 365 --iterations 1200 --learning-rate 0.03 --regularization 0.02
+```
 
-**Note**: `memory_store.py calibrate --write` records whether the sample is eligible for a weight change. Never claim that prose alone trained or optimized the model.
+The artifact records its schema/model version, training window, configuration, fitted team
+parameters, data hash, and model hash. Never edit fitted parameters by hand or call a
+`calibrate` summary a trained model. Retrain only with a documented new data cutoff.
+
+### 4.2 Produce the canonical score matrix
+
+```text
+python scripts/score_model.py predict --model model.json \
+  --home-team HOME --away-team AWAY --kickoff 2030-08-10T19:00:00+09:00 \
+  --output prediction.json \
+  --total over:2.25 --asian home:-0.75
+```
+
+Prediction refuses a model whose training cutoff is on or after the fixture's UTC date and
+refuses an artifact generated at or after kickoff. Output includes expected goals, the normalized finite score matrix, pre-
+normalization tail mass, 1X2, BTTS, goal ranges, exact scores, and any requested total or
+Asian settlement distribution. Unknown teams fail closed unless
+`--unknown-team-policy league_average` is explicitly selected; that fallback must remain in
+the warnings and lowers data quality.
+
+Before using an artifact, verify all cells are finite and non-negative, matrix mass is one
+within tolerance, reported tail mass is below the configured threshold, and every derived
+market reproduces the relevant cell sum. Archive the prediction artifact/model provenance
+with the formal record. A hand-computed probability may be shown as an observation but may
+not become a formal pick.
+
+### 4.3 Market calibration is separate from the football model
+
+Read `<workspace>/.codex/soccer-predict/calibration.json` for forward-test metrics and
+guardrails. It does not modify the fitted score model. Use market prices only to calculate a
+no-vig comparison probability and EV; never blend the price back into the score matrix and
+then claim the resulting edge is independent.
 
 ### Market-alignment gate
+
+The current strict forward policy keeps Asian handicap, first-half, and HT/FT directions
+`observation_only`. They may be calculated and archived for calibration, but cannot become a
+formal primary until a later versioned policy is supported by enough clean out-of-sample
+records. Legacy or backfilled wins do not count toward re-enabling a market.
 
 Classify each candidate against the consensus opening-to-current move:
 
@@ -228,69 +263,25 @@ Any formal total-goals direction needs consensus from at least five firms and ei
 
 Read [expanded-markets.md](expanded-markets.md). Goal ranges and BTTS need a complete mutually exclusive current market plus chance-quality or confirmed attacking-configuration evidence. Corner totals and handicaps need a complete two-way market from at least three firms plus independent corner-profile evidence. A historical percentage, raw goals average, possession figure, or isolated price cannot satisfy these gates alone.
 
-Build one pool from candidates that pass every safety and market-specific gate. Rank it with `stability-v1`:
+Build one pool only from candidates that pass every audit and market-specific gate. Use
+the versioned selection policy emitted by `memory_store.py`; do not rank with an informal
+weighted paragraph. Model probability may influence EV and settlement risk, but it is not
+three independent pieces of evidence. Count EV once, use edge as a qualification/audit
+check, and use genuinely separate tie-breakers such as settlement variance, data freshness,
+market depth, source agreement, and out-of-sample calibration.
 
-- settlement/no-loss safety: 55%;
-- bounded EV strength: 10%, saturated at +8%;
-- bounded edge strength: 10%, saturated at +4pp;
-- data quality: 10%;
-- market depth, evidence coverage, and market alignment: 5% each.
+Select exactly one primary only when the top candidate remains best under reasonable price
+and probability sensitivity. Otherwise use no primary. Never force a direction merely to
+increase the number of predictions.
 
-Apply the documented high-variance and conflict penalties, then sort by score, settlement safety, market depth, edge, EV, and stable market identity. Select exactly one Rank 1 primary. The saturation points are ranking inputs, not ordinary minimums. If no safe candidate remains, use no primary; never force a negative-EV, incomplete, or contradicted direction.
+### 4.4 Lineup and contextual effects
 
-### 4.1 Asian Handicap Logistic Regression Model
-
-Perform deep analysis using logistic regression. Quantify input features, standardize, and output comprehensive prediction probability.
-
-**Analysis weight priority** (descending):
-```
-Odds data > Fundamental analysis > Real-time lineup > Motivation
-(Bookmaker info > Short-term disruption > Long-term trends > Subjective factors)
-```
-
-**Input features**:
-| Feature | Description |
-|---------|-------------|
-| Team fundamentals | Recent win rate, home/away differential |
-| Squad power decay coefficient | Calculated from injury/suspension list |
-| Motivation label | 0-1 standardized |
-| Fundamental analysis | Results from Step 2 |
-| Odds implied probability | **Core feature** from Step 3 |
-
-### 4.2 Over/Under Logistic Regression Model (Enhanced)
-
-Deep analysis of over/under handicap using logistic regression with enhanced features.
-
-**Key comparison**: If opened line > analyzed line -> high open; If opened line < analyzed line -> shallow open.
-
-**Input features** (for both home and away teams):
-| Feature | Weight | Description |
-|---------|:------:|-------------|
-| xG and xGA | 0.12 | Expected goals and expected goals against |
-| League factor | 0.10 | League-specific scoring patterns (MLS~55% over, etc.) |
-| Recent win rate | 0.05 | Last N matches |
-| Recent 5-match goals | 0.07 | Goals in last 5 games (reduced from 0.10 — low recent goals ≠ low match goals under injury conditions) |
-| H2H history | 0.05 | Head-to-head goal patterns |
-| Home/away differential | 0.10 | Home vs away scoring difference |
-| Squad power decay coefficient | 0.05 | From injury/suspension list (attacking side only) |
-| **Defense injury coefficient** | **0.15** | **🆕 KEY RULE: GK absence → +0.75~1 goal adj; CB absence → +0.5; DM absence → +0.25** |
-| Motivation label | 0.05 | 0-1 standardized |
-| Environment factor | 0.10 | Weather, venue altitude, rest days |
-| Half-time goals pattern | 0.08 | Half-time scoring behavior (high-scoring half vs low) |
-| Corner kicks | 0.08 | Corner kick data (indicates attacking intensity) |
-| Fundamental analysis | 0.10 | Results from Step 2 |
-| Odds implied probability | 0.15 | **Core feature** from Step 3 |
-
-**🆕 Defense Injury Rule (v1.1)**:
-When a team is missing key defensive players, the over/under model MUST adjust upward:
-- **GK absent** (致命级): +0.75 to +1.0 goal adjustment toward OVER. This is the single most impactful injury type for goals.
-- **CB absent** (严重级): +0.5 goal adjustment
-- **DM absent** (中等级): +0.25 goal adjustment
-- **FB absent** (轻微级): +0.1 goal adjustment
-- Stacking: multiple positions missing → adjustments stack (e.g., GK + DM = +1.0 to +1.25)
-- **Critical correction**: Defense injuries do NOT mean "both teams score less → under". The correct interpretation is "conceding team leaks more goals → toward OVER". Attacking injuries only affect that team's scoring, they do NOT cancel out opponent's defensive collapse.
-
-**Output**: Predicted home goals, away goals, and total goals.
+Do not add fixed goal increments such as “goalkeeper absent = +0.75 goals” unless that
+coefficient was learned from the training population and versioned in the model. Confirmed
+lineup, injuries, weather, motivation, and rest may be reported as evidence and used for a
+documented sensitivity scenario. When the executable model cannot consume that feature,
+keep the unadjusted baseline, show the scenario range separately, and downgrade a formal
+pick whose sign changes across the range.
 
 ---
 
@@ -299,11 +290,12 @@ When a team is missing key defensive players, the over/under model MUST adjust u
 Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate the expanded markets from their required distributions, calculate two exact-score candidates for every valid pre-match model, then calculate first-half and HT/FT markets when the required data is available.
 
 ### Win Probability Prediction
-Combine odds analysis and model analysis to predict:
-- Asian Handicap: P(home_win) and P(away_win)
-- Over/Under: P(over_win) and P(under_win)
+Aggregate the canonical score matrix without blending bookmaker prices into it:
+- Asian handicap: full-win, half-win, push, half-loss, and full-loss probabilities for the exact side and line
+- Over/Under: the same five settlement states for the exact side and line
 - Goal ranges: sum every matching cell in the complete football score matrix
 - BTTS: sum cells where both teams score; the opposite side is its complement
+- 1X2 and exact score: sum or rank cells from this same matrix
 - Corner total and handicap: derive from independent total-corner and corner-margin distributions
 
 ### Expected Value (EV) Calculation
@@ -315,11 +307,14 @@ No-push EV = P(win) * net_odds - P(loss)
 Quarter-line EV = P(full_win) * net_odds
                 + P(half_win) * net_odds / 2
                 - P(half_loss) / 2
-                - P(loss)
+                - P(full_loss)
 edge_pp = 100 * (model_probability - no_vig_market_probability)
 ```
 
-Recalculate EV from the archived probability distribution and odds format. Never accept a manually supplied EV that does not match, and never compare a decimal price with the Hong Kong formula.
+Push contributes zero profit. Require all five states, including explicit zeros, to sum to
+one and reject states impossible for the line type. Recalculate EV and edge inside the
+archive command from the probability distribution, complete current market, and odds
+format. A caller-supplied value is only an assertion to audit; it is never authoritative.
 
 ### Final Output
 1. Best threshold-qualified recommendation from the unified market pool; if none qualifies, show the highest-ranked observation as `不下注`

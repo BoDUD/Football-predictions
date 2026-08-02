@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
-  short_description: "Visual multi-market football and review analysis"
-  default_prompt: "Use $soccer-predict for a visual football analysis that compares handicap, totals, goal ranges, BTTS, and corner markets in one qualified candidate pool, plus lineup-time rechecking and post-match review."
+  short_description: "Auditable score-model football predictions"
+  default_prompt: "Use $soccer-predict to generate one auditable score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."

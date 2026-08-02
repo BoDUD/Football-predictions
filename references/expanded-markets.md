@@ -31,7 +31,7 @@ Build corner probabilities separately. Use recent home/away corners for and agai
 - Use real current odds from the named market. Never reuse totals odds for a goal range, exact-score odds for BTTS, or football handicap odds for a corner market.
 - Remove margin only from a complete mutually exclusive outcome set. If any outcome is missing, show the model probability as an observation and do not calculate a formal edge.
 - Record source, timezone-aware collection time, bookmaker count, market completeness, odds format, `consensus` or `median` price basis, model probability, no-vig market probability, edge, EV, and market signal.
-- Require strictly positive EV and edge plus medium/high data quality for an ordinary formal direction. EV `8%` and edge `4pp` are `stability-v1` score saturation points, not ordinary minimums.
+- Require strictly positive EV and edge plus medium/high data quality for an ordinary formal direction. EV `8%` and edge `4pp` remain adverse-signal qualification thresholds, not generic targets or evidence to tune toward.
 - Require chance-quality evidence or an attacking configuration supported by confirmed lineups for goal ranges and BTTS.
 - Require at least three firms plus `corner_profile_evidence` for corner totals and corner handicaps.
 - When line and related markets move materially against or materially conflict with a selection, require EV `>= 8%`, edge `>= 4pp`, at least five firms, and independent confirmed-lineup or fundamental evidence.
@@ -40,6 +40,23 @@ Compare candidates using an executable consensus or median price, edge, evidence
 
 ## Archive and lineup check
 
+The audit contract applies to the original markets as well as the expanded markets. Asian
+handicap, full-time total, and first-half Asian/total picks must include explicit odds
+format, complete-market flag, selected no-vig market probability, source, timezone-aware
+collection time, consensus/median price basis, bookmaker count, and five settlement
+probabilities. The stored `loss` key means full loss. HT/FT requires all nine current
+outcome probabilities from the same complete market. The archive command recalculates EV
+and edge and rejects caller values that disagree.
+
+Pass every outcome price with repeated `--<prefix>-market-odds LABEL:PRICE` values. A
+total needs both `--total-market-odds over:1.95` and
+`--total-market-odds under:1.95`; BTTS needs `yes` and `no`; Asian/corner handicap needs
+`home` and `away`; first-half 1X2 needs `home`, `draw`, and `away`; HT/FT needs all nine
+`HH` through `AA`. A goal-range set must start at zero, contain continuous non-overlapping
+bands, and end in `N+`, such as `0-1`, `2-3`, `4-6`, `7+`. The selected complete-market
+price must equal the executable pick price. The archive command converts every outcome
+using the declared odds format and calculates the no-vig probabilities itself.
+
 Store fixed, explicit fields:
 
 - Goal range: `selection`, `minimum_goals`, `maximum_goals`, `odds`, `odds_format`, `probability`, `market_probability`, `ev`, `edge_pp`, `firm_count`, `market_complete`, `market_source`, `market_collected_at`, `price_basis`, `market_signal`, `role`.
@@ -47,19 +64,20 @@ Store fixed, explicit fields:
 - Corner total: `side` (`over` or `under`), `line`, the common fields, and a settlement-probability distribution.
 - Corner handicap: `side` (`home` or `away`), `line`, the common fields, and a settlement-probability distribution.
 
-For new markets, explicitly set `odds_format` to `decimal` or `hong_kong`. Recalculate no-push EV as `p * decimal_odds - 1` or `p * (1 + hong_kong_odds) - 1`; reject a supplied EV that differs. For a corner market, persist `full_win`, `half_win`, `push`, `half_loss`, and `loss` probabilities, require them to sum to one, and calculate EV with the actual split settlement. Set impossible states to zero: half-lines allow only full win/loss, integer lines allow full win/push/loss, and quarter lines allow full/half win and full/half loss but no push. Preserve legacy records with no format under their historic Hong Kong-net-odds behavior; never rewrite old reviewed ROI.
+Explicitly set `odds_format` to `decimal` or `hong_kong`. Recalculate no-push EV as `p * decimal_odds - 1` or `p * (1 + hong_kong_odds) - 1`; reject a supplied EV that differs. For every split-settlement market, persist `full_win`, `half_win`, `push`, `half_loss`, and `loss` probabilities, require them to sum to one, and calculate EV with the actual split settlement. Set impossible states to zero: half-lines allow only full win/loss, integer lines allow full win/push/loss, and quarter lines allow full/half win and full/half loss but no push. Preserve legacy records with no format under their historic behavior in a quarantined cohort; never rewrite old reviewed ROI or describe it as strict forward performance.
 
 Use the dedicated `record` arguments:
 
 - `--goal-range-selection`, `--goal-range-odds`, `--goal-range-odds-format`, `--goal-range-probability`, `--goal-range-market-probability`, `--goal-range-ev`, `--goal-range-edge-pp`, `--goal-range-firm-count`, `--goal-range-market-source`, `--goal-range-market-collected-at`, `--goal-range-price-basis`, `--goal-range-market-signal`, `--goal-range-market-complete`
+- Repeat `--goal-range-market-odds LABEL:PRICE` for every complete outcome. Use the equivalent repeated `--*-market-odds` flag for each other formal market.
 - The equivalent `--btts-*`, `--corner-total-*`, or `--corner-handicap-*` arguments for those markets
 - For each corner market, also pass the five `--*-full-win-probability`, `--*-half-win-probability`, `--*-push-probability`, `--*-half-loss-probability`, and `--*-loss-probability` values
 - `--corner-profile-evidence` whenever a formal corner pick is archived
 
 Pass the relevant `--*-market-complete` flag only after every required outcome of that current market has been verified.
-The archive retains the selected no-vig probability and audit metadata; keep the complete raw outcome rows in the visual analysis artifact or notes. The validator checks `edge_pp = 100 * (model_probability - market_probability)`.
+The archive retains the complete outcome prices, raw implied probabilities, server-calculated no-vig probabilities, and audit metadata. The validator checks `edge_pp = 100 * (model_probability - market_probability)`.
 
-A lineup check may maintain, replace, or cancel any market. Compare goal-range identity by its range, BTTS identity by its side, and corner identity by side plus line. Recalculate `stability-v1` at current prices: when the old thesis remains eligible, replacement needs a current confidence gain of at least five points; when hard information invalidates it, archive that reason and use the new safe Rank 1 or no primary. Preserve the previous version in `revisions` and settle only the final active version.
+A lineup check may maintain, replace, or cancel any market. Compare goal-range identity by its range, BTTS identity by its side, and corner identity by side plus line. Recalculate the versioned selection policy at current prices: when the old thesis remains eligible, replacement needs a current confidence gain of at least five points; when hard information invalidates it, archive that reason and use the new safe Rank 1 or no primary. Preserve the previous version append-only in `revisions` and settle only the final active version.
 
 ## Settlement
 

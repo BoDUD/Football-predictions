@@ -31,6 +31,7 @@ def archived_record(
     }
     if status == "reviewed":
         record["reviewed_at"] = "2026-07-22T14:00:00+00:00"
+        record["final_score"] = "2-1"
     return record
 
 
@@ -49,10 +50,18 @@ def set_history_status(base: str, status: str) -> None:
     records[0]["status"] = status
     if status == "reviewed":
         records[0]["reviewed_at"] = "2026-07-22T14:00:00+00:00"
+        records[0]["final_score"] = "2-1"
     path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
 
 
-def write_result_artifact(base: str, content: str = "完整赛后复盘输出") -> str:
+def write_result_artifact(
+    base: str,
+    content: str = (
+        "# 赛后复盘 42\n"
+        "终场比分：2-1\n"
+        "主推结算与关键学习均已完整记录，等待在结果任务中交付。"
+    ),
+) -> str:
     path = Path(base) / "review-result.txt"
     path.write_text(content, encoding="utf-8")
     return str(path)
@@ -71,10 +80,16 @@ def register_args(base: str, **overrides):
     return SimpleNamespace(**values)
 
 
-def claim_args(base: str, now: str, lease_minutes: float = 10):
+def claim_args(
+    base: str,
+    now: str,
+    lease_minutes: float = 10,
+    thread_id: str = "thread-review-42",
+):
     return SimpleNamespace(
         base_dir=base,
         match_id="42",
+        thread_id=thread_id,
         now=now,
         lease_minutes=lease_minutes,
     )
@@ -247,6 +262,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-review-42",
                     reason="executor disconnected",
                     now="2026-07-22T22:42:00+09:00",
                 )
@@ -257,6 +273,204 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(base_dir=base, now="2026-07-22T22:43:00+09:00")
             )
             self.assertEqual([item["match_id"] for item in due_again["due"]], ["42"])
+
+    def test_claim_and_fail_require_the_claiming_thread(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            review_scheduler.cmd_register(register_args(base))
+            for thread_id in (None, "", "   "):
+                with self.subTest(thread_id=thread_id):
+                    with self.assertRaisesRegex(ValueError, "non-empty --thread-id"):
+                        review_scheduler.cmd_claim(
+                            SimpleNamespace(
+                                base_dir=base,
+                                match_id="42",
+                                thread_id=thread_id,
+                                now="2026-07-22T22:30:00+09:00",
+                                lease_minutes=10,
+                            )
+                        )
+
+            claimed = review_scheduler.cmd_claim(
+                claim_args(
+                    base,
+                    "2026-07-22T22:30:00+09:00",
+                    thread_id="thread-owner",
+                )
+            )
+            self.assertEqual(claimed["task"]["claimed_thread_id"], "thread-owner")
+            self.assertEqual(
+                claimed["task"]["attempts"][0]["claims"][0]["thread_id"],
+                "thread-owner",
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not match the active claim"):
+                review_scheduler.cmd_release(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        thread_id="thread-other",
+                        reason="wrong worker",
+                        now="2026-07-22T22:31:00+09:00",
+                    )
+                )
+            released = review_scheduler.cmd_release(
+                SimpleNamespace(
+                    base_dir=base,
+                    match_id="42",
+                    thread_id="thread-owner",
+                    reason="worker failed",
+                    now="2026-07-22T22:31:00+09:00",
+                )
+            )
+            self.assertTrue(released["released"])
+            self.assertIsNone(released["task"]["claimed_thread_id"])
+
+            parsed = review_scheduler.build_parser().parse_args(
+                [
+                    "fail",
+                    "--match-id",
+                    "42",
+                    "--thread-id",
+                    "thread-owner",
+                    "--reason",
+                    "worker failed",
+                ]
+            )
+            self.assertEqual(parsed.command, "fail")
+
+    def test_reclaimed_attempt_can_only_be_completed_by_latest_owner(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(
+                    base,
+                    "2026-07-22T22:30:00+09:00",
+                    lease_minutes=5,
+                    thread_id="thread-first",
+                )
+            )
+            reclaimed = review_scheduler.cmd_claim(
+                claim_args(
+                    base,
+                    "2026-07-22T22:36:00+09:00",
+                    thread_id="thread-latest",
+                )
+            )
+            self.assertTrue(reclaimed["claimed"])
+            self.assertEqual(
+                reclaimed["task"]["claimed_thread_id"], "thread-latest"
+            )
+
+            set_history_status(base, "reviewed")
+            result_artifact = write_result_artifact(base)
+            with self.assertRaisesRegex(ValueError, "does not match the active claim"):
+                review_scheduler.cmd_complete(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        thread_id="thread-first",
+                        result_artifact=result_artifact,
+                        now="2026-07-22T22:37:00+09:00",
+                    )
+                )
+            completed = review_scheduler.cmd_complete(
+                SimpleNamespace(
+                    base_dir=base,
+                    match_id="42",
+                    thread_id="thread-latest",
+                    result_artifact=result_artifact,
+                    now="2026-07-22T22:37:00+09:00",
+                )
+            )
+            self.assertEqual(completed["task"]["thread_id"], "thread-latest")
+
+    def test_complete_rejects_placeholder_or_damaged_artifacts(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(base, "2026-07-22T22:30:00+09:00")
+            )
+            set_history_status(base, "reviewed")
+            artifact = Path(base) / "review-result.txt"
+            args = SimpleNamespace(
+                base_dir=base,
+                match_id="42",
+                thread_id="thread-review-42",
+                result_artifact=str(artifact),
+                now="2026-07-22T23:02:00+09:00",
+            )
+
+            artifact.write_text("42 2-1", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "too short"):
+                review_scheduler.cmd_complete(args)
+
+            artifact.write_bytes(b"42 2-1\x00" + b"broken" * 12)
+            with self.assertRaisesRegex(ValueError, "invalid text data"):
+                review_scheduler.cmd_complete(args)
+
+            artifact.write_text(
+                "# 赛后复盘\n终场比分：2-1\n这是一份足够长但没有比赛编号的完整结果。",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "does not identify match 42"):
+                review_scheduler.cmd_complete(args)
+
+            artifact.write_text(
+                "# 赛后复盘 42\n终场信息缺失\n这是一份足够长但没有最终比分的完整结果。",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "does not contain final score 2-1"):
+                review_scheduler.cmd_complete(args)
+
+            artifact.write_text(
+                "# 赛后复盘 42\n"
+                "终场比分：2–1\n"
+                "主推结算、累计统计、关键学习和风险说明均已完整保存并等待交付。",
+                encoding="utf-8",
+            )
+            completed = review_scheduler.cmd_complete(args)
+            self.assertFalse(completed["duplicate_ignored"])
+
+    def test_complete_and_terminal_reject_tasks_that_were_never_claimed(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            review_scheduler.cmd_register(register_args(base))
+            set_history_status(base, "reviewed")
+            artifact = write_result_artifact(base)
+            with self.assertRaisesRegex(ValueError, "claimed by a thread"):
+                review_scheduler.cmd_complete(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        thread_id="thread-review-42",
+                        result_artifact=artifact,
+                        now="2026-07-22T23:02:00+09:00",
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            review_scheduler.cmd_register(register_args(base))
+            artifact = write_result_artifact(
+                base,
+                "# 复盘终态通知 42\n"
+                "行政状态：postponed\n"
+                "该场比赛不再重试，终态说明已保存并等待交付。",
+            )
+            with self.assertRaisesRegex(ValueError, "claimed by a thread"):
+                review_scheduler.cmd_terminal(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        reason="postponed",
+                        thread_id="thread-admin-42",
+                        result_artifact=artifact,
+                        now="2026-07-22T22:35:00+09:00",
+                    )
+                )
 
     def test_each_nonterminal_check_creates_one_nonduplicate_follow_up(self):
         with tempfile.TemporaryDirectory() as base:
@@ -269,6 +483,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-review-42",
                     reason="live",
                     now="2026-07-22T22:35:00+09:00",
                 )
@@ -283,6 +498,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-review-42",
                     reason="live",
                     now="2026-07-22T22:36:00+09:00",
                 )
@@ -308,6 +524,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-review-42",
                     reason="extra-time",
                     now="2026-07-22T23:10:00+09:00",
                 )
@@ -338,6 +555,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-review-42",
                     reason="live",
                     now="2026-07-22T22:35:00+09:00",
                 )
@@ -352,17 +570,20 @@ class ReviewSchedulerTests(unittest.TestCase):
                     automation_rrule=follow_up["automation_rrule"],
                 )
             )
+            review_scheduler.cmd_claim(
+                claim_args(base, "2026-07-22T23:05:00+09:00")
+            )
             set_history_status(base, "reviewed")
 
             synced = review_scheduler.cmd_due(
-                SimpleNamespace(base_dir=base, now="2026-07-22T23:00:00+09:00")
+                SimpleNamespace(base_dir=base, now="2026-07-22T23:06:00+09:00")
             )
             self.assertEqual(synced["due"], [])
             status = review_scheduler.cmd_status(
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
-                    now="2026-07-22T23:00:00+09:00",
+                    now="2026-07-22T23:06:00+09:00",
                 )
             )["task"]
             self.assertEqual(status["status"], "completed")
@@ -469,6 +690,15 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(base, "2026-07-22T22:30:00+09:00")
+            )
+            state_file = review_scheduler.state_path(base)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state["tasks"]["42"].pop("claimed_thread_id")
+            state_file.write_text(
+                json.dumps(state, ensure_ascii=False), encoding="utf-8"
+            )
             set_history_status(base, "reviewed")
             synced = review_scheduler.cmd_status(
                 SimpleNamespace(
@@ -494,14 +724,19 @@ class ReviewSchedulerTests(unittest.TestCase):
             replay = review_scheduler.cmd_complete(exact)
             self.assertTrue(replay["duplicate_ignored"])
 
-            with self.assertRaisesRegex(ValueError, "result tuple"):
+            with self.assertRaisesRegex(ValueError, "does not match the active claim"):
                 review_scheduler.cmd_complete(
                     SimpleNamespace(
                         **{**vars(exact), "thread_id": "thread-review-other"}
                     )
                 )
             other_artifact = Path(base) / "other-review-result.txt"
-            other_artifact.write_text("另一份完整赛后复盘", encoding="utf-8")
+            other_artifact.write_text(
+                "# 赛后复盘 42\n"
+                "终场比分：2-1\n"
+                "这是另一份结构完整但路径不同的赛后复盘结果。",
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(ValueError, "result tuple"):
                 review_scheduler.cmd_complete(
                     SimpleNamespace(
@@ -524,6 +759,9 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(base, "2026-07-22T22:30:00+09:00")
+            )
             set_history_status(base, "reviewed")
 
             within_grace = review_scheduler.cmd_cleanup_due(
@@ -550,6 +788,9 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(base, "2026-07-22T22:30:00+09:00")
+            )
             set_history_status(base, "reviewed")
             artifact = write_result_artifact(base)
             review_scheduler.cmd_complete(
@@ -575,6 +816,13 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
+            review_scheduler.cmd_claim(
+                claim_args(
+                    base,
+                    "2026-07-22T22:30:00+09:00",
+                    thread_id="thread-admin-42",
+                )
+            )
             set_history_status(base, "postponed")
             synced = review_scheduler.cmd_status(
                 SimpleNamespace(
@@ -610,7 +858,11 @@ class ReviewSchedulerTests(unittest.TestCase):
                 write_history(base)
                 review_scheduler.cmd_register(register_args(base))
                 review_scheduler.cmd_claim(
-                    claim_args(base, "2026-07-22T22:30:00+09:00")
+                    claim_args(
+                        base,
+                        "2026-07-22T22:30:00+09:00",
+                        thread_id="thread-admin-42",
+                    )
                 )
                 with self.assertRaisesRegex(ValueError, "--result-artifact"):
                     review_scheduler.cmd_terminal(
@@ -623,7 +875,12 @@ class ReviewSchedulerTests(unittest.TestCase):
                             now="2026-07-22T22:35:00+09:00",
                         )
                     )
-                result_artifact = write_result_artifact(base, f"行政终态：{reason}")
+                result_artifact = write_result_artifact(
+                    base,
+                    "# 复盘终态通知 42\n"
+                    f"行政状态：{reason}\n"
+                    "该场比赛不再重试，终态说明已保存并等待交付。",
+                )
                 terminal = review_scheduler.cmd_terminal(
                     SimpleNamespace(
                         base_dir=base,
