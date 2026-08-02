@@ -1,18 +1,59 @@
-"""Validate an HT/FT matrix and select two stable match scenarios."""
+"""Validate an HT/FT matrix and select its two largest joint-probability scenarios."""
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
-from typing import Any
+from typing import Any, Mapping
 
 
 HALF_RESULTS = ("H", "D", "A")
 FULL_RESULTS = ("H", "D", "A")
 OUTCOMES = tuple(f"{half}{full}" for half in HALF_RESULTS for full in FULL_RESULTS)
-SELECTION_BASIS = "scenario_stability_v2"
+SELECTION_BASIS = "probability_top2_v3_post_selection"
+ACTIVE_MARKET_POLICY = "strict-oos-market-policy-v1"
+HTFT_FORMAL_ENABLED = False
 FULL_TIME_TIE_TOLERANCE = 1e-9
+MODEL_ONLY_PAIR_MASS_THRESHOLD = 0.46
+# The 0.50 threshold belongs only to the evaluator's untimestamped full-time
+# opening-market research cohort. It is intentionally not a production gate.
+RESEARCH_ONLY_FULL_TIME_OPENING_PAIR_MASS_THRESHOLD = 0.50
+PAIR_MASS_THRESHOLDS = {
+    "model_only": MODEL_ONLY_PAIR_MASS_THRESHOLD,
+}
+LEAGUE_PAIR_GATE_EVIDENCE_VERSION = "fixed-2025-post-selection-cohorts-v1"
+LEAGUE_PAIR_GATE_EVIDENCE = {
+    "brazil_serie_a": {
+        "eligible_sample_count": 380,
+        "covered_count": 125,
+        "hit_count": 72,
+        "regime_warning": None,
+    },
+    "japan_j1": {
+        "eligible_sample_count": 380,
+        "covered_count": 66,
+        "hit_count": 32,
+        "regime_warning": (
+            "2026 training tail is the regional J1 special-season regime; "
+            "ordinary 2026/27 J1 is a distribution shift"
+        ),
+    },
+    "norway_eliteserien": {
+        "eligible_sample_count": 240,
+        "covered_count": 110,
+        "hit_count": 63,
+        "regime_warning": None,
+    },
+    "usa_mls": {
+        "eligible_sample_count": 510,
+        "covered_count": 208,
+        "hit_count": 114,
+        "regime_warning": None,
+    },
+}
+MIN_LEAGUE_GATE_SAMPLE = 100
 
 STABILITY_WEIGHTS = {
     "conditional_follow_through": 0.45,
@@ -31,6 +72,76 @@ EXACT_RESULT_ALIASES = {
     "A": "A",
     "AWAY": "A",
 }
+
+
+def _wilson_lower_bound(hits: int, sample_count: int) -> float | None:
+    if sample_count < 1:
+        return None
+    z = 1.959963984540054
+    rate = hits / sample_count
+    denominator = 1 + z * z / sample_count
+    center = rate + z * z / (2 * sample_count)
+    radius = z * math.sqrt(
+        (rate * (1 - rate) + z * z / (4 * sample_count)) / sample_count
+    )
+    return (center - radius) / denominator
+
+
+def _league_pair_gate_evidence(league_key: str | None) -> dict[str, Any]:
+    if league_key is None or not league_key.strip():
+        return {
+            "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+            "league_key": None,
+            "status": "missing_league_context",
+            "production_confidence_eligible": False,
+        }
+    normalized = league_key.strip().casefold()
+    raw = LEAGUE_PAIR_GATE_EVIDENCE.get(normalized)
+    if raw is None:
+        return {
+            "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+            "league_key": normalized,
+            "status": "unsupported_league_no_training_evidence",
+            "production_confidence_eligible": False,
+        }
+    covered = raw["covered_count"]
+    hits = raw["hit_count"]
+    hit_rate = hits / covered
+    lower_bound = _wilson_lower_bound(hits, covered)
+    regime_warning = raw["regime_warning"]
+    sample_sufficient = covered >= MIN_LEAGUE_GATE_SAMPLE
+    lower_bound_above_chance = lower_bound is not None and lower_bound > 0.5
+    eligible = (
+        sample_sufficient
+        and lower_bound_above_chance
+        and regime_warning is None
+    )
+    if regime_warning is not None:
+        status = "competition_regime_shift_unconfirmed"
+    elif not sample_sufficient:
+        status = "league_gate_sample_too_small"
+    elif not lower_bound_above_chance:
+        status = "league_gate_lower_bound_not_above_chance"
+    else:
+        status = "league_gate_forward_confirmed"
+    return {
+        "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+        "league_key": normalized,
+        "status": status,
+        "source_role": "post_selection_development_evidence_not_untouched",
+        "threshold": MODEL_ONLY_PAIR_MASS_THRESHOLD,
+        "eligible_sample_count": raw["eligible_sample_count"],
+        "covered_count": covered,
+        "hit_count": hits,
+        "coverage": covered / raw["eligible_sample_count"],
+        "hit_rate_when_covered": hit_rate,
+        "wilson_95_lower_bound": lower_bound,
+        "minimum_sample": MIN_LEAGUE_GATE_SAMPLE,
+        "sample_sufficient": sample_sufficient,
+        "lower_bound_above_chance": lower_bound_above_chance,
+        "regime_warning": regime_warning,
+        "production_confidence_eligible": eligible,
+    }
 
 
 def parse_assignments(
@@ -118,6 +229,91 @@ def _normalize_exact_score_results(
     return normalized
 
 
+def _validate_anchor_context(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("anchor_context must be an object")
+    if value.get("kind") != "half_time_current_market":
+        raise ValueError(
+            "registered ranking supports only half_time_current_market anchor context"
+        )
+    if value.get("complete") is not True or value.get("de_vigged") is not True:
+        raise ValueError("anchor_context must be complete and explicitly de_vigged")
+    source = value.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("anchor_context.source is required")
+    captured_at = value.get("captured_at")
+    if not isinstance(captured_at, str) or not captured_at.strip():
+        raise ValueError("anchor_context.captured_at is required")
+    try:
+        parsed = datetime.fromisoformat(captured_at.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("anchor_context.captured_at must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("anchor_context.captured_at needs an explicit UTC offset")
+    return {
+        "kind": "half_time_current_market",
+        "complete": True,
+        "de_vigged": True,
+        "source": source.strip(),
+        "captured_at": parsed.isoformat(),
+        "production_pair_mass_gate_validated": False,
+    }
+
+
+def _validate_odds_context(
+    value: Mapping[str, Any] | None,
+    *,
+    firm_count: int,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("odds_context must be an object")
+    if value.get("kind") != "current_htft_nine_way_market":
+        raise ValueError("odds_context.kind must be current_htft_nine_way_market")
+    if value.get("complete") is not True:
+        raise ValueError("odds_context must explicitly declare complete=true")
+    source = value.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("odds_context.source is required")
+    context_firm_count = value.get("firm_count")
+    if (
+        isinstance(context_firm_count, bool)
+        or not isinstance(context_firm_count, int)
+        or context_firm_count < 1
+        or context_firm_count != firm_count
+    ):
+        raise ValueError("odds_context.firm_count must match firm_count")
+
+    parsed_times: dict[str, datetime] = {}
+    for name in ("captured_at", "kickoff"):
+        raw = value.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"odds_context.{name} is required")
+        try:
+            parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"odds_context.{name} must be ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"odds_context.{name} needs an explicit UTC offset")
+        parsed_times[name] = parsed
+    if parsed_times["captured_at"] >= parsed_times["kickoff"]:
+        raise ValueError("odds_context.captured_at must be strictly before kickoff")
+    return {
+        "kind": "current_htft_nine_way_market",
+        "complete": True,
+        "source": source.strip(),
+        "firm_count": context_firm_count,
+        "captured_at": parsed_times["captured_at"].isoformat(),
+        "kickoff": parsed_times["kickoff"].isoformat(),
+        "pre_kickoff_verified": True,
+    }
+
+
 def rank_htft(
     matrix: dict[str, float],
     half_probabilities: dict[str, float],
@@ -131,6 +327,10 @@ def rank_htft(
     edge_threshold_pp: float = 0.0,
     minimum_firms: int = 5,
     exact_score_results: list[str] | tuple[str, ...] | None = None,
+    anchor_context: Mapping[str, Any] | None = None,
+    odds_context: Mapping[str, Any] | None = None,
+    market_anchored: bool | None = None,
+    league_key: str | None = None,
 ) -> dict[str, Any]:
     _require_keys(matrix, OUTCOMES, "matrix")
     _require_keys(half_probabilities, HALF_RESULTS, "half probabilities")
@@ -145,6 +345,17 @@ def rank_htft(
         raise ValueError("edge_threshold_pp must be finite and non-negative")
     if minimum_firms < 0:
         raise ValueError("minimum_firms must be non-negative")
+    if market_anchored not in {None, False}:
+        raise ValueError(
+            "boolean market_anchored is unsupported; pass audited anchor_context. "
+            "The 0.50 full-time opening threshold is research-only"
+        )
+    normalized_anchor_context = _validate_anchor_context(anchor_context)
+    normalized_odds_context = _validate_odds_context(
+        odds_context,
+        firm_count=firm_count,
+    )
+    league_gate_evidence = _league_pair_gate_evidence(league_key)
     normalized_exact_results = _normalize_exact_score_results(
         exact_score_results
     )
@@ -220,6 +431,7 @@ def rank_htft(
             raise ValueError("HT/FT decimal odds must be finite and greater than 1")
 
     odds_market = _market_probabilities_from_odds(supplied_odds)
+    complete_executable_market = set(supplied_odds) == set(OUTCOMES)
     if market_probabilities is not None:
         _require_keys(market_probabilities, OUTCOMES, "market probabilities")
         _validate_probability_total(
@@ -312,6 +524,10 @@ def rank_htft(
             else None
         )
         failed: list[str] = []
+        if not complete_executable_market:
+            failed.append("complete current 9-way HT/FT odds unavailable")
+        if normalized_odds_context is None:
+            failed.append("audited pre-kickoff HT/FT odds provenance unavailable")
         if ev is None:
             failed.append("current odds unavailable")
         elif ev <= 0:
@@ -356,65 +572,101 @@ def rank_htft(
                 "market_probability": market_probability,
                 "edge_pp": edge_pp,
                 "ev": ev,
-                "status": "formal" if not failed else "observation",
-                "failed_thresholds": failed,
+                "diagnostic_qualification_status": (
+                    "qualified" if not failed else "unqualified"
+                ),
+                "diagnostic_failed_thresholds": failed,
+                "policy_status": "paused_observation_only",
+                "status": "observation",
+                "failed_thresholds": [
+                    *failed,
+                    f"market policy {ACTIVE_MARKET_POLICY} pauses HT/FT formal picks",
+                ],
             }
         )
 
-    # First restrict selection to paths whose terminal result belongs to the
-    # aggregate full-time Top 2, including exact ties at the cutoff. Exact-score
-    # Top 2 result classes are an audit annotation only: modal score cells must
-    # not receive a second vote in the scenario selector. Odds and EV qualify
-    # selected scenarios but never choose them.
+    # Strict OOS tests showed that raw joint-probability Top 2 beat the previous
+    # scenario-stability selector. Select solely on the nine-cell distribution;
+    # the canonical OUTCOMES order is the deterministic tie-break. Conditional
+    # stability, state continuity, terminal-result coherence, exact-score
+    # alignment, odds and EV remain audits/qualification gates and never move a
+    # different path into either display slot.
     candidates.sort(
         key=lambda item: (
-            -item["stability_score"],
-            -item["conditional_stability"],
-            -int(item["state_continuity"]),
-            -item["full_time_probability"],
             -item["probability"],
-            item["selection"],
+            OUTCOMES.index(item["selection"]),
         )
     )
-    eligible = [
-        item
-        for item in candidates
-        if item["stability_gate_passed"]
-        and item["coherence_gate_passed"]
-    ]
-    selected: list[dict[str, Any]] = eligible[:2]
-    if len(selected) < 2:
-        selected_keys = {item["selection"] for item in selected}
-        selected.extend(
-            item
-            for item in candidates
-            if item["stability_gate_passed"]
-            and item["selection"] not in selected_keys
-        )
-        selected = selected[:2]
-    if len(selected) < 2:
-        selected_keys = {item["selection"] for item in selected}
-        selected.extend(
-            item
-            for item in candidates
-            if item["coherence_gate_passed"]
-            and item["selection"] not in selected_keys
-        )
-        selected = selected[:2]
-    if len(selected) < 2:
-        selected_keys = {item["selection"] for item in selected}
-        selected.extend(
-            item
-            for item in candidates
-            if item["selection"] not in selected_keys
-        )
-        selected = selected[:2]
+    selected = candidates[:2]
+    pair_probability_mass = sum(item["probability"] for item in selected)
+    matrix_mode = (
+        "half_time_market_anchor_unvalidated"
+        if normalized_anchor_context is not None
+        else "model_only"
+    )
+    pair_mass_threshold = PAIR_MASS_THRESHOLDS.get(matrix_mode)
+    pair_mass_threshold_crossed = (
+        pair_mass_threshold is not None
+        and pair_probability_mass >= pair_mass_threshold
+    )
+    pair_mass_gate_passed = (
+        pair_mass_threshold_crossed
+        and league_gate_evidence["production_confidence_eligible"] is True
+    )
+    if pair_mass_threshold is None:
+        pair_confidence_status = "anchor_gate_unvalidated"
+    elif not pair_mass_threshold_crossed:
+        pair_confidence_status = "low_pair_probability_mass"
+    elif league_gate_evidence["status"] == "missing_league_context":
+        pair_confidence_status = "league_context_required"
+    elif league_gate_evidence["status"] == "unsupported_league_no_training_evidence":
+        pair_confidence_status = "unsupported_league_no_training_evidence"
+    elif league_gate_evidence["status"] == "competition_regime_shift_unconfirmed":
+        pair_confidence_status = "competition_regime_shift_unconfirmed"
+    elif not league_gate_evidence["production_confidence_eligible"]:
+        pair_confidence_status = "league_cohort_not_forward_confirmed"
+    else:
+        pair_confidence_status = "league_gate_forward_confirmed"
 
-    slots = ("main_stable_scenario", "alternate_stable_scenario")
+    slots = (
+        ("main_stable_scenario", "main_probability_scenario"),
+        ("alternate_stable_scenario", "alternate_probability_scenario"),
+    )
     scenarios: list[dict[str, Any]] = []
-    for slot, item in zip(slots, selected, strict=True):
+    for (legacy_slot, probability_slot), item in zip(slots, selected, strict=True):
         scenario = dict(item)
-        scenario["slot"] = slot
+        scenario["slot"] = legacy_slot
+        scenario["probability_slot"] = probability_slot
+        scenario["pair_probability_mass"] = pair_probability_mass
+        scenario["pair_mass_threshold"] = pair_mass_threshold
+        scenario["pair_mass_threshold_crossed"] = pair_mass_threshold_crossed
+        scenario["pair_mass_gate_passed"] = pair_mass_gate_passed
+        scenario["confidence_status"] = pair_confidence_status
+        diagnostic_failures = list(scenario["diagnostic_failed_thresholds"])
+        if pair_mass_threshold is None:
+            diagnostic_failures.append(
+                "no promoted pair-mass gate exists for a half-time market anchor"
+            )
+        elif not pair_mass_threshold_crossed:
+            diagnostic_failures.append(
+                "pair probability mass "
+                f"{pair_probability_mass * 100:.1f}% < "
+                f"{pair_mass_threshold * 100:.1f}% for {matrix_mode}"
+            )
+        if league_gate_evidence["production_confidence_eligible"] is not True:
+            diagnostic_failures.append(
+                "league gate evidence is not forward-confirmed: "
+                f"{league_gate_evidence['status']}"
+            )
+        scenario["diagnostic_failed_thresholds"] = diagnostic_failures
+        scenario["diagnostic_qualification_status"] = (
+            "qualified" if not diagnostic_failures else "unqualified"
+        )
+        scenario["status"] = "observation"
+        scenario["failed_thresholds"] = [
+            *diagnostic_failures,
+            f"market policy {ACTIVE_MARKET_POLICY} pauses HT/FT formal picks",
+        ]
         scenario["stability_status"] = (
             "supported"
             if item["stability_gate_passed"]
@@ -425,27 +677,46 @@ def rank_htft(
             if item["coherence_gate_passed"]
             else "off_thesis_fallback"
         )
-        if not item["stability_gate_passed"]:
+        if pair_mass_threshold is None:
             scenario["selection_reason"] = (
-                "fallback slot; scenario stability evidence is below threshold"
+                "joint-probability Top-2 display slot; the verified half-time "
+                "anchor has no promoted pair-mass confidence gate"
+            )
+        elif not pair_mass_threshold_crossed:
+            scenario["selection_reason"] = (
+                "joint-probability Top-2 display slot; pair mass is below the "
+                f"{matrix_mode} confidence gate"
+            )
+        elif not pair_mass_gate_passed:
+            scenario["selection_reason"] = (
+                "joint-probability Top-2 display slot; the global descriptive "
+                "threshold is crossed but league evidence is not forward-confirmed"
+                + (
+                    "; scenario stability evidence is below its qualification "
+                    "threshold"
+                    if not item["stability_gate_passed"]
+                    else ""
+                )
+            )
+        elif not item["stability_gate_passed"]:
+            scenario["selection_reason"] = (
+                "joint-probability Top-2 display slot; scenario stability "
+                "evidence is below its qualification threshold"
             )
         elif not item["coherence_gate_passed"]:
             scenario["selection_reason"] = (
-                "fallback slot; terminal result is outside the aggregate "
-                "full-time Top 2"
+                "joint-probability Top-2 display slot; terminal result is "
+                "outside the aggregate full-time Top 2"
             )
         elif item["exact_score_result_aligned"] is True:
             scenario["selection_reason"] = (
-                "stable path inside the aggregate full-time thesis; its "
-                "terminal result also appears in the exact-score Top 2"
-            )
-        elif item["state_continuity"]:
-            scenario["selection_reason"] = (
-                "same-state path with strong conditional follow-through"
+                "joint-probability Top-2 display slot; terminal result also "
+                "appears in the exact-score Top 2"
             )
         else:
             scenario["selection_reason"] = (
-                "state-transition path supported by conditional follow-through"
+                "joint-probability Top-2 display slot selected from the "
+                "canonical nine-outcome matrix"
             )
         scenarios.append(scenario)
 
@@ -456,7 +727,8 @@ def rank_htft(
             "status": "recheck_not_promoted",
         }
         for item in candidates
-        if item["status"] == "formal" and item["selection"] not in selected_keys
+        if item["diagnostic_qualification_status"] == "qualified"
+        and item["selection"] not in selected_keys
     ]
     legacy_top_two = [
         {
@@ -469,6 +741,44 @@ def rank_htft(
     return {
         "selection_basis": SELECTION_BASIS,
         "ranking_basis": SELECTION_BASIS,
+        "selection_policy": {
+            "version": SELECTION_BASIS,
+            "primary_sort": "joint_probability_descending",
+            "tie_break": "canonical_outcome_order",
+            "canonical_outcome_order": list(OUTCOMES),
+            "audit_fields_do_not_change_slots": True,
+        },
+        "matrix_mode": matrix_mode,
+        "anchor_context": normalized_anchor_context,
+        "odds_context": normalized_odds_context,
+        "pair_probability_mass": pair_probability_mass,
+        "pair_mass": pair_probability_mass,
+        "pair_mass_threshold": pair_mass_threshold,
+        "pair_mass_threshold_crossed": pair_mass_threshold_crossed,
+        "pair_mass_gate_passed": pair_mass_gate_passed,
+        "confidence_status": pair_confidence_status,
+        "league_gate_evidence": league_gate_evidence,
+        "pair_mass_policy": {
+            "version": SELECTION_BASIS,
+            "matrix_mode": matrix_mode,
+            "probability_mass": pair_probability_mass,
+            "threshold": pair_mass_threshold,
+            "threshold_crossed": pair_mass_threshold_crossed,
+            "passed": pair_mass_gate_passed,
+            "confidence_status": pair_confidence_status,
+            "thresholds": PAIR_MASS_THRESHOLDS,
+            "league_evidence_required": True,
+            "post_selection_evidence_not_promotion_proof": True,
+            "research_only_full_time_opening_threshold": (
+                RESEARCH_ONLY_FULL_TIME_OPENING_PAIR_MASS_THRESHOLD
+            ),
+        },
+        "market_policy": {
+            "version": ACTIVE_MARKET_POLICY,
+            "htft_formal_enabled": HTFT_FORMAL_ENABLED,
+            "status": "observation_only",
+            "diagnostic_qualification_cannot_override_policy": True,
+        },
         "stability_weights": STABILITY_WEIGHTS,
         "coherence_policy": {
             "version": SELECTION_BASIS,
@@ -491,7 +801,11 @@ def rank_htft(
         },
         "scenarios": scenarios,
         "top_two": legacy_top_two,
-        "formal_count": sum(item["status"] == "formal" for item in scenarios),
+        "formal_count": 0,
+        "diagnostically_qualified_count": sum(
+            item["diagnostic_qualification_status"] == "qualified"
+            for item in scenarios
+        ),
         "value_anomalies": value_anomalies,
     }
 
@@ -536,18 +850,59 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--firm-count", type=int, default=0)
+    parser.add_argument("--odds-source")
+    parser.add_argument("--odds-captured-at")
+    parser.add_argument("--kickoff")
+    parser.add_argument(
+        "--league-key",
+        help=(
+            "canonical league key used to attach league-specific gate evidence; "
+            "unsupported or omitted leagues cannot receive a confidence label"
+        ),
+    )
     parser.add_argument(
         "--data-quality",
         choices=("high", "medium", "low", "unknown"),
         default="unknown",
     )
     parser.add_argument("--tolerance-pp", type=float, default=0.5)
+    parser.add_argument(
+        "--market-anchored",
+        action="store_true",
+        help=(
+            "Deprecated and rejected: boolean anchor claims are unaudited and the "
+            "50%% full-time opening threshold is research-only"
+        ),
+    )
     parser.add_argument("--pretty", action="store_true")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    odds_context_values = (
+        args.odds_source,
+        args.odds_captured_at,
+        args.kickoff,
+    )
+    if any(value is not None for value in odds_context_values) and not all(
+        isinstance(value, str) and value.strip() for value in odds_context_values
+    ):
+        raise SystemExit(
+            "--odds-source, --odds-captured-at, and --kickoff must be supplied together"
+        )
+    odds_context = (
+        {
+            "kind": "current_htft_nine_way_market",
+            "complete": True,
+            "source": args.odds_source,
+            "firm_count": args.firm_count,
+            "captured_at": args.odds_captured_at,
+            "kickoff": args.kickoff,
+        }
+        if args.odds_source is not None
+        else None
+    )
     result = rank_htft(
         parse_assignments(args.prob, allowed=OUTCOMES, label="matrix"),
         parse_assignments(args.half, allowed=HALF_RESULTS, label="half-time"),
@@ -566,6 +921,9 @@ def main() -> int:
         data_quality=args.data_quality,
         tolerance_pp=args.tolerance_pp,
         exact_score_results=args.exact_result,
+        odds_context=odds_context,
+        market_anchored=args.market_anchored,
+        league_key=args.league_key,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0

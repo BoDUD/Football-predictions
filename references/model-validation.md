@@ -107,6 +107,97 @@ Do not optimize a model on ROI alone. Prices, selection policy, and sample varia
 ROI unstable. Promote a model only when proper scoring rules and calibration improve on the
 untouched forward sample without a material data-quality regression.
 
+## HT/FT fixed-season validation
+
+The registered HT/FT model is fitted chronologically, not from the reviewed betting ledger.
+The fixed model configuration uses a 730-day half-time decay, 365-day full-time decay,
+Jeffreys-smoothed historical HT/FT association, and IPF calibration back to the
+fixture-specific row and column marginals. Season 2025 is valid fixed model-component
+evidence, but 2025 and partial 2026 were subsequently inspected while the final two-scenario
+selector was developed. Neither may be described as untouched confirmation of
+`probability_top2_v3_post_selection`; future clean live-forward evidence is required for an
+end-to-end claim.
+
+Run the versioned evaluator against the importer's hash-verified local bundle:
+
+```text
+python scripts/htft_holdout_evaluator.py \
+  --dataset-dir .codex/soccer-predict/datasets/league-history \
+  --include-opening-market \
+  --output .codex/soccer-predict/evaluations/htft-fixed-seasons.json
+```
+
+The promoted evaluator settings label 2024 `development_validation`, 2025
+`model_fit_holdout_selector_development`, and 2026
+`shadow_monitoring_seen_during_development`. It preserves per-fixture probability evidence
+locally, reports newly promoted-team fallback separately, compares the model with a
+training-only league-frequency baseline, and records fixed-seed paired uncertainty intervals.
+Opening odds are emitted under a separate
+`research_only_untimestamped_opening_snapshot` cohort. Any fit or bootstrap parameter outside
+the promoted fixed configuration is rejected unless `--experimental-override` is passed; an
+override relabels the three roles as `configuration_experiment_validation`,
+`reused_holdout_configuration_experiment`, and
+`reused_shadow_configuration_experiment`, and is never promotion evidence.
+Even with the exact fixed settings, the artifact must retain
+`model_component_evidence_only=true`, `final_selector_untouched=false`, and
+`end_to_end_promotion_eligible=false` because final selector confirmation has not happened.
+
+An evaluation hash alone is not sufficient source verification. Before interpreting a saved
+artifact, call `validate_evaluation(..., dataset_dir=...)` or provide its exact manifest path;
+the validator reopens the manifest-bound score and market files, verifies their hashes and
+fixture identities, and then recomputes the reported metrics from prediction-level evidence.
+
+Across Brazil Serie A, Japan J1, Norway Eliteserien, and MLS, the fixed 2025 component cohort
+contains 1,510 matches. The model produced multiclass log loss 1.92022, Brier 0.82267, Top-1 accuracy
+30.07%, and two-scenario coverage accuracy 48.48%. The training-only empirical-frequency
+baseline was worse (log loss 1.94199, Brier 0.83160, Top-1 28.54%, Top-2 43.05%). A
+fixed-seed, league-stratified paired bootstrap for the model versus that baseline gave mean
+log-loss change -0.02177 with 95% interval [-0.03260, -0.01049], and Brier change -0.00893
+with interval [-0.01277, -0.00524].
+
+That overall cohort includes two materially different production-availability groups. The
+known-team group has 1,370 matches (log loss 1.91190, Top-2 49.42%); the league-average
+fallback group has 140 matches (log loss 2.00162, Top-2 39.29%). The registered production
+manager defaults to an error for unknown teams. An explicitly requested
+`league_average` fallback must retain its warning and separate cohort label; do not present
+the 1,510-match aggregate as the manager's default production performance.
+
+The global 0.46 model-only Top-2 probability-mass threshold is descriptive development
+evidence, not a confirmed confidence gate. The 2025 league cohorts are:
+
+| League | Eligible | Covered | Hits | Hit rate | Wilson 95% lower bound |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Brazil Serie A | 380 | 125 | 72 | 57.60% | 48.84% |
+| Japan J1 | 380 | 66 | 32 | 48.48% | 36.85% |
+| Norway Eliteserien | 240 | 110 | 63 | 57.27% | 47.94% |
+| MLS | 510 | 208 | 114 | 54.81% | 48.02% |
+
+All four Wilson lower bounds are at or below 50%. The ranker therefore uses `league_key` to
+display the matching evidence but cannot issue a league-confirmed confidence label; missing
+or unsupported league context remains unconfirmed. A separate research experiment using
+workbook opening 1X2 as a full-time marginal anchor produced 2025 log loss 1.90470 and Brier
+0.81813; the 0.50 gate covered 320 matches (21.19%) with 61.56% two-scenario accuracy. Those
+full-time opening prices have no precise collection timestamps, so `0.50` and `61.56%` are
+research-only. They are neither a live half-time gate, live-forward ROI, nor authorization to
+make HT/FT a formal primary.
+
+`scenario_stability_v2` is not an accepted selector: it reduced 2025 Top-2 accuracy from
+48.48% to 45.70%. Its older partial-2026 comparison mixed the Japan special regime and is
+not a formal metric. Use
+`probability_top2_v3_post_selection`, with stability/coherence/score/price fields retained
+only as audits. The comparison itself helped develop the selector and is not a final untouched
+test. Every evaluation artifact must record season bounds, eligible and excluded rows,
+model and input hashes, configuration, prediction-level probabilities, and both overall and
+per-league metrics. Never retune a threshold from the match currently being reviewed.
+
+The production manager follows `regular-only-production-v1`: it trains only rows marked
+`competition_regime=regular`. All 180 supplied Japan J1 2026 fixtures are labelled
+`2026_vision_regional`, excluded from registered production fitting and formal fixed-season
+metrics, with only excluded-row counts retained as competition-regime-drift evidence. The complete 9,211-match bundle covers only
+Brazil Serie A, Japan J1, Norway Eliteserien, and MLS. It provides no validated transfer
+benefit for Korean K League, so Korean predictions stay on the generic observation path and
+must not cite these metrics.
+
 ## Ledger cohorts
 
 Statistics must expose separate cohorts:

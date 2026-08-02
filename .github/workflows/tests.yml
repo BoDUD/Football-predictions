@@ -41,11 +41,19 @@ jobs:
               Path("LICENSE"),
               Path("clawhub.json"),
               Path("agents/openai.yaml"),
+              Path("analysis/htft_history_validation.ipynb"),
               Path("scripts/memory_store.py"),
               Path("scripts/score_model.py"),
+              Path("scripts/history_importer.py"),
+              Path("scripts/htft_model.py"),
+              Path("scripts/htft_ranker.py"),
+              Path("scripts/htft_holdout_evaluator.py"),
+              Path("scripts/league_model_manager.py"),
               Path("scripts/lineup_scheduler.py"),
               Path("scripts/review_scheduler.py"),
               Path("references/data-collection.md"),
+              Path("references/history-workbook-data.md"),
+              Path("references/half-time-full-time.md"),
               Path("references/model-validation.md"),
               Path("references/prediction-framework.md"),
               Path("references/review-framework.md"),
@@ -67,6 +75,19 @@ jobs:
                   raise SystemExit(f"SKILL.md references a missing file: {target}")
 
           marketplace = json.loads(Path("clawhub.json").read_text(encoding="utf-8"))
+          notebook = json.loads(
+              Path("analysis/htft_history_validation.ipynb").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if notebook.get("nbformat") != 4 or not notebook.get("cells"):
+              raise SystemExit("HT/FT validation notebook is malformed")
+          if any(
+              output.get("output_type") == "error"
+              for cell in notebook["cells"]
+              for output in cell.get("outputs", [])
+          ):
+              raise SystemExit("HT/FT validation notebook contains an execution error")
           project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
               "project"
           ]

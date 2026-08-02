@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ipynb_checkpoints/
 
 # Local soccer-predict runtime state and private records.
 .codex/

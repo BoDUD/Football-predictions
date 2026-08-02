@@ -1,10 +1,10 @@
 {
   "name": "Soccer Predict",
   "tagline": "Codex football analysis with T-30 rechecks and verified reviews",
-  "description": "Auditable football match analysis for Codex and OpenClaw with a reproducible Dixon-Coles score model, one canonical score matrix, complete-current-market EV checks, strict pre-kickoff ledger cohorts, timezone-safe T-30 rechecks, and verified post-match settlement.",
+  "description": "Auditable football match analysis for Codex and OpenClaw with league-trained half-time/full-time probabilities, a reproducible Dixon-Coles score model, one canonical full-time score matrix, strict pre-kickoff evidence, and verified post-match settlement.",
   "category": "finance",
   "tags": ["football", "soccer", "betting", "prediction", "sports", "analytics", "quantitative", "titan007", "odds", "handicap"],
-  "version": "3.0.0",
+  "version": "3.1.0",
   "license": "MIT",
   "pricing": "free",
   "support_url": "https://github.com/BoDUD/Football-predictions/issues",

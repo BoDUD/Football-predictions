@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.1.0] - 2026-08-02
+
+### Added
+- Added a strict XLSX importer for 9,211 finished Brazil Serie A, Japan J1, Norway Eliteserien, and MLS matches, including season rollover handling, timezone conversion, data hashes, and explicit quarantine of closing odds and ranks.
+- Added deterministic per-league HT/FT artifacts built from separate half-time/full-time Dixon-Coles marginals, historical nine-cell association, and iterative proportional fitting.
+- Added fixed-season HT/FT holdout evaluation, registered league-model management, paired canonical full-time score artifacts, and reproducible validation evidence.
+
+### Changed
+- Replaced `scenario_stability_v2` with `probability_top2_v3_post_selection`: the two displayed HT/FT shapes are the largest joint probabilities, while stability, coherence, exact-score agreement, odds, and EV remain audits only. Because 2025/2026 evidence was inspected during this selector's development, it is labelled post-selection component evidence rather than untouched end-to-end confirmation.
+- Added league-scoped reporting for the descriptive 0.46 model-only pair-mass threshold while retaining HT/FT as observation-only; no supported league's 2025 Wilson 95% lower bound clears 50%. The 0.50 gate is explicitly confined to the untimestamped full-time-opening research cohort and cannot be claimed by a live half-time anchor.
+- Classified all 180 Japan J1 2026 regional-format fixtures as `2026_vision_regional`, excluded special regimes from regular-only production training and formal evaluation metrics, and retained only exclusion counts for competition-regime drift auditing.
+- Preserved legacy and no-primary review records as learning data without blending them into strict out-of-sample win rate or ROI.
+
 ## [3.0.0] - 2026-08-02
 
 ### Added
