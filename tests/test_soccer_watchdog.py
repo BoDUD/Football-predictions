@@ -145,6 +145,21 @@ class SoccerWatchdogTests(unittest.TestCase):
         values.update(overrides)
         return argparse.Namespace(**values)
 
+    def run_watchdog(self, args):
+        """Exercise scheduler/outbox behavior without touching the host UI."""
+        activation = {
+            "limitation": soccer_watchdog.CODEX_WAKE_LIMITATION,
+            "outbox_consumer_required": True,
+            "opened": False,
+            "mode": "test-not-needed",
+        }
+        with mock.patch.object(
+            soccer_watchdog,
+            "activate_codex",
+            return_value=activation,
+        ):
+            return soccer_watchdog.run_watchdog(args)
+
     def test_runs_both_schedulers_and_persists_verbatim_due_items(self):
         lineup = {
             "match_id": "42",
@@ -159,7 +174,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout([lineup], [review])
         self.addCleanup(temp.cleanup)
 
-        report, returncode = soccer_watchdog.run_watchdog(
+        report, returncode = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
 
@@ -201,10 +216,10 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout([item], [])
         self.addCleanup(temp.cleanup)
 
-        first, first_code = soccer_watchdog.run_watchdog(
+        first, first_code = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
-        second, second_code = soccer_watchdog.run_watchdog(
+        second, second_code = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
 
@@ -233,7 +248,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout(lineup_cleanup=[waiting])
         self.addCleanup(temp.cleanup)
 
-        first, first_code = soccer_watchdog.run_watchdog(
+        first, first_code = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
         self.assertEqual(first_code, 0)
@@ -248,7 +263,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         (skill_dir / "scripts" / "lineup_scheduler.py").write_text(
             body, encoding="utf-8"
         )
-        second, second_code = soccer_watchdog.run_watchdog(
+        second, second_code = self.run_watchdog(
             self.args(
                 workspace,
                 skill_dir,
@@ -277,7 +292,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         (skill_dir / "scripts" / "review_scheduler.py").unlink()
 
-        report, returncode = soccer_watchdog.run_watchdog(
+        report, returncode = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
 
@@ -318,6 +333,7 @@ class SoccerWatchdogTests(unittest.TestCase):
 
     def test_no_codex_cli_or_ui_is_invoked_in_default_outbox_mode(self):
         with (
+            mock.patch.object(soccer_watchdog.os, "name", "nt"),
             mock.patch.object(soccer_watchdog, "codex_process_running", return_value=False),
             mock.patch.object(
                 soccer_watchdog,
@@ -350,6 +366,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             "source": "dynamic-package-discovery",
         }
         with (
+            mock.patch.object(soccer_watchdog.os, "name", "nt"),
             mock.patch.object(soccer_watchdog, "codex_process_running", return_value=False),
             mock.patch.object(
                 soccer_watchdog,
@@ -406,7 +423,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         )
         self.addCleanup(temp.cleanup)
 
-        report, returncode = soccer_watchdog.run_watchdog(
+        report, returncode = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
         self.assertEqual(returncode, 0)
@@ -443,7 +460,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             lineup_cleanup=[cleanup]
         )
         self.addCleanup(temp.cleanup)
-        first, first_code = soccer_watchdog.run_watchdog(
+        first, first_code = self.run_watchdog(
             self.args(workspace, skill_dir)
         )
         self.assertEqual(first_code, 0)
@@ -456,7 +473,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             now="2026-07-24T00:00:00+00:00",
         )
 
-        cooldown, cooldown_code = soccer_watchdog.run_watchdog(
+        cooldown, cooldown_code = self.run_watchdog(
             self.args(
                 workspace,
                 skill_dir,
@@ -467,7 +484,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.assertEqual(cooldown["new_event_count"], 0)
         self.assertEqual(soccer_watchdog.list_pending_events(workspace), [])
 
-        expired, expired_code = soccer_watchdog.run_watchdog(
+        expired, expired_code = self.run_watchdog(
             self.args(
                 workspace,
                 skill_dir,
@@ -494,7 +511,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             lineup_cleanup=[waiting]
         )
         self.addCleanup(temp.cleanup)
-        soccer_watchdog.run_watchdog(self.args(workspace, skill_dir))
+        self.run_watchdog(self.args(workspace, skill_dir))
         event = soccer_watchdog.list_pending_events(workspace)[0]
         soccer_watchdog.acknowledge_event(
             workspace,
@@ -510,7 +527,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             body, encoding="utf-8"
         )
 
-        report, returncode = soccer_watchdog.run_watchdog(
+        report, returncode = self.run_watchdog(
             self.args(
                 workspace,
                 skill_dir,
