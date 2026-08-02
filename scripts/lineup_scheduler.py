@@ -540,6 +540,9 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
     if args.lease_minutes <= 0:
         raise ValueError("--lease-minutes must be positive")
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    if not thread_id:
+        raise ValueError("Cannot claim lineup task without a non-empty --thread-id")
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     record = history_record(args.base_dir, args.match_id)
@@ -564,10 +567,12 @@ def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
             "claimed_at": iso_seconds(current),
             "lease_until": iso_seconds(lease_until),
             "catch_up": current > scheduled + timedelta(seconds=60),
+            "thread_id": thread_id,
         }
         task["attempts"].append(attempt)
         task["status"] = "claimed"
         task["lease_until"] = attempt["lease_until"]
+        task["claimed_thread_id"] = thread_id
         task["updated_at"] = iso_seconds(current)
         return task_result(
             path,
@@ -612,6 +617,9 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
+        claimed_thread_id = str(task.get("claimed_thread_id") or "").strip()
+        if claimed_thread_id and claimed_thread_id != thread_id:
+            raise ValueError("Completing thread id does not match the active claim")
         duplicate = result_tuple_is_duplicate(
             task,
             status="completed",
@@ -894,6 +902,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     claim = sub.add_parser("claim", help="Atomically claim a due prematch lineup check")
     claim.add_argument("--match-id", required=True)
+    claim.add_argument("--thread-id", required=True)
     claim.add_argument("--now", help="ISO datetime with offset, for deterministic checks")
     claim.add_argument("--lease-minutes", type=float, default=4.0)
 

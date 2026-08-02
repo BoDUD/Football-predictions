@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render archived soccer-predict results as compact WeChat-ready plain text."""
+"""Render archived soccer-predict results as compact copyable plain text."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ def select_version(record: dict[str, Any], kind: str) -> dict[str, Any]:
             raise ValueError("The active record is not a lineup-check version")
         return record
     if record.get("status") != "reviewed":
-        raise ValueError("Review copy requires a reviewed record")
+        raise ValueError("Review plain-text output requires a reviewed record")
     return record
 
 

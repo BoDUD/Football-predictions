@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +22,7 @@ ACTIVE_STATUSES = {"scheduled", "claimed", "waiting"}
 FINAL_STATUSES = {"completed", "terminal"}
 RESULT_DELIVERY_STATUSES = {"not_ready", "pending", "delivered"}
 RESULT_METADATA_GRACE = timedelta(minutes=10)
+MIN_RESULT_ARTIFACT_NONSPACE_CHARS = 32
 ADMIN_TERMINAL_STATUSES = {
     "cancelled": "cancelled",
     "canceled": "cancelled",
@@ -330,6 +332,83 @@ def resolve_result_artifact(base_dir: str | None, value: Any) -> str:
     return str(artifact)
 
 
+def validate_result_artifact_content(
+    artifact_value: str,
+    *,
+    match_id: str,
+    expected_final_score: Any = None,
+) -> None:
+    """Reject placeholders and obviously damaged user-facing result files."""
+    artifact = Path(artifact_value)
+    try:
+        text = artifact.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Result artifact must be valid UTF-8 text: {artifact}") from exc
+
+    if "\x00" in text or "\ufffd" in text:
+        raise ValueError(f"Result artifact contains invalid text data: {artifact}")
+    if len(re.sub(r"\s+", "", text)) < MIN_RESULT_ARTIFACT_NONSPACE_CHARS:
+        raise ValueError(
+            "Result artifact is too short to be a complete user-facing review: "
+            f"{artifact}"
+        )
+    if str(match_id) not in text:
+        raise ValueError(
+            f"Result artifact does not identify match {match_id}: {artifact}"
+        )
+
+    final_score = str(expected_final_score or "").strip()
+    if final_score:
+        parts = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", final_score)
+        if not parts:
+            raise ValueError(
+                "Reviewed history record has an invalid final_score; cannot validate "
+                "the result artifact"
+            )
+        home_score, away_score = parts.groups()
+        score_pattern = re.compile(
+            rf"(?<!\d){re.escape(home_score)}\s*[-\u2010-\u2015:\uff1a]\s*"
+            rf"{re.escape(away_score)}(?!\d)"
+        )
+        if not score_pattern.search(text):
+            raise ValueError(
+                f"Result artifact does not contain final score {final_score}: {artifact}"
+            )
+
+
+def claimed_thread_id(task: dict[str, Any]) -> str:
+    """Return the active claimant, including compatible legacy claim records."""
+    owner = str(task.get("claimed_thread_id") or "").strip()
+    if owner:
+        return owner
+
+    # Older task files may only retain ownership on the latest claim record.
+    # History synchronization can make the task terminal before the worker
+    # persists its result tuple, so terminal status alone must not hide that
+    # still-valid legacy claimant.  A released claim is never an owner.
+    attempt = current_attempt(task)
+    claims = attempt.get("claims", [])
+    if claims and isinstance(claims[-1], dict):
+        latest = claims[-1]
+        if latest.get("failed_at") or latest.get("released_at"):
+            return ""
+        return str(latest.get("thread_id") or "").strip()
+    return ""
+
+
+def require_claim_ownership(
+    task: dict[str, Any],
+    thread_id: str,
+    *,
+    action: str,
+) -> None:
+    owner = claimed_thread_id(task)
+    if not owner:
+        raise ValueError(f"{action} requires a review task claimed by a thread")
+    if owner and owner != thread_id:
+        raise ValueError(f"{action} thread id does not match the active claim")
+
+
 def get_task(state: dict[str, Any], match_id: str) -> dict[str, Any]:
     task = state["tasks"].get(str(match_id))
     if not task:
@@ -433,6 +512,7 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
             "attempts": [attempt],
             "lease_until": None,
             "resume_status": None,
+            "claimed_thread_id": None,
             "automation_refs": [],
             "thread_id": None,
             "result_artifact": None,
@@ -556,6 +636,9 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
     if args.lease_minutes <= 0:
         raise ValueError("--lease-minutes must be positive")
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    if not thread_id:
+        raise ValueError("Cannot claim review task without a non-empty --thread-id")
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     record = history_record(args.base_dir, args.match_id)
@@ -585,12 +668,14 @@ def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
             "claimed_at": iso_seconds(current),
             "lease_until": iso_seconds(lease_until),
             "catch_up": current > run_at + timedelta(seconds=60),
+            "thread_id": thread_id,
         }
         attempt["claims"].append(claim)
         attempt["outcome"] = "claimed"
         task["resume_status"] = resume_status
         task["status"] = "claimed"
         task["lease_until"] = claim["lease_until"]
+        task["claimed_thread_id"] = thread_id
         task["updated_at"] = iso_seconds(current)
         return task_result(
             path,
@@ -602,6 +687,9 @@ def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_release(args: argparse.Namespace) -> dict[str, Any]:
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    if not thread_id:
+        raise ValueError("Cannot fail review task without a non-empty --thread-id")
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
@@ -610,6 +698,7 @@ def cmd_release(args: argparse.Namespace) -> dict[str, Any]:
             return task_result(path, task, released=False, reason=task["status"])
         if task.get("status") != "claimed":
             return task_result(path, task, released=False, reason="not_claimed")
+        require_claim_ownership(task, thread_id, action="Failing")
         attempt = current_attempt(task)
         restored = task.get("resume_status") or (
             "scheduled" if int(attempt["number"]) == 1 else "waiting"
@@ -617,6 +706,7 @@ def cmd_release(args: argparse.Namespace) -> dict[str, Any]:
         task["status"] = restored
         task["lease_until"] = None
         task["resume_status"] = None
+        task["claimed_thread_id"] = None
         task["last_error"] = args.reason
         task["last_failed_at"] = iso_seconds(current)
         attempt["outcome"] = "released"
@@ -628,6 +718,9 @@ def cmd_release(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    if not thread_id:
+        raise ValueError("Cannot wait a review task without a non-empty --thread-id")
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
@@ -644,6 +737,7 @@ def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
             )
         if task.get("status") != "claimed":
             raise ValueError("A review attempt must be claimed before scheduling a follow-up")
+        require_claim_ownership(task, thread_id, action="Waiting")
 
         previous = current_attempt(task)
         previous["outcome"] = "not_terminal"
@@ -664,6 +758,7 @@ def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
         task["status"] = "waiting"
         task["lease_until"] = None
         task["resume_status"] = None
+        task["claimed_thread_id"] = None
         task["updated_at"] = iso_seconds(current)
         return task_result(
             path,
@@ -684,10 +779,20 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
     record = history_record(args.base_dir, args.match_id)
     if not record or str(record.get("status") or "").lower() != "reviewed":
         raise ValueError("Cannot complete a review task before history.json is reviewed")
+    validate_result_artifact_content(
+        result_artifact,
+        match_id=str(args.match_id),
+        expected_final_score=record.get("final_score"),
+    )
     path = state_path(args.base_dir)
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
+        require_claim_ownership(
+            task,
+            thread_id,
+            action="Completing",
+        )
         duplicate = result_tuple_is_duplicate(
             task,
             status="completed",
@@ -734,6 +839,15 @@ def cmd_terminal(args: argparse.Namespace) -> dict[str, Any]:
             )
         result_artifact = resolve_result_artifact(
             args.base_dir, getattr(args, "result_artifact", None)
+        )
+        validate_result_artifact_content(
+            result_artifact,
+            match_id=str(args.match_id),
+        )
+        require_claim_ownership(
+            task,
+            thread_id,
+            action="Finishing",
         )
         duplicate = result_tuple_is_duplicate(
             task,
@@ -1022,11 +1136,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     claim = sub.add_parser("claim", help="Atomically claim a due review status check")
     claim.add_argument("--match-id", required=True)
+    claim.add_argument("--thread-id", required=True)
     claim.add_argument("--now", help="ISO datetime with offset, for deterministic checks")
     claim.add_argument("--lease-minutes", type=float, default=10.0)
 
-    release = sub.add_parser("release", help="Release a failed review claim")
+    release = sub.add_parser(
+        "release",
+        aliases=["fail"],
+        help="Release a failed review claim owned by the current thread",
+    )
     release.add_argument("--match-id", required=True)
+    release.add_argument("--thread-id", required=True)
     release.add_argument("--reason", required=True)
     release.add_argument("--now")
 
@@ -1035,6 +1155,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record a non-terminal match and create one follow-up thirty minutes later",
     )
     wait.add_argument("--match-id", required=True)
+    wait.add_argument("--thread-id", required=True)
     wait.add_argument(
         "--reason",
         choices=(
@@ -1124,6 +1245,7 @@ def main() -> int:
             "attach-automation": cmd_attach_automation,
             "claim": cmd_claim,
             "release": cmd_release,
+            "fail": cmd_release,
             "wait": cmd_wait,
             "complete": cmd_complete,
             "terminal": cmd_terminal,

@@ -256,6 +256,7 @@ class LineupSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-1",
                     now="2026-07-22T18:59:00+09:00",
                     lease_minutes=4,
                 )
@@ -267,17 +268,21 @@ class LineupSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-1",
                     now="2026-07-22T19:00:00+09:00",
                     lease_minutes=4,
                 )
             )
             self.assertTrue(claimed["claimed"])
             self.assertFalse(claimed["catch_up"])
+            self.assertEqual(claimed["task"]["claimed_thread_id"], "thread-1")
+            self.assertEqual(claimed["task"]["attempts"][0]["thread_id"], "thread-1")
 
             duplicate = lineup_scheduler.cmd_claim(
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-2",
                     now="2026-07-22T19:01:00+09:00",
                     lease_minutes=4,
                 )
@@ -298,6 +303,7 @@ class LineupSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     base_dir=base,
                     match_id="42",
+                    thread_id="thread-2",
                     now="2026-07-22T19:05:00+09:00",
                     lease_minutes=4,
                 )
@@ -305,6 +311,50 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertTrue(catch_up["claimed"])
             self.assertTrue(catch_up["catch_up"])
             self.assertEqual(len(catch_up["task"]["attempts"]), 2)
+            self.assertEqual(catch_up["task"]["claimed_thread_id"], "thread-2")
+
+    def test_claim_requires_non_empty_thread_id(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            lineup_scheduler.cmd_register(register_args(base))
+            for thread_id in (None, "", "   "):
+                with self.subTest(thread_id=thread_id):
+                    with self.assertRaisesRegex(ValueError, "non-empty --thread-id"):
+                        lineup_scheduler.cmd_claim(
+                            SimpleNamespace(
+                                base_dir=base,
+                                match_id="42",
+                                thread_id=thread_id,
+                                now="2026-07-22T19:00:00+09:00",
+                                lease_minutes=4,
+                            )
+                        )
+
+    def test_complete_must_match_claiming_thread(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            result_artifact = write_result_artifact(base)
+            lineup_scheduler.cmd_register(register_args(base))
+            lineup_scheduler.cmd_claim(
+                SimpleNamespace(
+                    base_dir=base,
+                    match_id="42",
+                    thread_id="thread-1",
+                    now="2026-07-22T19:00:00+09:00",
+                    lease_minutes=4,
+                )
+            )
+            write_history(base, lineup_rechecked_at="2026-07-22T10:01:00+00:00")
+            with self.assertRaisesRegex(ValueError, "does not match the active claim"):
+                lineup_scheduler.cmd_complete(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        thread_id="thread-2",
+                        result_artifact=result_artifact,
+                        now="2026-07-22T19:02:00+09:00",
+                    )
+                )
 
     def test_due_catches_up_before_kickoff_and_expires_afterward(self):
         with tempfile.TemporaryDirectory() as base:

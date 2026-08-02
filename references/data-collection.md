@@ -25,19 +25,23 @@ Accept either format from user:
 - Record the kickoff string exactly as Titan displays it.
 - Record the source timezone separately. For Titan007 Chinese pages, use `Asia/Shanghai` (`UTC+8`) unless Titan itself provides an explicit different timezone or absolute timestamp.
 - Read the user's timezone from the Codex environment and convert the kickoff to the user's local time before scheduling or calculating time remaining.
+- Preserve all four machine-readable values: source kickoff, source timezone, converted user-local kickoff, and user timezone. Store the page's explicit status separately.
 - Use the live-detail countdown only as a non-authoritative sanity check; it may parse a timezone-less wall time in the browser timezone and cannot by itself override the Chinese-page `Asia/Shanghai` default.
 - Keep page status and clock math separate: use explicit page status to classify `prematch`, `live`, or `finished`; use the converted clock only to determine the lineup-check window.
+- A formal archive requires `page_status=prematch`, a timezone-aware source collection time, and an archive time strictly before kickoff. Reject ambiguous, offset-free, at-kickoff, or post-kickoff snapshots rather than repairing them later.
 
 ### 1. Asian Handicap (让球盘)
 - Extract only rows labeled "即" (instant/live) and "早" (early/opening)
 - Fields: home odds, handicap line, away odds
 - Note which team is giving the handicap
 - Record all available bookmaker data
+- For the selected current line, preserve both sides from the same collection window, odds format, market completeness, source URL, timestamp, bookmaker count, and consensus/median price basis.
 
 ### 2. Over/Under (大小球盘)
 - Extract only rows labeled "即" (instant/live) and "早" (early/opening)
 - Fields: over odds, total goals line, under odds
 - Record all available bookmaker data
+- For the selected current line, preserve both sides and the same audit metadata required for Asian handicap.
 
 ### Goal Range and Both Teams to Score
 
@@ -60,6 +64,7 @@ Accept either format from user:
 - Extract only rows labeled "即" (instant/live) and "早" (early/opening)
 - Fields: home win odds, draw odds, away win odds
 - Record all available bookmaker data (at least top 10)
+- Preserve the complete current H/D/A set from one collection window and verify its no-vig probabilities sum to one.
 
 ### Exact score
 - Collect the current exact-score market when Titan publishes it, including the 0-0 row.
@@ -130,6 +135,10 @@ Accept either format from user:
 10. If available near match time, extract lineup data from the lineup section
 11. If lineup not yet published, note this and proceed with available data
 12. Compile all data into a structured format before proceeding to prediction
+
+Do not calculate formal EV from a display screenshot that omits the opposite side, odds
+format, collection time, or market identity. Pass every complete outcome price to the
+archive command so it can reproduce and persist the no-vig transformation.
 
 If the page shows a running clock, half-time, full-time, or a non-empty score, do not treat live odds as the final pre-match odds. Label the result as live analysis and exclude it from archived pre-match accuracy.
 

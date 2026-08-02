@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "wechat_formatter.py"
-SPEC = importlib.util.spec_from_file_location("soccer_wechat_formatter", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plain_text_formatter.py"
+SPEC = importlib.util.spec_from_file_location("soccer_plain_text_formatter", SCRIPT)
 assert SPEC and SPEC.loader
 formatter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(formatter)
@@ -77,13 +77,45 @@ def write_history(base: str, records: list[dict]) -> None:
     path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
 
 
-class WeChatFormatterTests(unittest.TestCase):
+class PlainTextFormatterTests(unittest.TestCase):
+    def test_no_automatic_external_message_delivery_surface(self):
+        root = Path(__file__).resolve().parents[1]
+        removed_paths = (
+            "scripts/wechat_push.py",
+            "scripts/wechat_push.ps1",
+            "references/wechat-delivery.md",
+            "tests/test_wechat_push.py",
+        )
+        for relative_path in removed_paths:
+            with self.subTest(relative_path=relative_path):
+                self.assertFalse((root / relative_path).exists())
+
+        active_guidance = "\n".join(
+            (root / relative_path).read_text(encoding="utf-8")
+            for relative_path in (
+                "SKILL.md",
+                "README.md",
+                "references/plain-text-output.md",
+                "references/review-framework.md",
+            )
+        ).lower()
+        for forbidden in (
+            "wechat_push",
+            "wechat-delivery",
+            "pywechat",
+            "pyweixin",
+            "verify-draft",
+            "--send",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, active_guidance)
+
     def assert_plain(self, text: str) -> None:
         self.assertNotRegex(text, r"(?:^|\n)(?:#|[-*+] |```)")
         self.assertNotIn("<table", text.lower())
         self.assertLessEqual(len(text.splitlines()), 18)
 
-    def test_initial_copy_is_complete_plain_text(self):
+    def test_initial_plain_text_is_complete(self):
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [base_record()])
             text = formatter.render(base, "42", "initial")
@@ -122,7 +154,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("半场 客队 +1", text)
             self.assert_plain(text)
 
-    def test_primary_conditioned_scores_are_used_in_user_facing_copy(self):
+    def test_primary_conditioned_scores_are_used_in_user_facing_plain_text(self):
         record = base_record()
         record["primary_pick"]["side"] = "over"
         record["total_pick"]["side"] = "over"
@@ -200,7 +232,7 @@ class WeChatFormatterTests(unittest.TestCase):
             with self.subTest(market=market, pick=pick):
                 self.assertEqual(formatter.format_pick(market, pick, record), expected)
 
-    def test_initial_and_lineup_copy_include_expanded_market_picks(self):
+    def test_initial_and_lineup_plain_text_include_expanded_market_picks(self):
         record = base_record()
         goal_range = {
             "selection": "2-3",
@@ -299,7 +331,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
-    def test_initial_copy_does_not_truncate_long_fields(self):
+    def test_initial_plain_text_does_not_truncate_long_fields(self):
         record = base_record()
         record["recommendation"] = "R" * 220
         record["notes"] = "N" * 500
@@ -324,7 +356,7 @@ class WeChatFormatterTests(unittest.TestCase):
                 self.assertNotIn(hidden, text)
             self.assert_plain(text)
 
-    def test_lineup_copy_states_change_and_active_primary(self):
+    def test_lineup_plain_text_states_change_and_active_primary(self):
         record = base_record()
         record["revisions"] = [{
             key: record.get(key)
@@ -412,10 +444,15 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("无正式推荐＝未结算", review_text)
             self.assert_plain(review_text)
 
-    def test_review_copy_uses_settlement_basis_and_statistics(self):
+    def test_review_plain_text_uses_settlement_basis_and_statistics(self):
         record = base_record()
         record.update({
             "status": "reviewed",
+            "evaluation_eligibility": {
+                "policy_version": "strict-oos-market-policy-v1",
+                "strict_forward_oos": True,
+                "reason": "validated_score_model_provenance",
+            },
             "analysis_stage": "lineup-check",
             "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
             "half_time_score": "0-0",
@@ -428,6 +465,11 @@ class WeChatFormatterTests(unittest.TestCase):
             "settlement_basis": {
                 "policy": "latest_active_prematch_version",
                 "analysis_stage": "lineup-check",
+                "evaluation_eligibility": {
+                    "policy_version": "strict-oos-market-policy-v1",
+                    "strict_forward_oos": True,
+                    "reason": "validated_score_model_provenance",
+                },
                 "primary_market": "total",
                 "primary_pick": dict(record["primary_pick"]),
                 "formal_picks": {
@@ -453,7 +495,7 @@ class WeChatFormatterTests(unittest.TestCase):
             self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
-    def test_review_copy_lists_all_expanded_secondary_markets_without_results(self):
+    def test_review_plain_text_lists_all_expanded_secondary_markets_without_results(self):
         record = base_record()
         record.update({
             "status": "reviewed",

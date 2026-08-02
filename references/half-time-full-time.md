@@ -2,6 +2,12 @@
 
 Use this guide whenever a prediction includes first-half or half-time/full-time markets.
 
+These markets are `observation_only` in the strict forward policy until an executable,
+versioned half-by-half model has enough untouched forward samples to demonstrate acceptable
+calibration. Continue to display the two stable match shapes when data are available, but do
+not archive a first-half or HT/FT formal primary merely from the heuristic procedure below.
+Historical results and the six-ticket workbook do not unlock the market.
+
 ## Required data
 
 Collect, when available:
@@ -18,7 +24,7 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
 
 ## Probability model
 
-1. Estimate separate first-half scoring rates `lambda_home_1H` and `lambda_away_1H`. Blend recent first-half production, opponent first-half concessions, home/away splits, league baseline, current first-half odds, and lineup effects.
+1. Estimate separate first-half scoring rates `lambda_home_1H` and `lambda_away_1H` only in a versioned executable model. A prose blend of recent production, opponent concessions, league baseline, current odds, and lineup effects is a scenario estimate, not a trained probability.
 2. Estimate second-half scoring rates separately. Do not assume both halves have identical rates.
 3. Enumerate plausible score pairs for each half and derive:
    - First-half home/draw/away probabilities.
@@ -37,12 +43,13 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
 - Recommend at most one first-half direction. For HT/FT, always output exactly two stability-selected scenarios whenever a nine-outcome model matrix is available.
-- Treat first-half advice as actionable only when current odds are available, EV and no-vig edge are positive, data quality is medium/high, and the edge survives lineup-time reanalysis.
-- Treat HT/FT as high variance. A formal path needs positive EV, positive no-vig edge, medium/high data quality, a complete current nine-outcome market, and data from at least five bookmakers. Apply the global 8% EV/4pp edge strict gate only to `against` or materially `conflicting` paths, and apply the HT/FT risk penalty in `stability-v1`.
+- While the strict policy keeps these markets paused, label every first-half/HTFT direction as observation even when its price and heuristic EV look positive.
+- A future policy version may make first-half advice actionable only after a versioned model, current complete market, positive server-recalculated EV/edge, medium/high data quality, and lineup-time survival all pass.
+- A future HT/FT formal path additionally requires a complete current nine-outcome market from at least five bookmakers, verified row/column marginals, and adequate strict-OOS calibration. Changing the display/ranking heuristic alone cannot unlock it.
 - Before selection, require the matrix row sums to match the displayed first-half H/D/A probabilities and its column sums to match the displayed full-time H/D/A probabilities within 0.5 percentage points. Recalculate the matrix when either marginal check fails; do not publish or select from an inconsistent matrix.
 - Use `scripts/htft_ranker.py` and `scenario_stability_v2`, not raw joint-probability order or EV order. Pass the result classes from the unconditional exact-score Top 2 for audit. First restrict eligible terminal results to the aggregate full-time H/D/A Top 2, including every result tied at the second-place cutoff. Then score paths using conditional follow-through `P(full-time result | half-time state)` at 45%, joint support at 30%, full-time marginal support at 15%, and a 10% same-state continuity bonus. The exact-score result classes may confirm or flag the selected pair but must not reserve a slot, and the continuity bonus cannot promote a third-ranked full-time result over coherent paths.
 - Require half-time state support of at least 15%, joint support of at least 5%, and conditional follow-through of at least 25% for a fully supported scenario. If fewer than two paths pass, preserve two output slots but mark the fallback slot `稳定证据不足`; never fill it because of a long price or high EV.
-- Positive EV and edge are qualification gates only after the two stable scenarios are selected. A selected scenario becomes formal only when every safety check passes. Treat a high-EV outcome outside the stable pair as a market anomaly to recheck, not as an automatic recommendation.
+- Positive EV and edge are diagnostic qualification gates only after the two stable scenarios are selected. While the market is paused they do not make a scenario formal; under a future enabled policy every model, market, evidence, and calibration check must also pass. Treat a high-EV outcome outside the stable pair as a market anomaly to recheck, not as an automatic recommendation.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a stable match shape, not an actionable positive-EV bet.
 - If current HT/FT odds are missing, keep the same two stability-selected scenarios as `赔率缺失，不可执行`; do not switch back to probability ranking and do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
 - Do not replace the two stable outputs with a generic `无正EV建议` or `观望`. Preserve the risk warning instead.

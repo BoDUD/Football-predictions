@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from copy import deepcopy
+from functools import wraps
+import hashlib
 import json
 import math
 import re
 import sys
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 PRIMARY_MARKETS = (
@@ -27,6 +31,14 @@ PRIMARY_MARKETS = (
 )
 NEW_FORMAL_MARKETS = ("goal_range", "btts", "corner_total", "corner_handicap")
 CORNER_MARKETS = ("corner_total", "corner_handicap")
+FOOTBALL_MODEL_MARKETS = (
+    "asian",
+    "total",
+    "half_time",
+    "htft",
+    "goal_range",
+    "btts",
+)
 PICK_KEY_BY_MARKET = {
     "asian": "asian_pick",
     "total": "total_pick",
@@ -54,9 +66,27 @@ LINEUP_CHANGE_MIN_CONFIDENCE_DELTA = 5.0
 EV_AUDIT_TOLERANCE = 0.0005
 PROBABILITY_AUDIT_TOLERANCE = 1e-4
 EDGE_AUDIT_TOLERANCE_PP = 0.1
+ODDS_AUDIT_TOLERANCE = 0.0005
+ONE_X_TWO_LOG_LOSS_FLOOR = 1e-15
 DEEP_FAVORITE_LINE = -0.75
-CONFIDENCE_RANKING_VERSION = "stability-v1"
-PRIMARY_SELECTION_BASIS = "highest_stability_adjusted_confidence"
+CONFIDENCE_RANKING_VERSION = "stability-v2"
+CONFIDENCE_POLICY_VERSION = "independent-settlement-risk-v2"
+STRICT_OOS_POLICY_VERSION = "strict-oos-market-policy-v1"
+STRICT_OOS_MARKET_STATUS = {
+    "asian": {
+        "status": "observation_only",
+        "paused_reason": "strict-forward historical accuracy and ROI remain below the release gate",
+    },
+    "half_time": {
+        "status": "observation_only",
+        "paused_reason": "strict-forward sample is insufficient and historical results are unstable",
+    },
+    "htft": {
+        "status": "observation_only",
+        "paused_reason": "strict-forward sample is insufficient and historical results are unstable",
+    },
+}
+PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
 OBSOLETE_GUARDRAILS = {
     "小样本保护期内，所有正式方向（主推和正式次推）都必须满足EV>=8%、模型相对市场边际>=4pp且数据质量至少为medium。EV在5%-8%的方向只作观察，不得归档为正式方向。",
@@ -69,8 +99,8 @@ OBSOLETE_GUARDRAILS = {
     "两个精确比分候选仅作比赛形态参考；分别记录Top-1/Top-2诊断，不计入主推或全部正式方向的命中率与ROI。",
 }
 DEFAULT_GUARDRAILS = [
-    "stability-v1：普通正式方向不再要求EV>=8%；但当前EV与模型相对市场边际都必须严格为正，数据质量至少为medium，且市场与专项证据完整。",
-    "所有安全合格方向按结算稳定性55%、EV强度10%、边际强度10%、数据质量10%、市场深度5%、独立证据5%、市场一致性5%计算综合置信度；唯一rank=1可作主推。",
+    "stability-v2 uses independent settlement-risk, data quality, market depth, independent evidence, and alignment for ranking.",
+    "EV and no-vig edge are positive eligibility gates only and never contribute confidence-score points.",
     "盘口与相关欧赔明显反向或冲突时，仍须EV>=8%、边际>=4pp、至少5家公司且有独立阵容或基本面支持，主推与正式次推均不例外。",
     "临场换推以当前综合置信度为准：原主推未失效时，新方向至少高5分；原主推被硬信息证伪时可取消或换为新的安全rank=1方向。",
     "深盘、大小球、伤停冲突与精确比分继续执行专项保护；没有安全候选时允许无主推，不强行下注。",
@@ -106,6 +136,53 @@ def load_history(path: Path) -> list[dict[str, Any]]:
     return data
 
 
+@contextmanager
+def history_lock(path: Path):
+    """Hold an inter-process exclusive lock for a history read/modify/write.
+
+    The lock lives beside ``history.json`` and deliberately covers the full
+    transaction, not merely the final atomic replace.  That prevents two
+    scheduler/CLI processes from both reading the same old array and silently
+    discarding one another's update.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def locked_history_transaction(function):
+    """Serialize a command that may rewrite ``history.json``."""
+
+    @wraps(function)
+    def wrapped(args: argparse.Namespace, *function_args, **function_kwargs):
+        with history_lock(data_path(args.base_dir)):
+            return function(args, *function_args, **function_kwargs)
+
+    return wrapped
+
+
 def save_history(path: Path, history: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
@@ -113,8 +190,13 @@ def save_history(path: Path, history: list[dict[str, Any]]) -> None:
     temp.replace(path)
 
 
+def utc_now() -> datetime:
+    """Patchable clock used by archive timing and audit timestamps."""
+    return datetime.now(timezone.utc)
+
+
 def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return utc_now().astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def configure_stdio() -> None:
@@ -130,6 +212,111 @@ def parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"Datetime must include timezone: {value}")
     return parsed.astimezone(timezone.utc)
+
+
+def parse_aware_datetime(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a parseable datetime with timezone") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{label} must include timezone")
+    return parsed
+
+
+def parse_timezone(value: Any, label: str):
+    name = str(value or "").strip()
+    if not name:
+        raise ValueError(f"{label} is required")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        # Windows Python installations may not bundle the IANA tz database.
+        # These two non-DST zones are the mandatory source/user zones for this
+        # project, so retain strict named-zone semantics without a tzdata wheel.
+        fixed = {
+            "Asia/Shanghai": timezone(timedelta(hours=8), name="Asia/Shanghai"),
+            "Asia/Tokyo": timezone(timedelta(hours=9), name="Asia/Tokyo"),
+            "UTC": timezone.utc,
+            "Etc/UTC": timezone.utc,
+        }.get(name)
+        if fixed is not None:
+            return fixed
+        raise ValueError(f"{label} must be a valid IANA timezone: {name}") from exc
+
+
+def validate_datetime_zone(
+    value: str,
+    zone_name: str,
+    value_label: str,
+    zone_label: str,
+) -> datetime:
+    parsed = parse_aware_datetime(value, value_label)
+    zone = parse_timezone(zone_name, zone_label)
+    represented = parsed.astimezone(zone)
+    if (
+        parsed.replace(tzinfo=None) != represented.replace(tzinfo=None)
+        or parsed.utcoffset() != represented.utcoffset()
+    ):
+        raise ValueError(
+            f"{value_label} does not represent its wall time in {zone_label}={zone_name}"
+        )
+    return parsed
+
+
+def validate_record_time_metadata(
+    args: argparse.Namespace,
+    current: datetime,
+) -> dict[str, str]:
+    page_status = str(getattr(args, "page_status", "") or "").strip().lower()
+    if page_status != "prematch":
+        raise ValueError("New prediction archives require page_status=prematch")
+
+    source_timezone = str(getattr(args, "source_timezone", "") or "").strip()
+    user_timezone = str(getattr(args, "user_timezone", "") or "").strip()
+    source_text = str(getattr(args, "source_kickoff", "") or "").strip()
+    user_text = str(getattr(args, "user_local_kickoff", "") or "").strip()
+    kickoff_text = str(getattr(args, "kickoff", "") or "").strip()
+    source = validate_datetime_zone(
+        source_text,
+        source_timezone,
+        "source_kickoff",
+        "source_timezone",
+    )
+    user_local = validate_datetime_zone(
+        user_text,
+        user_timezone,
+        "user_local_kickoff",
+        "user_timezone",
+    )
+    kickoff = parse_aware_datetime(kickoff_text, "kickoff")
+    if source.astimezone(timezone.utc) != user_local.astimezone(timezone.utc):
+        raise ValueError("source_kickoff and user_local_kickoff must be the same instant")
+    if kickoff.astimezone(timezone.utc) != user_local.astimezone(timezone.utc):
+        raise ValueError("kickoff must equal user_local_kickoff")
+    if (
+        kickoff.replace(tzinfo=None) != user_local.replace(tzinfo=None)
+        or kickoff.utcoffset() != user_local.utcoffset()
+    ):
+        raise ValueError("kickoff must use the user-local wall time and offset")
+
+    current_utc = current.astimezone(timezone.utc)
+    kickoff_utc = kickoff.astimezone(timezone.utc)
+    seconds_to_kickoff = (kickoff_utc - current_utc).total_seconds()
+    if seconds_to_kickoff <= 0:
+        raise ValueError("New predictions cannot be archived at or after kickoff")
+    if getattr(args, "analysis_stage", "initial") == "lineup-check":
+        if seconds_to_kickoff > 30 * 60:
+            raise ValueError("A lineup-check archive is allowed only from T-30 until kickoff")
+
+    return {
+        "page_status": "prematch",
+        "source_kickoff": source.isoformat(),
+        "source_timezone": source_timezone,
+        "user_local_kickoff": user_local.isoformat(),
+        "user_timezone": user_timezone,
+        "kickoff": kickoff.isoformat(),
+    }
 
 
 def normalize_league_name(value: Any) -> str:
@@ -284,6 +471,510 @@ def settle_htft(picks: list[dict[str, Any]] | None, half_home: int, half_away: i
     return ["win" if str(pick.get("selection", "")).upper() == actual else "loss" for pick in (picks or [])]
 
 
+def validate_probability_matrix(value: Any, label: str) -> list[list[float]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty two-dimensional array")
+    matrix: list[list[float]] = []
+    width: int | None = None
+    for row_index, row in enumerate(value):
+        if not isinstance(row, list) or not row:
+            raise ValueError(f"{label} row {row_index} must be a non-empty array")
+        if width is None:
+            width = len(row)
+        elif len(row) != width:
+            raise ValueError(f"{label} rows must have equal length")
+        converted: list[float] = []
+        for column_index, item in enumerate(row):
+            if isinstance(item, bool):
+                raise ValueError(
+                    f"{label}[{row_index}][{column_index}] must be a finite non-negative number"
+                )
+            try:
+                number = float(item)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{label}[{row_index}][{column_index}] must be numeric"
+                ) from exc
+            if not math.isfinite(number) or number < 0.0:
+                raise ValueError(
+                    f"{label}[{row_index}][{column_index}] must be finite and non-negative"
+                )
+            converted.append(number)
+        matrix.append(converted)
+    total = sum(sum(row) for row in matrix)
+    if abs(total - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError(f"{label} probabilities must sum to 1")
+    return matrix
+
+
+def matrix_1x2(matrix: list[list[float]]) -> dict[str, float]:
+    home = draw = away = 0.0
+    for home_goals, row in enumerate(matrix):
+        for away_goals, probability in enumerate(row):
+            if home_goals > away_goals:
+                home += probability
+            elif home_goals == away_goals:
+                draw += probability
+            else:
+                away += probability
+    return {"home_win": home, "draw": draw, "away_win": away}
+
+
+def matrix_settlement_distribution(
+    matrix: list[list[float]],
+    market: str,
+    pick: dict[str, Any],
+) -> dict[str, float]:
+    values = {
+        "full_win": 0.0,
+        "half_win": 0.0,
+        "push": 0.0,
+        "half_loss": 0.0,
+        "loss": 0.0,
+    }
+    result_to_state = {
+        "win": "full_win",
+        "half_win": "half_win",
+        "push": "push",
+        "half_loss": "half_loss",
+        "loss": "loss",
+    }
+    for home_goals, row in enumerate(matrix):
+        for away_goals, probability in enumerate(row):
+            if market == "asian":
+                result = settle_asian(pick, home_goals, away_goals)
+            elif market == "total":
+                result = settle_total(pick, home_goals, away_goals)
+            elif market == "half_time":
+                result = settle_half_time(pick, home_goals, away_goals)
+            else:
+                raise ValueError(f"Cannot derive settlement distribution for {market}")
+            values[result_to_state[str(result)]] += probability
+    return values
+
+
+def validate_probability_close(actual: Any, expected: float, label: str) -> None:
+    if actual is None or not math.isfinite(float(actual)):
+        raise ValueError(f"{label} is required and must be finite")
+    if abs(float(actual) - expected) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError(
+            f"{label} does not match the archived score-model distribution "
+            f"({float(actual):.6f} vs {expected:.6f})"
+        )
+
+
+def normalize_score_model_loss_keys(value: Any, path: str = "score_model") -> Any:
+    """Map score-model ``full_loss`` to the store's legacy ``loss`` key."""
+    if isinstance(value, list):
+        return [
+            normalize_score_model_loss_keys(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if not isinstance(value, dict):
+        return deepcopy(value)
+    if "full_loss" in value and "loss" in value:
+        raise ValueError(
+            f"{path} cannot contain both full_loss and loss; stored loss means full_loss"
+        )
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        normalized_key = "loss" if key == "full_loss" else key
+        normalized[normalized_key] = normalize_score_model_loss_keys(
+            item, f"{path}.{key}"
+        )
+    return normalized
+
+
+def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "score_model_file", "") or "").strip()
+    if not supplied:
+        if str(getattr(args, "model_version", "") or "").strip():
+            raise ValueError("--model-version requires --score-model-file")
+        return None
+    path = Path(supplied).expanduser()
+    if not path.is_absolute():
+        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        path = (base / path).resolve()
+    raw = path.read_bytes()
+    try:
+        snapshot = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("score-model file must be UTF-8 JSON") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError("score-model JSON must be an object")
+    if snapshot.get("artifact_type") != "soccer_score_prediction":
+        raise ValueError("score-model file must have artifact_type=soccer_score_prediction")
+    cli_version = str(getattr(args, "model_version", "") or "").strip()
+    file_version = str(snapshot.get("model_version") or "").strip()
+    if not file_version:
+        raise ValueError("score prediction artifact requires embedded model_version")
+    if cli_version and cli_version != file_version:
+        raise ValueError("--model-version must match score-model JSON model_version")
+    embedded_model_hash = str(snapshot.get("model_hash") or "").strip()
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", embedded_model_hash):
+        raise ValueError("score prediction artifact requires a valid embedded model_hash")
+    score_matrix_payload = snapshot.get("score_matrix")
+    if not isinstance(score_matrix_payload, dict):
+        raise ValueError("score_matrix must be an object with probabilities")
+    score_matrix = validate_probability_matrix(
+        score_matrix_payload.get("probabilities"),
+        "score_matrix.probabilities",
+    )
+    generated_at = parse_aware_datetime(
+        str(snapshot.get("generated_at") or ""),
+        "score prediction generated_at",
+    )
+    fixture = snapshot.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("score prediction artifact requires fixture metadata")
+    fixture_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""),
+        "score prediction fixture.kickoff",
+    )
+    if generated_at >= fixture_kickoff:
+        raise ValueError("score prediction generated_at must be before fixture.kickoff")
+    artifact_provenance = snapshot.get("provenance")
+    if not isinstance(artifact_provenance, dict):
+        raise ValueError("score prediction artifact requires provenance metadata")
+    training = artifact_provenance.get("training")
+    if not isinstance(training, dict):
+        raise ValueError("score prediction provenance requires training metadata")
+    source_data_hash = str(training.get("source_data_hash") or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", source_data_hash):
+        raise ValueError(
+            "score prediction provenance training.source_data_hash must be a SHA-256 hash"
+        )
+    if artifact_provenance.get("strictly_before_kickoff_utc_date") is not True:
+        raise ValueError(
+            "score prediction provenance strictly_before_kickoff_utc_date must be true"
+        )
+    if artifact_provenance.get("generated_before_kickoff") is not True:
+        raise ValueError(
+            "score prediction provenance generated_before_kickoff must be true"
+        )
+
+    def parse_training_date(value: Any, label: str) -> date:
+        raw_date = str(value or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
+            raise ValueError(f"score prediction provenance {label} must be an ISO date")
+        try:
+            return date.fromisoformat(raw_date)
+        except ValueError as exc:
+            raise ValueError(
+                f"score prediction provenance {label} must be a valid ISO date"
+            ) from exc
+
+    training_end = parse_training_date(training.get("end_date"), "training.end_date")
+    training_cutoff = parse_training_date(
+        artifact_provenance.get("training_cutoff_date"), "training_cutoff_date"
+    )
+    if training_cutoff != training_end:
+        raise ValueError(
+            "score prediction provenance training_cutoff_date must equal training.end_date"
+        )
+    kickoff_utc_date = fixture_kickoff.astimezone(timezone.utc).date()
+    if training_end >= kickoff_utc_date or training_cutoff >= kickoff_utc_date:
+        raise ValueError(
+            "score prediction training cutoff must be strictly before fixture kickoff UTC date"
+        )
+    tail = snapshot.get("tail_mass")
+    if not isinstance(tail, dict) or tail.get("tolerance_met") is not True:
+        raise ValueError("score prediction tail_mass.tolerance_met must be true")
+    try:
+        raw_omitted = float(tail.get("raw_omitted_probability"))
+        tolerance = float(tail.get("tolerance"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("score prediction tail mass values must be numeric") from exc
+    if (
+        not math.isfinite(raw_omitted)
+        or not math.isfinite(tolerance)
+        or raw_omitted < 0.0
+        or not 0.0 < tolerance < 1.0
+        or raw_omitted > tolerance + 1e-12
+    ):
+        raise ValueError("score prediction raw omitted tail must not exceed tolerance")
+    normalized_snapshot = normalize_score_model_loss_keys(snapshot)
+    normalized_snapshot["model_version"] = file_version
+    normalized_snapshot["score_matrix"]["probabilities"] = score_matrix
+    if "half_time_score_matrix" in snapshot:
+        normalized_snapshot["half_time_score_matrix"] = validate_probability_matrix(
+            snapshot["half_time_score_matrix"], "half_time_score_matrix"
+        )
+    if "htft_matrix" in snapshot:
+        htft = snapshot["htft_matrix"]
+        if not isinstance(htft, dict):
+            raise ValueError("htft_matrix must be an object keyed by HH, HD, ..., AA")
+        selections = {a + b for a in "HDA" for b in "HDA"}
+        if set(htft) != selections:
+            raise ValueError("htft_matrix must contain exactly the nine HT/FT selections")
+        converted: dict[str, float] = {}
+        for selection in sorted(selections):
+            value = htft[selection]
+            if (
+                isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(f"htft_matrix {selection} must be finite and between 0 and 1")
+            converted[selection] = float(value)
+        if abs(sum(converted.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+            raise ValueError("htft_matrix probabilities must sum to 1")
+        normalized_snapshot["htft_matrix"] = converted
+    return {
+        "model_version": file_version,
+        "model_hash": embedded_model_hash,
+        "artifact_sha256": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        "artifact_filename": path.name,
+        "raw_snapshot": snapshot,
+        "snapshot": normalized_snapshot,
+        "score_matrix": score_matrix,
+        "generated_at": generated_at.isoformat(),
+        "fixture": deepcopy(fixture),
+    }
+
+
+def validate_score_model_consistency(
+    record: dict[str, Any],
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    football_formal = [
+        market for market, _ in formal_picks(record) if market in FOOTBALL_MODEL_MARKETS
+    ]
+    if provenance is None:
+        if football_formal:
+            raise ValueError(
+                "Formal football picks require a validated --score-model-file prediction artifact"
+            )
+        return {
+            "policy_version": STRICT_OOS_POLICY_VERSION,
+            "strict_forward_oos": True,
+            "reason": "no_formal_core_pick",
+        }
+
+    matrix = provenance["score_matrix"]
+    fixture = provenance.get("fixture", {})
+    if football_formal and fixture.get("unknown_team_policy") != "error":
+        raise ValueError(
+            "Formal football picks require score prediction fixture.unknown_team_policy=error"
+        )
+    if str(fixture.get("home_team") or "") != str(record.get("home_team") or ""):
+        raise ValueError("score prediction fixture home_team must match the record")
+    if str(fixture.get("away_team") or "") != str(record.get("away_team") or ""):
+        raise ValueError("score prediction fixture away_team must match the record")
+    fixture_kickoff = parse_datetime(str(fixture.get("kickoff") or ""))
+    record_kickoff = parse_datetime(str(record.get("kickoff") or ""))
+    if fixture_kickoff != record_kickoff:
+        raise ValueError("score prediction fixture kickoff must match the record kickoff")
+    generated_at = parse_datetime(str(provenance.get("generated_at") or ""))
+    if generated_at >= record_kickoff:
+        raise ValueError("score prediction generated_at must be before record kickoff")
+    if generated_at > parse_datetime(str(record.get("updated_at") or "")):
+        raise ValueError("score prediction generated_at cannot be later than archive time")
+    derived_1x2 = matrix_1x2(matrix)
+    for label, expected in derived_1x2.items():
+        validate_probability_close(
+            record.get("probabilities", {}).get(label),
+            expected,
+            f"1X2 {label} probability",
+        )
+    ranked_scores = sorted(
+        (
+            {
+                "score": f"{home}-{away}",
+                "probability": probability,
+                "home": home,
+                "away": away,
+            }
+            for home, row in enumerate(matrix)
+            for away, probability in enumerate(row)
+        ),
+        key=lambda item: (-item["probability"], item["home"], item["away"]),
+    )
+    archived_scores = record.get("exact_score_picks", [])
+    for rank, (pick, expected_pick) in enumerate(
+        zip(archived_scores, ranked_scores[:2]), start=1
+    ):
+        if pick.get("score") != expected_pick["score"] or int(pick.get("rank", 0)) != rank:
+            raise ValueError("Archived exact-score picks must equal the score matrix deterministic Top 2")
+        validate_probability_close(
+            pick.get("probability"),
+            float(expected_pick["probability"]),
+            f"exact score rank {rank}",
+        )
+    if record.get("predicted_score") != ranked_scores[0]["score"]:
+        raise ValueError("predicted_score must equal the score matrix rank 1")
+    zero_zero_item = next(
+        (index, item)
+        for index, item in enumerate(ranked_scores, start=1)
+        if item["score"] == "0-0"
+    )
+    zero_zero_rank, zero_zero_pick = zero_zero_item
+    zero_zero = float(zero_zero_pick["probability"])
+    validate_probability_close(
+        record.get("zero_zero_audit", {}).get("probability"),
+        zero_zero,
+        "0-0 audit probability",
+    )
+    if int(record.get("zero_zero_audit", {}).get("rank", 0)) != zero_zero_rank:
+        raise ValueError("0-0 audit rank must match the full score matrix ranking")
+
+    if record.get("primary_market") == "total":
+        total_pick = record.get("total_pick")
+        display_basis = record.get("display_exact_score_basis")
+        display_picks = record.get("display_exact_score_picks")
+        if not isinstance(total_pick, dict):
+            raise ValueError("A total primary requires a total pick")
+        try:
+            basis_matches = (
+                isinstance(display_basis, dict)
+                and display_basis.get("basis") == "primary_total_net_profit"
+                and display_basis.get("market") == "total"
+                and display_basis.get("side") == total_pick.get("side")
+                and math.isclose(
+                    float(display_basis.get("line")),
+                    float(total_pick.get("line")),
+                    abs_tol=1e-12,
+                )
+            )
+        except (TypeError, ValueError):
+            basis_matches = False
+        if not basis_matches:
+            raise ValueError(
+                "A formal total primary requires canonical primary-conditioned display scores"
+            )
+        if not isinstance(display_picks, list) or len(display_picks) != 2:
+            raise ValueError(
+                "A formal total primary requires exactly two conditioned display scores"
+            )
+
+        unconditional_ranks = {
+            item["score"]: index for index, item in enumerate(ranked_scores, start=1)
+        }
+        branch_scores: list[dict[str, Any]] = []
+        event_probability = 0.0
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                if settle_total(total_pick, home, away) not in {"win", "half_win"}:
+                    continue
+                event_probability += probability
+                if probability > 0.0:
+                    score = f"{home}-{away}"
+                    branch_scores.append(
+                        {
+                            "score": score,
+                            "probability": probability,
+                            "home": home,
+                            "away": away,
+                            "unconditional_rank": unconditional_ranks[score],
+                        }
+                    )
+        branch_scores.sort(
+            key=lambda item: (-item["probability"], item["home"], item["away"])
+        )
+        if len(branch_scores) < 2 or event_probability <= 0.0:
+            raise ValueError(
+                "The total-primary net-profit branch must contain two positive-probability scores"
+            )
+        validate_probability_close(
+            display_basis.get("event_probability"),
+            event_probability,
+            "display exact-score event probability",
+        )
+        for rank, (pick, expected_pick) in enumerate(
+            zip(display_picks, branch_scores[:2]), start=1
+        ):
+            if (
+                pick.get("score") != expected_pick["score"]
+                or int(pick.get("display_rank", 0)) != rank
+                or int(pick.get("unconditional_rank", 0))
+                != expected_pick["unconditional_rank"]
+            ):
+                raise ValueError(
+                    "Conditioned display scores must equal the canonical branch Top 2"
+                )
+            validate_probability_close(
+                pick.get("probability"),
+                float(expected_pick["probability"]),
+                f"conditioned display score rank {rank}",
+            )
+            validate_probability_close(
+                pick.get("conditional_probability"),
+                float(expected_pick["probability"]) / event_probability,
+                f"conditioned display score rank {rank} conditional probability",
+            )
+        if record.get("display_predicted_score") != branch_scores[0]["score"]:
+            raise ValueError(
+                "display_predicted_score must equal the canonical branch rank 1"
+            )
+
+    for market in ("asian", "total"):
+        pick = record.get(PICK_KEY_BY_MARKET[market])
+        if not isinstance(pick, dict):
+            continue
+        expected_distribution = matrix_settlement_distribution(matrix, market, pick)
+        for state, expected in expected_distribution.items():
+            validate_probability_close(
+                pick.get("settlement_probabilities", {}).get(state),
+                expected,
+                f"{market} {state} probability",
+            )
+    for market in ("goal_range", "btts"):
+        pick = record.get(PICK_KEY_BY_MARKET[market])
+        if not isinstance(pick, dict):
+            continue
+        expected = 0.0
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                result = (
+                    settle_goal_range(pick, home, away)
+                    if market == "goal_range"
+                    else settle_btts(pick, home, away)
+                )
+                if result == "win":
+                    expected += probability
+        validate_probability_close(pick.get("probability"), expected, f"{market} probability")
+
+    snapshot = provenance["snapshot"]
+    half_pick = record.get("half_time_pick")
+    if isinstance(half_pick, dict):
+        half_matrix = snapshot.get("half_time_score_matrix")
+        if half_matrix is None:
+            return {
+                "policy_version": STRICT_OOS_POLICY_VERSION,
+                "strict_forward_oos": False,
+                "reason": "missing_half_time_score_matrix",
+            }
+        expected_distribution = matrix_settlement_distribution(
+            half_matrix, "half_time", half_pick
+        )
+        for state, expected in expected_distribution.items():
+            validate_probability_close(
+                half_pick.get("settlement_probabilities", {}).get(state),
+                expected,
+                f"half_time {state} probability",
+            )
+    if record.get("htft_picks"):
+        htft_matrix = snapshot.get("htft_matrix")
+        if htft_matrix is None:
+            return {
+                "policy_version": STRICT_OOS_POLICY_VERSION,
+                "strict_forward_oos": False,
+                "reason": "missing_htft_model_matrix",
+            }
+        for pick in record["htft_picks"]:
+            selection = str(pick.get("selection") or "").upper()
+            validate_probability_close(
+                pick.get("probability"),
+                float(htft_matrix[selection]),
+                f"HT/FT {selection} model probability",
+            )
+    return {
+        "policy_version": STRICT_OOS_POLICY_VERSION,
+        "strict_forward_oos": True,
+        "reason": "validated_score_model_provenance",
+    }
+
+
 def parse_htft_pick(
     value: str, odds_format: str | None = None
 ) -> dict[str, Any]:
@@ -302,6 +993,94 @@ def parse_htft_pick(
     if odds_format is not None:
         pick["odds_format"] = odds_format
     return pick
+
+
+def parse_selection_float_values(
+    values: list[str] | None,
+    label: str,
+) -> dict[str, float]:
+    parsed: dict[str, float] = {}
+    for value in values or []:
+        parts = [part.strip() for part in str(value).split(":")]
+        if len(parts) != 2:
+            raise ValueError(f"{label} must be SELECTION:VALUE")
+        selection = parts[0].upper()
+        if selection in parsed:
+            raise ValueError(f"Duplicate {label} selection: {selection}")
+        try:
+            number = float(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"{label} value for {selection} must be numeric") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"{label} value for {selection} must be finite")
+        parsed[selection] = number
+    return parsed
+
+
+def parse_market_odds_values(
+    values: list[str] | None,
+    label: str,
+) -> dict[str, float]:
+    parsed: dict[str, float] = {}
+    for value in values or []:
+        parts = [part.strip() for part in str(value).rsplit(":", 1)]
+        if len(parts) != 2 or not parts[0]:
+            raise ValueError(f"{label} must be LABEL:PRICE")
+        outcome = parts[0]
+        normalized_outcome = outcome.upper() if label == "HT/FT market odds" else outcome.lower()
+        if normalized_outcome in parsed:
+            raise ValueError(f"Duplicate {label} outcome: {normalized_outcome}")
+        try:
+            price = float(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"{label} price for {normalized_outcome} must be numeric") from exc
+        if not math.isfinite(price):
+            raise ValueError(f"{label} price for {normalized_outcome} must be finite")
+        parsed[normalized_outcome] = price
+    return parsed
+
+
+def settlement_probability_args(args: argparse.Namespace, prefix: str) -> dict[str, Any]:
+    return {
+        state: getattr(args, f"{prefix}_{state}_probability", None)
+        for state in ("full_win", "half_win", "push", "half_loss", "loss")
+    }
+
+
+def market_audit_args(args: argparse.Namespace, prefix: str) -> dict[str, Any]:
+    odds_label = "HT/FT market odds" if prefix == "htft" else f"{prefix} market odds"
+    return {
+        "market_complete": bool(getattr(args, f"{prefix}_market_complete", False)),
+        "market_probability": getattr(args, f"{prefix}_market_probability", None),
+        "market_source": getattr(args, f"{prefix}_market_source", None),
+        "market_collected_at": getattr(args, f"{prefix}_market_collected_at", None),
+        "price_basis": getattr(args, f"{prefix}_price_basis", None),
+        "complete_market_odds": parse_market_odds_values(
+            getattr(args, f"{prefix}_market_odds", None),
+            odds_label,
+        ),
+    }
+
+
+def validate_market_collection_times(
+    record: dict[str, Any], current: datetime
+) -> None:
+    kickoff = parse_datetime(str(record["kickoff"]))
+    current_utc = current.astimezone(timezone.utc)
+    for market, pick in formal_picks(record):
+        collected_text = str(pick.get("market_collected_at") or "").strip()
+        if not collected_text:
+            continue
+        try:
+            collected = parse_datetime(collected_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{market} market_collected_at must be a parseable datetime with timezone"
+            ) from exc
+        if collected > current_utc:
+            raise ValueError(f"{market} market_collected_at cannot be in the future")
+        if collected >= kickoff:
+            raise ValueError(f"{market} market_collected_at must be before kickoff")
 
 
 def parse_exact_score_pick(value: str) -> dict[str, Any]:
@@ -404,7 +1183,12 @@ def build_display_exact_score_picks(
                 "Display exact-score probability cannot exceed event probability"
             )
 
-    display.sort(key=lambda pick: (-float(pick["probability"]), pick["score"]))
+    display.sort(
+        key=lambda pick: (
+            -float(pick["probability"]),
+            *(int(part) for part in str(pick["score"]).split("-")),
+        )
+    )
     for rank, pick in enumerate(display, start=1):
         pick["display_rank"] = rank
         pick["conditional_probability"] = (
@@ -531,6 +1315,21 @@ def require_strictly_positive(value: Any, label: str) -> float:
     return number
 
 
+def validate_probability_triplet(probabilities: dict[str, Any]) -> None:
+    values: list[float] = []
+    for label in ("home_win", "draw", "away_win"):
+        value = probabilities.get(label)
+        if (
+            value is None
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            raise ValueError(f"1X2 {label} probability must be finite and between 0 and 1")
+        values.append(float(value))
+    if abs(sum(values) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError("1X2 home/draw/away probabilities must sum to 1")
+
+
 def htft_implied_edge_pp(pick: dict[str, Any]) -> float | None:
     probability = pick.get("probability")
     odds = pick.get("odds")
@@ -576,8 +1375,6 @@ def effective_firm_count(
 
 
 def effective_market_signal(market: str, pick: dict[str, Any]) -> str:
-    if market == "htft":
-        return "neutral"
     return str(pick.get("market_signal") or "unknown")
 
 
@@ -674,7 +1471,118 @@ def audited_win_profit(pick: dict[str, Any]) -> float:
     return price - 1.0 if pick["odds_format"] == "decimal" else price
 
 
-def validate_market_audit_fields(pick: dict[str, Any], market: str) -> None:
+def validate_goal_range_outcome_labels(labels: set[str]) -> None:
+    if not labels:
+        raise ValueError("goal_range complete market odds are required")
+    parsed = [parse_goal_range_selection(label) for label in labels]
+    parsed.sort(key=lambda item: int(item["minimum_goals"]))
+    if int(parsed[0]["minimum_goals"]) != 0:
+        raise ValueError("goal_range complete market bands must start at 0")
+    expected_minimum = 0
+    open_ended_seen = False
+    for index, item in enumerate(parsed):
+        minimum = int(item["minimum_goals"])
+        maximum = item["maximum_goals"]
+        if minimum != expected_minimum or open_ended_seen:
+            raise ValueError(
+                "goal_range complete market bands must be continuous and non-overlapping"
+            )
+        if maximum is None:
+            if index != len(parsed) - 1:
+                raise ValueError("goal_range open-ended N+ band must be last")
+            open_ended_seen = True
+        else:
+            expected_minimum = int(maximum) + 1
+    if not open_ended_seen:
+        raise ValueError("goal_range complete market bands must end with N+")
+
+
+def required_market_outcomes(
+    pick: dict[str, Any], market: str
+) -> tuple[set[str], str]:
+    if market in {"asian", "corner_handicap"}:
+        return {"home", "away"}, str(pick.get("side") or "").lower()
+    if market in {"total", "corner_total"}:
+        return {"over", "under"}, str(pick.get("side") or "").lower()
+    if market == "btts":
+        return {"yes", "no"}, str(pick.get("side") or "").lower()
+    if market == "htft":
+        outcomes = {a + b for a in "HDA" for b in "HDA"}
+        return outcomes, str(pick.get("selection") or "").upper()
+    if market == "half_time":
+        submarket = pick.get("market")
+        if submarket == "1x2":
+            return {"home", "draw", "away"}, str(pick.get("side") or "").lower()
+        if submarket == "asian":
+            return {"home", "away"}, str(pick.get("side") or "").lower()
+        if submarket == "total":
+            return {"over", "under"}, str(pick.get("side") or "").lower()
+    if market == "goal_range":
+        odds = pick.get("complete_market_odds")
+        labels = set(odds) if isinstance(odds, dict) else set()
+        validate_goal_range_outcome_labels(labels)
+        return labels, str(pick.get("selection") or "").lower()
+    raise ValueError(f"Cannot determine complete market outcomes for {market}")
+
+
+def calculate_complete_market_no_vig(
+    pick: dict[str, Any], market: str
+) -> tuple[float, dict[str, float]]:
+    odds = pick.get("complete_market_odds")
+    if not isinstance(odds, dict):
+        raise ValueError(f"{market} formal pick requires complete_market_odds")
+    required, selected = required_market_outcomes(pick, market)
+    if set(odds) != required:
+        missing = sorted(required - set(odds))
+        extra = sorted(set(odds) - required)
+        raise ValueError(
+            f"{market} complete market odds outcomes mismatch; missing={missing}, extra={extra}"
+        )
+    raw_implied: dict[str, float] = {}
+    for outcome, raw_price in odds.items():
+        price = float(raw_price)
+        if not math.isfinite(price):
+            raise ValueError(f"{market} market odds for {outcome} must be finite")
+        if pick["odds_format"] == "decimal":
+            if price <= 1.0:
+                raise ValueError(f"{market} decimal market odds must be greater than 1")
+            raw_implied[outcome] = 1.0 / price
+        else:
+            if price <= 0.0:
+                raise ValueError(f"{market} Hong Kong market odds must be positive")
+            raw_implied[outcome] = 1.0 / (1.0 + price)
+    if selected not in odds:
+        raise ValueError(f"{market} selected outcome is missing from complete market odds")
+    if abs(float(odds[selected]) - float(pick["odds"])) > ODDS_AUDIT_TOLERANCE:
+        raise ValueError(
+            f"{market} selected complete-market price must match executable pick.odds"
+        )
+    total_implied = sum(raw_implied.values())
+    if not math.isfinite(total_implied) or total_implied <= 0.0:
+        raise ValueError(f"{market} complete market implied probabilities are invalid")
+    no_vig = {
+        outcome: probability / total_implied
+        for outcome, probability in raw_implied.items()
+    }
+    supplied_complete = pick.get("complete_market_probabilities")
+    if isinstance(supplied_complete, dict) and supplied_complete:
+        if set(supplied_complete) != set(no_vig):
+            raise ValueError(f"{market} supplied complete no-vig probabilities are incomplete")
+        for outcome, expected in no_vig.items():
+            if abs(float(supplied_complete[outcome]) - expected) > PROBABILITY_AUDIT_TOLERANCE:
+                raise ValueError(
+                    f"{market} supplied no-vig probability for {outcome} does not match market odds"
+                )
+    pick["raw_implied_probabilities"] = {
+        key: round(value, 12) for key, value in raw_implied.items()
+    }
+    pick["complete_market_probabilities"] = {
+        key: round(value, 12) for key, value in no_vig.items()
+    }
+    return no_vig[selected], no_vig
+
+
+def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float:
     market_probability = pick.get("market_probability")
     if (
         market_probability is None
@@ -699,8 +1607,19 @@ def validate_market_audit_fields(pick: dict[str, Any], market: str) -> None:
     if pick.get("price_basis") not in {"consensus", "median"}:
         raise ValueError(f"{market} price_basis must be consensus or median")
 
+    if pick.get("edge_pp") is None:
+        raise ValueError(f"{market} edge_pp is required for an auditable formal pick")
+    calculated_market_probability, _ = calculate_complete_market_no_vig(pick, market)
+    if (
+        abs(float(market_probability) - calculated_market_probability)
+        > PROBABILITY_AUDIT_TOLERANCE
+    ):
+        raise ValueError(
+            f"{market} market_probability does not match server-calculated no-vig probability"
+        )
+    pick["market_probability"] = round(calculated_market_probability, 12)
     expected_edge = (
-        float(pick["probability"]) - float(market_probability)
+        float(pick["probability"]) - calculated_market_probability
     ) * 100.0
     if abs(float(pick["edge_pp"]) - expected_edge) > EDGE_AUDIT_TOLERANCE_PP:
         raise ValueError(
@@ -711,6 +1630,8 @@ def validate_market_audit_fields(pick: dict[str, Any], market: str) -> None:
         expected_edge,
         f"{market} recalculated model-versus-market edge (pp)",
     )
+    pick["edge_pp"] = round(expected_edge, 12)
+    return expected_edge
 
 
 def validate_binary_ev(pick: dict[str, Any], market: str) -> float:
@@ -720,10 +1641,16 @@ def validate_binary_ev(pick: dict[str, Any], market: str) -> float:
         raise ValueError(
             f"{market} EV does not match probability and {pick['odds_format']} odds"
         )
+    pick["ev"] = round(calculated, 12)
     return calculated
 
 
-def validate_corner_distribution(pick: dict[str, Any], market: str) -> float:
+def validate_settlement_distribution(
+    pick: dict[str, Any],
+    market: str,
+    *,
+    line: float | None,
+) -> float:
     distribution = pick.get("settlement_probabilities")
     if not isinstance(distribution, dict):
         raise ValueError(
@@ -745,22 +1672,26 @@ def validate_corner_distribution(pick: dict[str, Any], market: str) -> float:
         values[state] = float(value)
     if abs(sum(values.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
         raise ValueError(f"{market} settlement probabilities must sum to 1")
-    quarter_units = abs(int(round(float(pick["line"]) * 4))) % 4
-    allowed_states = {
-        0: {"full_win", "push", "loss"},
-        1: {"full_win", "half_win", "half_loss", "loss"},
-        2: {"full_win", "loss"},
-        3: {"full_win", "half_win", "half_loss", "loss"},
-    }[quarter_units]
+    if line is None:
+        allowed_states = {"full_win", "loss"}
+    else:
+        split_line(float(line))
+        quarter_units = abs(int(round(float(line) * 4))) % 4
+        allowed_states = {
+            0: {"full_win", "push", "loss"},
+            1: {"full_win", "half_win", "half_loss", "loss"},
+            2: {"full_win", "loss"},
+            3: {"full_win", "half_win", "half_loss", "loss"},
+        }[quarter_units]
     unreachable = [
         state
         for state, value in values.items()
         if state not in allowed_states and value > PROBABILITY_AUDIT_TOLERANCE
     ]
     if unreachable:
-        line = float(pick["line"])
+        line_label = "binary" if line is None else f"line {float(line):g}"
         raise ValueError(
-            f"{market} line {line:g} cannot produce settlement states: "
+            f"{market} {line_label} cannot produce settlement states: "
             + ", ".join(unreachable)
         )
     positive_probability = values["full_win"] + values["half_win"]
@@ -783,7 +1714,110 @@ def validate_corner_distribution(pick: dict[str, Any], market: str) -> float:
             f"{market} EV does not match its five-state settlement distribution "
             f"and {pick['odds_format']} odds"
         )
+    pick["ev"] = round(calculated_ev, 12)
     return calculated_ev
+
+
+def validate_corner_distribution(pick: dict[str, Any], market: str) -> float:
+    """Compatibility wrapper for existing callers and tests."""
+    return validate_settlement_distribution(
+        pick,
+        market,
+        line=float(pick["line"]),
+    )
+
+
+def validate_complete_market_audit(
+    pick: dict[str, Any],
+    market: str,
+) -> None:
+    if pick.get("market_complete") is not True:
+        raise ValueError(f"{market} formal pick requires explicit market_complete=true")
+    validate_odds_format(pick, market)
+    validate_market_audit_fields(pick, market)
+    firm_count = pick.get("firm_count")
+    if (
+        firm_count is None
+        or not math.isfinite(float(firm_count))
+        or int(float(firm_count)) != float(firm_count)
+        or int(float(firm_count)) < 1
+    ):
+        raise ValueError(f"{market} firm_count must be a positive integer")
+
+
+def validate_core_formal_pick(
+    market: str,
+    pick: dict[str, Any],
+) -> None:
+    validate_complete_market_audit(pick, market)
+    if market == "asian":
+        if pick.get("side") not in {"home", "away"} or pick.get("line") is None:
+            raise ValueError("Asian formal pick requires side home/away and a current line")
+        calculated = validate_settlement_distribution(
+            pick, market, line=float(pick["line"])
+        )
+    elif market == "total":
+        if pick.get("side") not in {"over", "under"} or pick.get("line") is None:
+            raise ValueError("Total formal pick requires side over/under and a current line")
+        calculated = validate_settlement_distribution(
+            pick, market, line=float(pick["line"])
+        )
+    elif market == "half_time":
+        submarket = pick.get("market")
+        if submarket == "1x2":
+            if pick.get("side") not in {"home", "draw", "away"}:
+                raise ValueError("Half-time 1X2 requires side home, draw, or away")
+            calculated = validate_settlement_distribution(pick, market, line=None)
+        elif submarket == "asian":
+            if pick.get("side") not in {"home", "away"} or pick.get("line") is None:
+                raise ValueError("Half-time Asian requires side home/away and a line")
+            calculated = validate_settlement_distribution(
+                pick, market, line=float(pick["line"])
+            )
+        elif submarket == "total":
+            if pick.get("side") not in {"over", "under"} or pick.get("line") is None:
+                raise ValueError("Half-time total requires side over/under and a line")
+            calculated = validate_settlement_distribution(
+                pick, market, line=float(pick["line"])
+            )
+        else:
+            raise ValueError("Half-time formal pick requires a complete 1x2/asian/total market")
+    else:
+        raise ValueError(f"Unsupported core formal market: {market}")
+    require_strictly_positive(calculated, f"{market} recalculated EV")
+
+
+def validate_htft_formal_pick(pick: dict[str, Any]) -> None:
+    market = "htft"
+    validate_complete_market_audit(pick, market)
+    complete_probabilities = pick.get("complete_market_probabilities")
+    selections = {a + b for a in "HDA" for b in "HDA"}
+    if not isinstance(complete_probabilities, dict) or set(complete_probabilities) != selections:
+        raise ValueError("HT/FT formal picks require all nine no-vig market probabilities")
+    values = []
+    for selection in sorted(selections):
+        value = complete_probabilities.get(selection)
+        if (
+            value is None
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            raise ValueError(
+                f"HT/FT no-vig probability for {selection} must be finite and between 0 and 1"
+            )
+        values.append(float(value))
+    if abs(sum(values) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError("HT/FT nine-outcome no-vig probabilities must sum to 1")
+    selection = str(pick.get("selection") or "").upper()
+    if selection not in selections:
+        raise ValueError("HT/FT formal pick requires a valid selection")
+    if (
+        abs(float(pick["market_probability"]) - float(complete_probabilities[selection]))
+        > PROBABILITY_AUDIT_TOLERANCE
+    ):
+        raise ValueError("HT/FT selected market_probability must match the complete market")
+    calculated = validate_binary_ev(pick, market)
+    require_strictly_positive(calculated, "htft recalculated EV")
 
 
 def validate_new_formal_pick(
@@ -856,7 +1890,7 @@ def validate_new_formal_pick(
         )
 
 def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
-    """Reject formal picks that do not qualify for the stability-v1 safe pool."""
+    """Reject formal picks that do not qualify under the active safe-pool policy."""
     evidence = record.get("guardrail_evidence", {})
     data_quality = str(record.get("data_quality") or "unknown")
     all_formal_picks = formal_picks(record)
@@ -870,7 +1904,17 @@ def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
         )
 
     for market, pick in all_formal_picks:
+        if market in STRICT_OOS_MARKET_STATUS:
+            policy = STRICT_OOS_MARKET_STATUS[market]
+            raise ValueError(
+                f"{market} is observation_only under {STRICT_OOS_POLICY_VERSION}: "
+                f"{policy['paused_reason']}"
+            )
         validate_basic_formal_pick(record, market, pick)
+        if market in {"asian", "total", "half_time"}:
+            validate_core_formal_pick(market, pick)
+        elif market == "htft":
+            validate_htft_formal_pick(pick)
         if market in NEW_FORMAL_MARKETS:
             validate_new_formal_pick(market, pick, record)
 
@@ -957,8 +2001,9 @@ def settlement_safety(
         else:
             safety = 1.0 - loss - half_loss / 2.0
             return max(0.0, min(1.0, safety)), "five_state_no_loss"
-    probability = float(pick.get("probability") or 0.0)
-    return max(0.0, min(1.0, probability)), "model_probability_fallback"
+    # A missing settlement distribution must not make the same model
+    # probability count once as "safety" and again through EV/edge.
+    return 0.5, "neutral_missing_settlement_distribution"
 
 
 def evidence_coverage(
@@ -1001,16 +2046,13 @@ def confidence_components(
     }.get(signal, 0.0)
     points = {
         "settlement_safety": 55.0 * safety,
-        "ev_strength": 10.0 * min(ev / ADVERSE_FORMAL_MIN_EV, 1.0),
-        "edge_strength": 10.0 * min(
-            edge / ADVERSE_FORMAL_MIN_EDGE_PP, 1.0
-        ),
-        "data_quality": 10.0 * data_factor,
-        "market_depth": 5.0 * min(firms / PROVISIONAL_MIN_FIRMS, 1.0),
-        "independent_evidence": 5.0 * evidence_factor,
-        "market_alignment": 5.0 * alignment_factor,
+        "data_quality": 15.0 * data_factor,
+        "market_depth": 10.0 * min(firms / PROVISIONAL_MIN_FIRMS, 1.0),
+        "independent_evidence": 10.0 * evidence_factor,
+        "market_alignment": 10.0 * alignment_factor,
     }
     return {
+        "policy_version": CONFIDENCE_POLICY_VERSION,
         "score": round(sum(points.values()), 4),
         "settlement_safety_probability": round(safety, 6),
         "safety_source": safety_source,
@@ -1018,6 +2060,13 @@ def confidence_components(
         "edge_pp": round(edge, 4),
         "firm_count": int(firms) if firms.is_integer() else firms,
         "market_signal": signal,
+        "eligibility_gates": {
+            "positive_ev": ev > 0.0,
+            "positive_edge": edge > 0.0,
+            "ev": round(ev, 6),
+            "edge_pp": round(edge, 4),
+            "contributes_to_score": False,
+        },
         "points": {key: round(value, 4) for key, value in points.items()},
     }
 
@@ -1025,6 +2074,7 @@ def confidence_components(
 def annotate_confidence_ranking(record: dict[str, Any]) -> None:
     picks = formal_picks(record)
     record["confidence_ranking_version"] = CONFIDENCE_RANKING_VERSION
+    record["confidence_policy_version"] = CONFIDENCE_POLICY_VERSION
     if not picks:
         record["primary_selection_basis"] = "no_safe_formal_candidate"
         return
@@ -1035,6 +2085,7 @@ def annotate_confidence_ranking(record: dict[str, Any]) -> None:
         pick["confidence_score"] = components["score"]
         pick["confidence_components"] = components
         pick["confidence_ranking_version"] = CONFIDENCE_RANKING_VERSION
+        pick["confidence_policy_version"] = CONFIDENCE_POLICY_VERSION
         ranked.append((order, market, pick))
 
     ranked.sort(
@@ -1046,8 +2097,6 @@ def annotate_confidence_ranking(record: dict[str, Any]) -> None:
                 ]
             ),
             -float(item[2]["confidence_components"]["firm_count"]),
-            -float(item[2]["confidence_components"]["edge_pp"]),
-            -float(item[2]["confidence_components"]["ev"]),
             item[1],
             str(
                 item[2].get("selection")
@@ -1077,7 +2126,7 @@ def validate_primary_is_rank_one(record: dict[str, Any]) -> None:
         )
         best_label = best[0] if best else "unknown"
         raise ValueError(
-            f"Primary pick must be the unique stability-v1 confidence rank 1; "
+            f"Primary pick must be the unique {CONFIDENCE_RANKING_VERSION} confidence rank 1; "
             f"current rank-1 market is {best_label}"
         )
 
@@ -1447,6 +2496,11 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "analysis_stage": record.get("analysis_stage", "initial"),
         "archived_at": record.get("updated_at", record.get("created_at")),
+        "page_status": record.get("page_status"),
+        "source_kickoff": record.get("source_kickoff"),
+        "source_timezone": record.get("source_timezone"),
+        "user_local_kickoff": record.get("user_local_kickoff", record.get("kickoff")),
+        "user_timezone": record.get("user_timezone"),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": record.get("exact_score_picks", []),
         "display_predicted_score": record.get("display_predicted_score"),
@@ -1467,7 +2521,12 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "corner_total_pick": record.get("corner_total_pick"),
         "corner_handicap_pick": record.get("corner_handicap_pick"),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
+        "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
+        "score_model_provenance": record.get("score_model_provenance"),
+        "evaluation_eligibility": record.get("evaluation_eligibility"),
+        "strict_oos_policy_version": record.get("strict_oos_policy_version"),
+        "market_status": record.get("market_status"),
         "primary_market": record.get("primary_market"),
         "primary_pick": record.get("primary_pick"),
         "primary_change": record.get("primary_change"),
@@ -1488,7 +2547,11 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "version_archived_at": record.get("updated_at", record.get("created_at")),
         "lineup_rechecked_at": record.get("lineup_rechecked_at"),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
+        "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
+        "score_model_provenance": deepcopy(record.get("score_model_provenance")),
+        "evaluation_eligibility": deepcopy(record.get("evaluation_eligibility")),
+        "strict_oos_policy_version": record.get("strict_oos_policy_version"),
         "primary_market": record.get("primary_market"),
         "primary_pick": deepcopy(record.get("primary_pick")),
         "formal_picks": {
@@ -1519,14 +2582,19 @@ def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in snapshot.items() if key != "archived_at"}
 
 
+@locked_history_transaction
 def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
+    if bool(getattr(args, "force", False)):
+        raise ValueError("--force is disabled; archived prediction versions are immutable")
     path = data_path(args.base_dir)
     history = load_history(path)
     existing = find_record(history, args.match_id)
-    if existing and existing.get("status") == "reviewed" and not args.force:
-        raise ValueError("Reviewed record exists; use --force only when intentionally replacing it")
+    if existing and existing.get("status") == "reviewed":
+        raise ValueError("Reviewed records are terminal and cannot be overwritten")
 
-    timestamp = now_iso()
+    current = utc_now()
+    time_metadata = validate_record_time_metadata(args, current)
+    timestamp = current.astimezone(timezone.utc).replace(microsecond=0).isoformat()
     revisions = list(existing.get("revisions", [])) if existing else []
     exact_score_picks = [parse_exact_score_pick(value) for value in (args.exact_score_pick or [])]
     if len(exact_score_picks) != 2:
@@ -1535,7 +2603,12 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Exact-score picks must contain two distinct scores")
     if sum(float(pick["probability"]) for pick in exact_score_picks) > 1.0 + 1e-9:
         raise ValueError("Exact-score probabilities cannot sum to more than 1")
-    exact_score_picks.sort(key=lambda pick: (-float(pick["probability"]), pick["score"]))
+    exact_score_picks.sort(
+        key=lambda pick: (
+            -float(pick["probability"]),
+            *(int(part) for part in str(pick["score"]).split("-")),
+        )
+    )
     for rank, pick in enumerate(exact_score_picks, start=1):
         pick["rank"] = rank
         pick["status"] = "scenario_only"
@@ -1556,7 +2629,12 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "analysis_stage": args.analysis_stage,
         "league": args.league,
         "league_key": normalize_league_name(args.league),
-        "kickoff": args.kickoff,
+        "kickoff": time_metadata["kickoff"],
+        "page_status": time_metadata["page_status"],
+        "source_kickoff": time_metadata["source_kickoff"],
+        "source_timezone": time_metadata["source_timezone"],
+        "user_local_kickoff": time_metadata["user_local_kickoff"],
+        "user_timezone": time_metadata["user_timezone"],
         "home_team": args.home_team,
         "away_team": args.away_team,
         "predicted_score": args.predicted_score,
@@ -1613,37 +2691,42 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "btts_pick": None,
         "corner_total_pick": None,
         "corner_handicap_pick": None,
+        "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
+        "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
     }
+    validate_probability_triplet(record["probabilities"])
     if args.asian_side:
         record["asian_pick"] = {
             "side": args.asian_side,
             "line": args.asian_line,
             "odds": args.asian_odds,
+            "odds_format": getattr(args, "asian_odds_format", None),
             "probability": args.asian_probability,
             "ev": args.asian_ev,
             "edge_pp": getattr(args, "asian_edge_pp", None),
             "firm_count": getattr(args, "asian_firm_count", None),
             "market_signal": args.asian_market_signal,
+            **market_audit_args(args, "asian"),
+            "settlement_probabilities": settlement_probability_args(args, "asian"),
             "cover_probability": getattr(args, "asian_cover_probability", None),
             "cover_distribution_validated": bool(
                 getattr(args, "asian_cover_distribution_validated", False)
             ),
         }
-        if getattr(args, "asian_odds_format", None) is not None:
-            record["asian_pick"]["odds_format"] = args.asian_odds_format
     if args.total_side:
         record["total_pick"] = {
             "side": args.total_side,
             "line": args.total_line,
             "odds": args.total_odds,
+            "odds_format": getattr(args, "total_odds_format", None),
             "probability": args.total_probability,
             "ev": args.total_ev,
             "edge_pp": getattr(args, "total_edge_pp", None),
             "firm_count": getattr(args, "total_firm_count", None),
             "market_signal": args.total_market_signal,
+            **market_audit_args(args, "total"),
+            "settlement_probabilities": settlement_probability_args(args, "total"),
         }
-        if getattr(args, "total_odds_format", None) is not None:
-            record["total_pick"]["odds_format"] = args.total_odds_format
     if args.half_market:
         if args.half_market == "1x2" and args.half_side not in {"home", "draw", "away"}:
             raise ValueError("Half-time 1X2 requires --half-side home, draw, or away")
@@ -1658,19 +2741,61 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "side": args.half_side,
             "line": args.half_line,
             "odds": args.half_odds,
+            "odds_format": getattr(args, "half_odds_format", None),
             "probability": args.half_probability,
             "ev": args.half_ev,
             "edge_pp": getattr(args, "half_edge_pp", None),
             "firm_count": getattr(args, "half_firm_count", None),
             "market_signal": args.half_market_signal,
+            **market_audit_args(args, "half"),
+            "settlement_probabilities": settlement_probability_args(args, "half"),
         }
-        if getattr(args, "half_odds_format", None) is not None:
-            record["half_time_pick"]["odds_format"] = args.half_odds_format
     if args.htft_pick:
+        htft_market_probabilities = parse_selection_float_values(
+            getattr(args, "htft_market_probability", None),
+            "HT/FT market probability",
+        )
+        htft_edge_values = parse_selection_float_values(
+            getattr(args, "htft_edge_pp", None),
+            "HT/FT edge_pp",
+        )
+        htft_market_odds = parse_market_odds_values(
+            getattr(args, "htft_market_odds", None),
+            "HT/FT market odds",
+        )
         record["htft_picks"] = [
             parse_htft_pick(value, getattr(args, "htft_odds_format", None))
             for value in args.htft_pick
         ]
+        for pick in record["htft_picks"]:
+            selection = str(pick["selection"])
+            pick.update(
+                {
+                    "market_complete": bool(
+                        getattr(args, "htft_market_complete", False)
+                    ),
+                    "market_probability": htft_market_probabilities.get(selection),
+                    "complete_market_probabilities": deepcopy(
+                        htft_market_probabilities
+                    ),
+                    "market_source": getattr(args, "htft_market_source", None),
+                    "market_collected_at": getattr(
+                        args, "htft_market_collected_at", None
+                    ),
+                    "price_basis": getattr(args, "htft_price_basis", None),
+                    "firm_count": getattr(args, "htft_firm_count", None),
+                    "market_signal": getattr(
+                        args, "htft_market_signal", "unknown"
+                    ),
+                    "edge_pp": htft_edge_values.get(selection),
+                    "complete_market_odds": deepcopy(htft_market_odds),
+                }
+            )
+            if pick["edge_pp"] is None and pick.get("market_probability") is not None:
+                pick["edge_pp"] = (
+                    float(pick["probability"])
+                    - float(pick["market_probability"])
+                ) * 100.0
     if getattr(args, "goal_range_selection", None):
         record["goal_range_pick"] = {
             **parse_goal_range_selection(args.goal_range_selection),
@@ -1692,6 +2817,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 args, "goal_range_market_collected_at", None
             ),
             "price_basis": getattr(args, "goal_range_price_basis", None),
+            "complete_market_odds": parse_market_odds_values(
+                getattr(args, "goal_range_market_odds", None),
+                "goal_range market odds",
+            ),
         }
     if getattr(args, "btts_side", None):
         record["btts_pick"] = {
@@ -1712,6 +2841,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 args, "btts_market_collected_at", None
             ),
             "price_basis": getattr(args, "btts_price_basis", None),
+            "complete_market_odds": parse_market_odds_values(
+                getattr(args, "btts_market_odds", None),
+                "btts market odds",
+            ),
         }
     if getattr(args, "corner_total_side", None):
         record["corner_total_pick"] = {
@@ -1735,6 +2868,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 args, "corner_total_market_collected_at", None
             ),
             "price_basis": getattr(args, "corner_total_price_basis", None),
+            "complete_market_odds": parse_market_odds_values(
+                getattr(args, "corner_total_market_odds", None),
+                "corner_total market odds",
+            ),
             "settlement_probabilities": {
                 "full_win": getattr(
                     args, "corner_total_full_win_probability", None
@@ -1775,6 +2912,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 args, "corner_handicap_market_collected_at", None
             ),
             "price_basis": getattr(args, "corner_handicap_price_basis", None),
+            "complete_market_odds": parse_market_odds_values(
+                getattr(args, "corner_handicap_market_odds", None),
+                "corner_handicap market odds",
+            ),
             "settlement_probabilities": {
                 "full_win": getattr(
                     args, "corner_handicap_full_win_probability", None
@@ -1794,8 +2935,25 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             },
         }
 
+    provenance = load_score_model_provenance(args)
+    record["score_model_provenance"] = provenance
+    validate_market_collection_times(record, current)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
+    if getattr(args, "primary_htft_edge_pp", None) is not None:
+        if record.get("primary_market") != "htft":
+            raise ValueError("--primary-htft-edge-pp is valid only for an HT/FT primary")
+        expected = float(record["primary_pick"]["edge_pp"])
+        if (
+            abs(float(args.primary_htft_edge_pp) - expected)
+            > EDGE_AUDIT_TOLERANCE_PP
+        ):
+            raise ValueError(
+                "primary HT/FT edge_pp does not match the complete no-vig market"
+            )
     validate_provisional_formal_guardrails(record)
+    record["evaluation_eligibility"] = validate_score_model_consistency(
+        record, provenance
+    )
     annotate_confidence_ranking(record)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     validate_primary_is_rank_one(record)
@@ -1811,6 +2969,12 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 "path": str(path),
                 "record": existing,
             }
+        previous_stage = str(existing.get("analysis_stage") or "initial")
+        incoming_stage = str(record.get("analysis_stage") or "initial")
+        if not (previous_stage == "initial" and incoming_stage == "lineup-check"):
+            raise ValueError(
+                "Prediction archive is immutable; only the transition initial -> lineup-check is allowed"
+            )
         if not revisions or snapshot_payload(revisions[-1]) != snapshot_payload(previous_snapshot):
             revisions.append(previous_snapshot)
         record["revisions"] = revisions
@@ -1836,6 +3000,7 @@ def parse_primary_assignment(value: str) -> tuple[str, str, str | None]:
     return match_id, market, selection
 
 
+@locked_history_transaction
 def cmd_migrate_primary(args: argparse.Namespace) -> dict[str, Any]:
     path = data_path(args.base_dir)
     history = load_history(path)
@@ -1856,6 +3021,13 @@ def cmd_migrate_primary(args: argparse.Namespace) -> dict[str, Any]:
             "previous": None,
             "current": list(current_primary) if current_primary else None,
         }
+        record["legacy"] = True
+        record["backfill"] = True
+        record["evaluation_eligibility"] = {
+            "policy_version": STRICT_OOS_POLICY_VERSION,
+            "strict_forward_oos": False,
+            "reason": "legacy_primary_backfill",
+        }
         if record.get("status") == "reviewed":
             record["primary_result"] = primary_result_from_record(record)
         if record.get("revisions", []) != revisions_before:
@@ -1873,6 +3045,7 @@ def cmd_migrate_primary(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@locked_history_transaction
 def cmd_migrate_leagues(args: argparse.Namespace) -> dict[str, Any]:
     """Backfill stable league keys without touching revisions or settlements."""
     path = data_path(args.base_dir)
@@ -1899,6 +3072,7 @@ def cmd_migrate_leagues(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@locked_history_transaction
 def cmd_migrate_settlement_basis(args: argparse.Namespace) -> dict[str, Any]:
     """Backfill settlement audit metadata without re-grading reviewed records."""
     path = data_path(args.base_dir)
@@ -1929,6 +3103,7 @@ def cmd_migrate_settlement_basis(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@locked_history_transaction
 def cmd_migrate_learning_scopes(args: argparse.Namespace) -> dict[str, Any]:
     """Backfill review-learning metadata without changing settlement or revisions."""
     path = data_path(args.base_dir)
@@ -2016,6 +3191,7 @@ def cmd_due_lineup_check(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+@locked_history_transaction
 def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     if not args.verified_finished:
         raise ValueError(
@@ -2048,6 +3224,28 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Review requires a concise non-empty --key-learning grounded in the verified result")
 
     home, away = int(args.home_score), int(args.away_score)
+    if home < 0 or away < 0:
+        raise ValueError("Verified final scores cannot be negative")
+    verification_source = str(
+        getattr(args, "verification_source", "") or ""
+    ).strip()
+    if not verification_source:
+        raise ValueError("Review requires --verification-source")
+    verification_collected_text = str(
+        getattr(args, "verification_collected_at", "") or ""
+    ).strip()
+    verification_collected = parse_aware_datetime(
+        verification_collected_text,
+        "verification_collected_at",
+    )
+    if verification_collected.astimezone(timezone.utc) > utc_now().astimezone(
+        timezone.utc
+    ):
+        raise ValueError("verification_collected_at cannot be in the future")
+    if verification_collected.astimezone(timezone.utc) < parse_datetime(
+        str(record.get("kickoff") or "")
+    ):
+        raise ValueError("verification_collected_at must be at or after kickoff")
     settlement_basis = settlement_basis_for_record(record)
     primary_market = settlement_basis.get("primary_market")
     home_corners_arg = getattr(args, "home_corners", None)
@@ -2097,9 +3295,15 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         ),
         1 if display_predicted_exact else None,
     )
+    if (args.half_home_score is None) != (args.half_away_score is None):
+        raise ValueError(
+            "Half-time score verification requires both --half-home-score and --half-away-score"
+        )
     half_scores_available = args.half_home_score is not None and args.half_away_score is not None
     half_home = int(args.half_home_score) if half_scores_available else None
     half_away = int(args.half_away_score) if half_scores_available else None
+    if half_scores_available and (half_home < 0 or half_away < 0):
+        raise ValueError("Verified half-time scores cannot be negative")
     if primary_market in {"half_time", "htft"} and not half_scores_available:
         raise ValueError(
             "Review refused: a half-time or HT/FT primary requires verified "
@@ -2142,6 +3346,11 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     record.update({
         "status": "reviewed",
         "reviewed_at": now_iso(),
+        "result_verification": {
+            "verified_finished": True,
+            "source": verification_source,
+            "collected_at": verification_collected.isoformat(),
+        },
         "final_score": f"{home}-{away}",
         "score_exact": predicted_exact,
         "exact_score_hit_rank": exact_score_hit_rank,
@@ -2211,6 +3420,121 @@ def rate_block(results: list[str]) -> dict[str, Any]:
     }
 
 
+def probability_calibration_block(
+    pairs: list[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    states = ("full_win", "half_win", "push", "half_loss", "loss")
+    actual_state = {
+        "win": "full_win",
+        "half_win": "half_win",
+        "push": "push",
+        "half_loss": "half_loss",
+        "loss": "loss",
+    }
+    multiclass_briers: list[float] = []
+    multiclass_log_losses: list[float] = []
+    binary_observations: list[tuple[float, float]] = []
+    positive_observations: list[tuple[float, float]] = []
+    for result, pick in pairs:
+        distribution = pick.get("settlement_probabilities")
+        if isinstance(distribution, dict) and all(state in distribution for state in states):
+            try:
+                probabilities = {state: float(distribution[state]) for state in states}
+            except (TypeError, ValueError):
+                probabilities = {}
+            if (
+                probabilities
+                and all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in probabilities.values())
+                and abs(sum(probabilities.values()) - 1.0) <= PROBABILITY_AUDIT_TOLERANCE
+                and result in actual_state
+            ):
+                observed_state = actual_state[result]
+                multiclass_briers.append(
+                    sum(
+                        (probabilities[state] - (1.0 if state == observed_state else 0.0)) ** 2
+                        for state in states
+                    )
+                    / len(states)
+                )
+                multiclass_log_losses.append(
+                    -math.log(max(probabilities[observed_state], 1e-15))
+                )
+                positive_probability = probabilities["full_win"] + probabilities["half_win"]
+                positive_observations.append(
+                    (positive_probability, 1.0 if result in {"win", "half_win"} else 0.0)
+                )
+                continue
+        value = pick.get("probability")
+        if result != "push" and value is not None:
+            try:
+                probability = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(probability) and 0.0 <= probability <= 1.0:
+                binary_observations.append(
+                    (probability, 1.0 if result in {"win", "half_win"} else 0.0)
+                )
+                positive_observations.append(binary_observations[-1])
+    if not positive_observations:
+        return {
+            "samples": 0,
+            "avg_predicted_probability": None,
+            "observed_positive_rate": None,
+            "calibration_gap": None,
+            "brier_score": None,
+            "log_loss": None,
+            "diagnosis": "insufficient_data",
+            "method": "no_usable_probabilities",
+            "five_state_samples": 0,
+            "legacy_binary_samples": 0,
+        }
+    average = sum(value for value, _ in positive_observations) / len(positive_observations)
+    observed_rate = sum(value for _, value in positive_observations) / len(positive_observations)
+    gap = average - observed_rate
+    legacy_brier = (
+        sum((probability - observed) ** 2 for probability, observed in binary_observations)
+        / len(binary_observations)
+        if binary_observations
+        else None
+    )
+    brier = (
+        sum(multiclass_briers) / len(multiclass_briers)
+        if multiclass_briers
+        else legacy_brier
+    )
+    log_loss = (
+        sum(multiclass_log_losses) / len(multiclass_log_losses)
+        if multiclass_log_losses
+        else None
+    )
+    diagnosis = (
+        "overconfident"
+        if gap > 0.05
+        else "underconfident"
+        if gap < -0.05
+        else "roughly_aligned"
+    )
+    return {
+        "samples": len(positive_observations),
+        "avg_predicted_probability": round(average, 4),
+        "observed_positive_rate": round(observed_rate, 4),
+        "calibration_gap": round(gap, 4),
+        "brier_score": round(brier, 4),
+        "log_loss": round(log_loss, 4) if log_loss is not None else None,
+        "diagnosis": diagnosis,
+        "method": (
+            "five_state_multiclass_mean_brier"
+            if multiclass_briers and not binary_observations
+            else "mixed_five_state_and_legacy_binary"
+            if multiclass_briers
+            else "legacy_binary_approximation"
+        ),
+        "five_state_samples": len(multiclass_briers),
+        "legacy_binary_samples": len(binary_observations),
+        "legacy_binary_brier": round(legacy_brier, 4) if legacy_brier is not None else None,
+    }
+
+
 def settlement_profit(
     result: str, odds: Any, odds_format: Any = None
 ) -> float | None:
@@ -2258,6 +3582,7 @@ def performance_block(
             "roi": None,
         })
     block["avg_archived_ev"] = round(sum(archived_evs) / len(archived_evs), 4) if archived_evs else None
+    block["probability_calibration"] = probability_calibration_block(pairs)
     signals: dict[str, dict[str, Any]] = {}
     for signal in sorted({str(pick.get("market_signal", "unknown")) for _, pick in pairs}):
         subset = [(result, pick) for result, pick in pairs if str(pick.get("market_signal", "unknown")) == signal]
@@ -2293,7 +3618,42 @@ def performance_block_without_signals(
             "profit_units": None,
             "roi": None,
         })
+    block["probability_calibration"] = probability_calibration_block(pairs)
     return block
+
+
+def is_strict_forward_oos_record(record: dict[str, Any]) -> bool:
+    basis = record.get("settlement_basis")
+    if isinstance(basis, dict):
+        # A reviewed record is graded from its frozen active version.  Never
+        # let later top-level drift upgrade or downgrade the evaluation cohort.
+        eligibility = basis.get("evaluation_eligibility")
+    else:
+        eligibility = record.get("evaluation_eligibility")
+    if isinstance(eligibility, dict) and isinstance(
+        eligibility.get("strict_forward_oos"), bool
+    ):
+        return bool(eligibility["strict_forward_oos"])
+    return False
+
+
+def strict_forward_exclusion_reason(record: dict[str, Any]) -> str | None:
+    if is_strict_forward_oos_record(record):
+        return None
+    basis = record.get("settlement_basis")
+    eligibility = (
+        basis.get("evaluation_eligibility")
+        if isinstance(basis, dict)
+        else record.get("evaluation_eligibility")
+    )
+    if isinstance(eligibility, dict) and eligibility.get("reason"):
+        return str(eligibility["reason"])
+    if record.get("legacy") or record.get("backfill"):
+        return "legacy_or_backfill"
+    primary_change = record.get("primary_change")
+    if isinstance(primary_change, dict) and primary_change.get("status") == "backfilled":
+        return "legacy_primary_backfill"
+    return "legacy_schema_missing_explicit_eligibility"
 
 
 def primary_pairs(records: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -2342,17 +3702,17 @@ def primary_market_performance(records: list[dict[str, Any]]) -> dict[str, Any]:
         + corner_handicap
     )
     return {
-        "asian": performance_block(asian, calculate_money=False),
-        "totals": performance_block(totals, calculate_money=False),
-        "half_time": performance_block(half_time, calculate_money=False),
-        "htft": performance_block(htft, calculate_money=False),
-        "goal_range": performance_block(goal_range, calculate_money=False),
-        "btts": performance_block(btts, calculate_money=False),
-        "corner_total": performance_block(corner_total, calculate_money=False),
+        "asian": performance_block(asian),
+        "totals": performance_block(totals),
+        "half_time": performance_block(half_time),
+        "htft": performance_block(htft),
+        "goal_range": performance_block(goal_range),
+        "btts": performance_block(btts),
+        "corner_total": performance_block(corner_total),
         "corner_handicap": performance_block(
-            corner_handicap, calculate_money=False
+            corner_handicap
         ),
-        "combined": performance_block(combined, calculate_money=False),
+        "combined": performance_block(combined),
     }
 
 
@@ -2361,6 +3721,13 @@ def exact_score_diagnostics(
     *,
     display: bool = False,
 ) -> dict[str, Any]:
+    strict_records = strict_forward_reviewed_records(records)
+    model_records = [
+        record
+        for record in strict_records
+        if has_validated_score_model_provenance(record)
+    ]
+
     def rank_for(record: dict[str, Any]) -> Any:
         if display and "display_exact_score_hit_rank" in record:
             return record.get("display_exact_score_hit_rank")
@@ -2371,17 +3738,25 @@ def exact_score_diagnostics(
             return bool(record.get("display_score_exact"))
         return bool(record.get("score_exact"))
 
-    top1 = sum((rank_for(r) == 1) or exact_for(r) for r in records)
+    top1 = sum((rank_for(r) == 1) or exact_for(r) for r in model_records)
     top2 = sum(
         (rank_for(r) in {1, 2})
         or (rank_for(r) is None and exact_for(r))
-        for r in records
+        for r in model_records
     )
+    excluded = len(strict_records) - len(model_records)
     return {
+        "samples": len(model_records),
+        "excluded": excluded,
+        "excluded_reasons": (
+            {"missing_validated_score_model_provenance": excluded}
+            if excluded
+            else {}
+        ),
         "top1_hits": top1,
-        "top1_rate": round(top1 / len(records), 4) if records else None,
+        "top1_rate": round(top1 / len(model_records), 4) if model_records else None,
         "top2_hits": top2,
-        "top2_rate": round(top2 / len(records), 4) if records else None,
+        "top2_rate": round(top2 / len(model_records), 4) if model_records else None,
     }
 
 
@@ -2413,9 +3788,178 @@ def learning_sample_summary(records: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def strict_forward_reviewed_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the only cohort eligible for forward-performance headlines."""
+    return [
+        record
+        for record in records
+        if record.get("mode") == "prematch"
+        and record.get("status") == "reviewed"
+        and is_strict_forward_oos_record(record)
+    ]
+
+
+def selection_policy_block(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Measure selection coverage without conditioning on whether a bet existed."""
+    eligible = strict_forward_reviewed_records(records)
+    selected = 0
+    for record in eligible:
+        market, primary = primary_snapshot_for_stats(record)
+        if market and isinstance(primary, dict):
+            selected += 1
+    abstained = len(eligible) - selected
+    return {
+        "evaluation_scope": "strict_forward_oos_reviewed",
+        "policy_version": CONFIDENCE_POLICY_VERSION,
+        "selection_basis": PRIMARY_SELECTION_BASIS,
+        "eligible_reviewed_matches": len(eligible),
+        "selected_primary_matches": selected,
+        "abstained_matches": abstained,
+        "coverage": round(selected / len(eligible), 4) if eligible else None,
+        "abstention_rate": round(abstained / len(eligible), 4) if eligible else None,
+    }
+
+
+def has_validated_score_model_provenance(record: dict[str, Any]) -> bool:
+    """Recognize a frozen canonical-model cohort without trusting a label alone."""
+    basis = record.get("settlement_basis")
+    if isinstance(basis, dict):
+        eligibility = basis.get("evaluation_eligibility")
+        provenance = basis.get("score_model_provenance")
+    else:
+        eligibility = record.get("evaluation_eligibility")
+        provenance = record.get("score_model_provenance")
+
+    if not (
+        isinstance(eligibility, dict)
+        and eligibility.get("strict_forward_oos") is True
+        and eligibility.get("reason") == "validated_score_model_provenance"
+        and isinstance(provenance, dict)
+    ):
+        return False
+    snapshot = provenance.get("snapshot")
+    matrix = provenance.get("score_matrix")
+    return bool(
+        re.fullmatch(r"sha256:[0-9a-f]{64}", str(provenance.get("model_hash") or ""))
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(provenance.get("artifact_sha256") or "")
+        )
+        and isinstance(snapshot, dict)
+        and snapshot.get("artifact_type") == "soccer_score_prediction"
+        and isinstance(matrix, list)
+        and matrix
+    )
+
+
+def one_x_two_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Calculate strict-OOS 1X2 proper scores and quarantine malformed rows."""
+    eligible = strict_forward_reviewed_records(records)
+    brier_scores: list[float] = []
+    log_losses: list[float] = []
+    excluded_reasons: dict[str, int] = {}
+
+    def exclude(reason: str) -> None:
+        excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
+
+    for record in eligible:
+        if not has_validated_score_model_provenance(record):
+            exclude("missing_validated_score_model_provenance")
+            continue
+        final_score = record.get("final_score")
+        if final_score is None or not str(final_score).strip():
+            exclude("missing_final_score")
+            continue
+        score_match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", str(final_score))
+        if not score_match:
+            exclude("invalid_final_score")
+            continue
+
+        raw_probabilities = record.get("probabilities")
+        if not isinstance(raw_probabilities, dict):
+            exclude(
+                "missing_1x2_probabilities"
+                if raw_probabilities is None
+                else "invalid_1x2_probabilities"
+            )
+            continue
+        labels = ("home_win", "draw", "away_win")
+        if any(label not in raw_probabilities for label in labels):
+            exclude("missing_1x2_probabilities")
+            continue
+        values = [raw_probabilities[label] for label in labels]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+            for value in values
+        ):
+            exclude("invalid_1x2_probabilities")
+            continue
+        probabilities = {
+            label: float(raw_probabilities[label]) for label in labels
+        }
+        if (
+            abs(math.fsum(probabilities.values()) - 1.0)
+            > PROBABILITY_AUDIT_TOLERANCE
+        ):
+            exclude("non_normalized_1x2_probabilities")
+            continue
+
+        home_score, away_score = (int(value) for value in score_match.groups())
+        actual = (
+            "home_win"
+            if home_score > away_score
+            else "draw"
+            if home_score == away_score
+            else "away_win"
+        )
+        brier_scores.append(
+            math.fsum(
+                (
+                    probabilities[label] - (1.0 if label == actual else 0.0)
+                )
+                ** 2
+                for label in labels
+            )
+        )
+        log_losses.append(
+            -math.log(max(probabilities[actual], ONE_X_TWO_LOG_LOSS_FLOOR))
+        )
+
+    sample_count = len(brier_scores)
+    excluded_count = len(eligible) - sample_count
+    return {
+        "evaluation_scope": "strict_forward_oos_reviewed",
+        "strict_reviewed_matches": len(eligible),
+        "sample_count": sample_count,
+        "excluded_count": excluded_count,
+        "excluded_reasons": dict(sorted(excluded_reasons.items())),
+        "one_x_two_multiclass_brier": (
+            math.fsum(brier_scores) / sample_count if sample_count else None
+        ),
+        "one_x_two_multiclass_log_loss": (
+            math.fsum(log_losses) / sample_count if sample_count else None
+        ),
+        "definitions": {
+            "one_x_two_multiclass_brier": (
+                "sum of squared error over home/draw/away, averaged by match"
+            ),
+            "one_x_two_multiclass_log_loss": (
+                "negative natural log of the observed 1X2 outcome probability, "
+                "averaged by match"
+            ),
+            "log_loss_floor": ONE_X_TWO_LOG_LOSS_FLOOR,
+        },
+    }
+
+
 def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[str, Any]:
-    primary_by_market = primary_market_performance(records)
-    primary = performance_block(primary_pairs(records))
+    strict_records = strict_forward_reviewed_records(records)
+    primary_by_market = primary_market_performance(strict_records)
+    primary = performance_block(primary_pairs(strict_records))
     learning_samples = learning_sample_summary(records)
     learnings = [
         {
@@ -2435,12 +3979,19 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         "source_labels": sorted({str(record.get("league", "unknown")) for record in records}),
         "matches": len(records),
         "reviewed_matches": len(records),
+        "strict_forward_reviewed_matches": len(strict_records),
+        "excluded_from_strict_forward": len(records) - len(strict_records),
         "primary_record_matches": primary["matches"],
         "no_primary_reviewed_matches": sum(
             learning_scope_for_record(record) == "no_primary_observation"
             for record in records
         ),
+        "strict_no_primary_reviewed_matches": selection_policy_block(records)[
+            "abstained_matches"
+        ],
         "learning_samples": learning_samples,
+        "selection_policy": selection_policy_block(records),
+        "one_x_two_metrics": one_x_two_metrics(records),
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -2453,33 +4004,60 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         "btts": primary_by_market["btts"],
         "corner_total": primary_by_market["corner_total"],
         "corner_handicap": primary_by_market["corner_handicap"],
-        "exact_scores": exact_score_diagnostics(records),
-        "display_exact_scores": exact_score_diagnostics(records, display=True),
+        "exact_scores": exact_score_diagnostics(strict_records),
+        "display_exact_scores": exact_score_diagnostics(strict_records, display=True),
         "recent_learnings": learnings,
     }
 
 
 def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     reviewed = [r for r in history if r.get("mode") == "prematch" and r.get("status") == "reviewed"]
-    primary_pairs_all = primary_pairs(reviewed)
+    strict_reviewed = strict_forward_reviewed_records(reviewed)
+    excluded_reviewed = [record for record in reviewed if not is_strict_forward_oos_record(record)]
+    exclusion_reasons: dict[str, int] = {}
+    for record in excluded_reviewed:
+        reason = strict_forward_exclusion_reason(record) or "unknown"
+        exclusion_reasons[reason] = exclusion_reasons.get(reason, 0) + 1
+    primary_pairs_all = primary_pairs(strict_reviewed)
     primary = performance_block(primary_pairs_all)
     learning_samples = learning_sample_summary(reviewed)
-    exact_scores = exact_score_diagnostics(reviewed)
-    display_exact_scores = exact_score_diagnostics(reviewed, display=True)
+    exact_scores = exact_score_diagnostics(strict_reviewed)
+    display_exact_scores = exact_score_diagnostics(strict_reviewed, display=True)
     leagues: dict[str, dict[str, Any]] = {}
     for league_key in sorted({league_key_for_record(record) for record in reviewed}):
         subset = [record for record in reviewed if league_key_for_record(record) == league_key]
         leagues[league_key] = league_performance(subset, league_key)
-    primary_by_market = primary_market_performance(reviewed)
+    primary_by_market = primary_market_performance(strict_reviewed)
+    quarantined_primary = performance_block(primary_pairs(excluded_reviewed))
+    quarantined_by_market = primary_market_performance(excluded_reviewed)
     return {
+        "evaluation_scope": "strict_forward_oos",
         "reviewed_matches": len(reviewed),
+        "strict_forward_reviewed_matches": len(strict_reviewed),
+        "excluded_from_strict_forward": {
+            "matches": len(excluded_reviewed),
+            "match_ids": [str(record.get("match_id")) for record in excluded_reviewed],
+            "by_reason": exclusion_reasons,
+        },
+        "legacy_or_quarantined": {
+            "reviewed_matches": len(excluded_reviewed),
+            "primary": quarantined_primary,
+            "primary_by_market": quarantined_by_market,
+            "by_reason": exclusion_reasons,
+            "match_ids": [str(record.get("match_id")) for record in excluded_reviewed],
+        },
         "primary_record_matches": primary["matches"],
         "no_primary_reviewed_matches": sum(
             learning_scope_for_record(record) == "no_primary_observation"
             for record in reviewed
         ),
+        "strict_no_primary_reviewed_matches": selection_policy_block(reviewed)[
+            "abstained_matches"
+        ],
         "pending_matches": sum(r.get("mode") == "prematch" and r.get("status") == "pending" for r in history),
         "learning_samples": learning_samples,
+        "selection_policy": selection_policy_block(reviewed),
+        "one_x_two_metrics": one_x_two_metrics(reviewed),
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -2493,6 +4071,8 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "corner_total": primary_by_market["corner_total"],
         "corner_handicap": primary_by_market["corner_handicap"],
         "combined": primary_by_market["combined"],
+        "exact_score_diagnostics": exact_scores,
+        "display_exact_score_diagnostics": display_exact_scores,
         "exact_scores": exact_scores["top1_hits"],
         "exact_score_rate": exact_scores["top1_rate"],
         "exact_score_top1_hits": exact_scores["top1_hits"],
@@ -2504,6 +4084,8 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "display_exact_score_top2_hits": display_exact_scores["top2_hits"],
         "display_exact_score_top2_rate": display_exact_scores["top2_rate"],
         "learnings_recorded": sum(bool(str(r.get("key_learning", "")).strip()) for r in reviewed),
+        "market_status_policy_version": STRICT_OOS_POLICY_VERSION,
+        "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
         "leagues": leagues,
     }
 
@@ -2521,7 +4103,10 @@ def merge_guardrails(*groups: list[str]) -> list[str]:
 def dynamic_calibration_summary(stats: dict[str, Any], minimum: int) -> str:
     primary = stats["primary"]
     primary_by_market = stats["primary_by_market"]["combined"]
-    no_primary = stats["no_primary_reviewed_matches"]
+    quarantined_primary = stats["legacy_or_quarantined"]["primary"]
+    selection = stats["selection_policy"]
+    excluded = stats["excluded_from_strict_forward"]["matches"]
+    no_primary_learning = stats["learning_samples"]["no_primary_observation"]
 
     def roi_text(block: dict[str, Any]) -> str:
         roi = block.get("roi")
@@ -2529,14 +4114,22 @@ def dynamic_calibration_summary(stats: dict[str, Any], minimum: int) -> str:
 
     return (
         f"已复盘{stats['reviewed_matches']}场，按{len(stats['leagues'])}个联赛归类；"
-        f"主推{primary['matches']}场"
+        f"严格前瞻{stats['strict_forward_reviewed_matches']}场，隔离{excluded}场。"
+        f"严格主推{primary['matches']}场"
         f"{primary['wins']}胜{primary['losses']}负{primary['pushes']}走，"
         f"收益{primary['profit_units']:+.2f}u，ROI {roi_text(primary)}，计入战绩；"
-        f"无主推{no_primary}场不计战绩并作为学习样本。"
+        f"严格弃赛{selection['abstained_matches']}场，覆盖率"
+        f"{selection['coverage'] if selection['coverage'] is not None else '—'}。"
+        f"无主推学习样本{no_primary_learning}场，不计战绩。"
+        f"隔离主推仍保留{quarantined_primary['matches']}场"
+        f"{quarantined_primary['wins']}胜{quarantined_primary['losses']}负"
+        f"{quarantined_primary['pushes']}走，收益"
+        f"{quarantined_primary['profit_units']:+.2f}u，ROI "
+        f"{roi_text(quarantined_primary)}，仅作描述与取证参考。"
         f"主推分市场统计{primary_by_market['matches']}项"
         f"{primary_by_market['wins']}胜{primary_by_market['losses']}负{primary_by_market['pushes']}走。"
         "次推仅作赛前参考，不结算、不计命中率或金额。"
-        f"单市场不足{minimum}个有效样本时只保存guardrail，不调整全局权重。"
+        f"单市场{minimum}个严格样本只是人工复核触发线，不自动调整模型参数或市场政策。"
     )
 
 
@@ -2557,7 +4150,14 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             )
         }
         matches = int(league_stats["reviewed_matches"])
-        sample_tier = "anecdotal" if matches < 10 else "provisional" if matches < 20 else "established"
+        strict_matches = int(league_stats["strict_forward_reviewed_matches"])
+        sample_tier = (
+            "anecdotal"
+            if strict_matches < 10
+            else "provisional"
+            if strict_matches < 20
+            else "review_ready"
+        )
         primary = league_stats["primary"]
         roi = primary.get("roi")
         roi_text = "—" if roi is None else f"{float(roi) * 100:+.2f}%"
@@ -2565,18 +4165,24 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "league_key": league_key,
             "source_labels": league_stats["source_labels"],
             "reviewed_matches": matches,
+            "strict_forward_reviewed_matches": strict_matches,
             "primary_record_matches": league_stats["primary_record_matches"],
             "no_primary_reviewed_matches": league_stats["no_primary_reviewed_matches"],
+            "strict_no_primary_reviewed_matches": league_stats[
+                "strict_no_primary_reviewed_matches"
+            ],
             "learning_samples": league_stats["learning_samples"],
+            "selection_policy": league_stats["selection_policy"],
             "sample_tier": sample_tier,
-            "minimum_graded_per_market_for_weight_change": minimum,
-            "sample_threshold_met_by_market": sample_threshold,
+            "minimum_graded_per_market_for_manual_review": minimum,
+            "sample_review_trigger_met_by_market": sample_threshold,
             "decision": (
-                "manual_feature_level_review_required"
+                "manual_model_validation_required"
                 if any(sample_threshold.values())
-                else "hold_weights_insufficient_league_sample"
+                else "hold_insufficient_strict_league_sample"
             ),
             "active_weight_adjustments": {},
+            "parameter_change_authorized": False,
             "summary": (
                 f"{league_key}：主推{primary['matches']}场"
                 f"{primary['wins']}胜{primary['losses']}负{primary['pushes']}走，"
@@ -2587,6 +4193,7 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "primary_by_market": league_stats["primary_by_market"],
             "all_formal": league_stats["all_formal"],
             "secondary_tracking": "disabled",
+            "one_x_two_metrics": league_stats["one_x_two_metrics"],
             "exact_scores": league_stats["exact_scores"],
             "recent_learnings": league_stats["recent_learnings"],
         }
@@ -2626,20 +4233,28 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "reviewed_matches": stats["reviewed_matches"],
         "primary_record_matches": stats["primary_record_matches"],
         "no_primary_reviewed_matches": stats["no_primary_reviewed_matches"],
+        "strict_no_primary_reviewed_matches": stats[
+            "strict_no_primary_reviewed_matches"
+        ],
         "learning_samples": stats["learning_samples"],
-        "minimum_graded_per_market_for_weight_change": minimum,
-        "weight_change_eligible": eligibility,
-        "active_weight_adjustments": existing.get("active_weight_adjustments", {}),
+        "selection_policy": stats["selection_policy"],
+        "one_x_two_metrics": stats["one_x_two_metrics"],
+        "minimum_graded_per_market_for_manual_review": minimum,
+        "sample_review_trigger_met_by_market": eligibility,
+        "weight_change_eligible": {market: False for market in eligibility},
+        "active_weight_adjustments": {},
+        "parameter_change_authorized": False,
+        "market_status_policy_version": STRICT_OOS_POLICY_VERSION,
+        "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
         "summary": dynamic_calibration_summary(stats, minimum),
         "guardrails": guardrails,
         "stats": stats,
         "league_profiles": league_calibration_profiles(stats, minimum),
     }
     if not any(eligibility.values()):
-        calibration["decision"] = "hold_weights_insufficient_sample"
-        calibration["active_weight_adjustments"] = {}
+        calibration["decision"] = "hold_insufficient_strict_sample"
     else:
-        calibration["decision"] = "manual_feature_level_review_required"
+        calibration["decision"] = "manual_model_validation_required"
     if args.write:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         temp = output_file.with_suffix(".json.tmp")
@@ -2657,7 +4272,17 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--match-id", required=True)
     record.add_argument("--analysis-stage", choices=("initial", "lineup-check"), default="initial")
     record.add_argument("--league", required=True)
-    record.add_argument("--kickoff", required=True, help="ISO-like local datetime including timezone when known")
+    record.add_argument("--kickoff", required=True, help="User-local kickoff datetime with explicit timezone")
+    record.add_argument(
+        "--page-status",
+        required=True,
+        choices=("prematch", "live", "finished"),
+        help="Explicit source-page state; only prematch can be archived",
+    )
+    record.add_argument("--source-kickoff", required=True)
+    record.add_argument("--source-timezone", required=True)
+    record.add_argument("--user-local-kickoff", required=True)
+    record.add_argument("--user-timezone", required=True)
     record.add_argument("--home-team", required=True)
     record.add_argument("--away-team", required=True)
     record.add_argument("--predicted-score", required=True)
@@ -2708,6 +4333,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--recommendation", default="")
     record.add_argument("--source-url", default="")
     record.add_argument("--notes", default="")
+    record.add_argument("--model-version")
+    record.add_argument(
+        "--score-model-file",
+        help="UTF-8 JSON score-model snapshot; its exact bytes are SHA-256 archived",
+    )
     record.add_argument("--data-quality", choices=("high", "medium", "low", "unknown"), default="unknown")
     record.add_argument("--lineup-confirmed", action="store_true")
     record.add_argument("--fundamental-evidence", action="store_true")
@@ -2751,6 +4381,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model probability minus no-vig market probability in percentage points",
     )
     record.add_argument("--asian-firm-count", type=int)
+    record.add_argument("--asian-market-complete", action="store_true")
+    record.add_argument("--asian-market-odds", action="append")
+    record.add_argument("--asian-market-probability", type=float)
+    record.add_argument("--asian-market-source")
+    record.add_argument("--asian-market-collected-at")
+    record.add_argument("--asian-price-basis", choices=("consensus", "median"))
+    record.add_argument("--asian-full-win-probability", type=float)
+    record.add_argument("--asian-half-win-probability", type=float)
+    record.add_argument("--asian-push-probability", type=float)
+    record.add_argument("--asian-half-loss-probability", type=float)
+    record.add_argument("--asian-loss-probability", type=float)
     record.add_argument("--asian-cover-probability", type=float)
     record.add_argument("--asian-cover-distribution-validated", action="store_true")
     record.add_argument("--asian-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
@@ -2768,6 +4409,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model probability minus no-vig market probability in percentage points",
     )
     record.add_argument("--total-firm-count", type=int)
+    record.add_argument("--total-market-complete", action="store_true")
+    record.add_argument("--total-market-odds", action="append")
+    record.add_argument("--total-market-probability", type=float)
+    record.add_argument("--total-market-source")
+    record.add_argument("--total-market-collected-at")
+    record.add_argument("--total-price-basis", choices=("consensus", "median"))
+    record.add_argument("--total-full-win-probability", type=float)
+    record.add_argument("--total-half-win-probability", type=float)
+    record.add_argument("--total-push-probability", type=float)
+    record.add_argument("--total-half-loss-probability", type=float)
+    record.add_argument("--total-loss-probability", type=float)
     record.add_argument("--total-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
     record.add_argument("--half-market", choices=("1x2", "asian", "total"))
     record.add_argument("--half-side", choices=("home", "draw", "away", "over", "under"))
@@ -2780,10 +4432,42 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--half-ev", type=float)
     record.add_argument("--half-edge-pp", type=float)
     record.add_argument("--half-firm-count", type=int)
+    record.add_argument("--half-market-complete", action="store_true")
+    record.add_argument("--half-market-odds", action="append")
+    record.add_argument("--half-market-probability", type=float)
+    record.add_argument("--half-market-source")
+    record.add_argument("--half-market-collected-at")
+    record.add_argument("--half-price-basis", choices=("consensus", "median"))
+    record.add_argument("--half-full-win-probability", type=float)
+    record.add_argument("--half-half-win-probability", type=float)
+    record.add_argument("--half-push-probability", type=float)
+    record.add_argument("--half-half-loss-probability", type=float)
+    record.add_argument("--half-loss-probability", type=float)
     record.add_argument("--half-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
     record.add_argument("--htft-pick", action="append", help="Repeatable SELECTION:ODDS:PROBABILITY:EV, e.g. DD:3.40:0.31:0.054")
     record.add_argument(
         "--htft-odds-format", choices=("decimal", "hong_kong")
+    )
+    record.add_argument("--htft-market-complete", action="store_true")
+    record.add_argument("--htft-market-odds", action="append")
+    record.add_argument(
+        "--htft-market-probability",
+        action="append",
+        help="Required nine times as SELECTION:NO_VIG_PROBABILITY",
+    )
+    record.add_argument(
+        "--htft-edge-pp",
+        action="append",
+        help="Optional repeatable SELECTION:EDGE_PP; supplied values are audited",
+    )
+    record.add_argument("--htft-market-source")
+    record.add_argument("--htft-market-collected-at")
+    record.add_argument("--htft-price-basis", choices=("consensus", "median"))
+    record.add_argument("--htft-firm-count", type=int)
+    record.add_argument(
+        "--htft-market-signal",
+        choices=("aligned", "neutral", "against", "conflicting", "unknown"),
+        default="unknown",
     )
     record.add_argument(
         "--goal-range-selection",
@@ -2804,6 +4488,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="unknown",
     )
     record.add_argument("--goal-range-market-complete", action="store_true")
+    record.add_argument("--goal-range-market-odds", action="append")
     record.add_argument("--goal-range-market-probability", type=float)
     record.add_argument("--goal-range-market-source")
     record.add_argument("--goal-range-market-collected-at")
@@ -2825,6 +4510,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="unknown",
     )
     record.add_argument("--btts-market-complete", action="store_true")
+    record.add_argument("--btts-market-odds", action="append")
     record.add_argument("--btts-market-probability", type=float)
     record.add_argument("--btts-market-source")
     record.add_argument("--btts-market-collected-at")
@@ -2845,6 +4531,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="unknown",
     )
     record.add_argument("--corner-total-market-complete", action="store_true")
+    record.add_argument("--corner-total-market-odds", action="append")
     record.add_argument("--corner-total-market-probability", type=float)
     record.add_argument("--corner-total-market-source")
     record.add_argument("--corner-total-market-collected-at")
@@ -2876,6 +4563,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--corner-handicap-market-complete", action="store_true"
     )
+    record.add_argument("--corner-handicap-market-odds", action="append")
     record.add_argument("--corner-handicap-market-probability", type=float)
     record.add_argument("--corner-handicap-market-source")
     record.add_argument("--corner-handicap-market-collected-at")
@@ -2887,8 +4575,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--corner-handicap-push-probability", type=float)
     record.add_argument("--corner-handicap-half-loss-probability", type=float)
     record.add_argument("--corner-handicap-loss-probability", type=float)
-    record.add_argument("--force", action="store_true")
-
+    record.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     review = sub.add_parser("review", help="Settle an archived prediction after verified full-time")
     review.add_argument(
         "--verified-finished",
@@ -2911,6 +4598,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verified 90-minute away corner count; required for a corner primary",
     )
     review.add_argument("--key-learning", required=True)
+    review.add_argument("--verification-source", required=True)
+    review.add_argument("--verification-collected-at", required=True)
 
     migrate = sub.add_parser("migrate-primary", help="Backfill one active primary pick without re-settling reviewed matches")
     migrate.add_argument(
