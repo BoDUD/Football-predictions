@@ -23,21 +23,26 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- Exactly two user-facing exact-score scenarios. For a formal total primary, rank them inside the primary's net-profit branch and show both full-match probability and conditional share; otherwise use the unconditional Top 2
+- The system-selected paired joint match events from one validated path posterior: normally two, or three only for a versioned complex/distributed top cluster
 
 ### Mode B: 可视化模式 (Visual/Detailed)
-Full analysis with compact Markdown tables and probability bars. Use this stable order:
+Use one simple deterministic image plus analytical text. Initial and lineup-check images share
+the same fixed eight columns: `编号`, `时间`, `赛事`, `主队 vs 客队`, `主推`, `总进球`, `半全场`,
+and `波胆`. The stage appears in the title/subtitle and does not change the table. In the image,
+show only the highest-probability goal range with its probability and lead over second place.
+Show HT/FT and exact score as positionally paired events from the same path posterior: normally
+two pairs, or three only when the versioned complexity rule detects a divided top cluster.
 
-1. Match card: competition, kickoff time/timezone, status, home and away teams
-2. Market movement table: opening vs current Asian handicap, totals, and available corner lines, with direction labels
-3. 1X2 market table: representative/consensus odds, removed margin, and normalized probabilities
-4. Probability bars: home/draw/away plus the strongest available football and corner candidates
-5. Unified EV comparison table: Asian handicap, totals, goal ranges, BTTS, corner totals, corner handicaps, first-half, and qualified HT/FT candidates
-6. Evidence panel: recent form, home/away split, H2H, motivation, lineup/injuries, and data quality
-7. Decision card: primary pick, secondary lean, key reasons, and risks
-8. Exact-score panel: exactly two user-facing scenarios with unconditional model probability and `高方差参考（不计主推）`. For a formal total primary, also show `主推成立时` conditional share; do not add a separate 0-0 row unless explicitly requested
-9. Half-time panel: first-half probabilities, likely half-time scores, first-half Asian/total lines, and the best qualified direction
-10. HT/FT matrix: HH through AA probabilities and current odds/EV, followed by exactly two probability-selected scenarios labelled `主概率形态` and `备选概率形态`. Show their diagnostic qualification result, then apply the active market policy; under the current strict policy both remain observations. Do not show a rank column.
+Keep the full analysis in accompanying text or machine audit, in this stable order:
+
+1. Match identity, kickoff time/timezone, status, and lineup state
+2. Opening-to-current Asian handicap, totals, 1X2, and available corner movement
+3. Complete half-time, full-time 1X2, goal-range, and BTTS distributions with probability gaps
+4. Unified EV comparison for supported candidate markets
+5. Fundamentals, home/away split, H2H, motivation, lineup/injuries, and data quality
+6. Primary/no-primary decision, secondary references, failed gates, and risks
+7. The same system-selected paired joint events shown in the image
+8. Internal HT/FT matrix and standalone score diagnostics only when audit detail is useful
 
 Render probability bars with a fixed-width 20-block scale, for example:
 
@@ -47,7 +52,7 @@ Render probability bars with a fixed-width 20-block scale, for example:
 客胜  25%  █████░░░░░░░░░░░░░░░
 ```
 
-Keep the visual hierarchy even when data is missing. Mark unavailable values as `数据未取得` or `待公布` instead of estimating them. Generate a separate HTML artifact only when the user asks for an HTML/report file or when interactive comparison is materially useful.
+Keep the visual hierarchy even when data is missing. Mark unavailable values as `数据未取得` or `待公布` instead of estimating them. If no validated joint-posterior artifact exists, show `数据不足` rather than rebuilding scenarios from separate fields or prose. Images must never use an ellipsis or three-dot truncation; wrap at semantic boundaries, reduce to a readable font size, grow the row, or expand the canvas. A completed review also receives a deterministic image in the same visual family, bound to the final active settlement basis and verified result; it must retain `主推：无正式推荐（不结算、不计战绩）` when applicable and must not rewrite the pre-match direction. Generate a separate HTML artifact only when the user asks for an HTML/report file or when interactive comparison is materially useful.
 
 ---
 
@@ -173,14 +178,29 @@ literal win probability on lines with push or split settlement. The fitted score
 supplies `full_win`, `half_win`, `push`, `half_loss`, and `full_loss`; the current market
 supplies price and no-vig comparison probability. Keep those concepts separate.
 
+### Conditional market evidence
+
+Bookmaker data may condition a match-path posterior only through a versioned method whose
+weights, regularization, missing-market behavior, and calibration have passed strict
+walk-forward or live-forward validation. Correlated 1X2, Asian, totals, first-half, and HT/FT
+markets are not independent observations and must not be multiplied together with unit
+weight. If a price participates in conditioning, it cannot be reused as independent EV/edge
+evidence against the resulting posterior. Use a documented leave-one-bookmaker-out target
+price, or label the comparison non-independent and ineligible. Initial-archive market evidence
+may be at most 60 minutes old; lineup-check evidence may be at most 30 minutes old. Evidence
+outside that stage-specific TTL fails closed instead of appearing as current. Incomplete,
+post-kickoff, or uncalibrated market data remain audit context and receive zero conditioning
+weight. A `model_only` posterior is independent of missing market evidence and must say so.
+
 ---
 
 ## Step 4: Model Prediction
 
 Do not invent a Logistic Regression result from prose weights. The executable baseline is
 `scripts/score_model.py`: a time-decayed attack/defence Poisson model with the Dixon-Coles
-low-score correction. It produces one canonical regulation-time score matrix from which
-every football-goal market is derived.
+low-score correction. It produces the canonical regulation-time score prior. User-facing
+football markets and scenarios require a separately versioned unified path posterior that
+binds this prior to the half-time and second-half components.
 
 ### 4.1 Fit a versioned baseline
 
@@ -218,12 +238,42 @@ market reproduces the relevant cell sum. Archive the prediction artifact/model p
 with the formal record. A hand-computed probability may be shown as an observation but may
 not become a formal pick.
 
-### 4.3 Market calibration is separate from the football model
+### 4.3 Build the unified match-path posterior
+
+Represent a match path as `(half_home, half_away, second_home, second_away)` so the full-time
+score is determined by addition. Before IPF, run the complete Hall support-feasibility audit
+for every full-time block and fail before fitting when a requested marginal cannot be carried
+by the available path support. Build a non-negative normalized path distribution from the
+registered half-time and second-half score components, then use a documented IPF or
+minimum-KL procedure to reproduce the canonical full-time exact-score marginal, the verified
+half-time marginal, and the HT/FT 3x3 marginal. New artifacts store a compact, hash-bound path
+kernel instead of a duplicated list of every joint cell. Validation must reconstruct the full
+four-dimensional paths and independently reproduce HT, second-half, FT, HT/FT, derived-market
+and Top-2 outputs. The artifact must store its state definition, input hashes, construction
+version, Hall audit, convergence and tail audit, and every recomputed marginal.
+
+Rank user-facing scenarios only after aggregating this distribution to genuine
+`(HT/FT × full-time score)` joint events. The joint probability is a sum of path cells, not the
+product of an HT/FT marginal and a score marginal. Normally display the first two events; add
+the third only when a versioned probability-gap and minimum-mass rule classifies the head as
+complex. Keep HT/FT and score in the same order so every displayed position remains one event.
+Derive half-time, 1X2, total goals, goal range, and BTTS from the same artifact. Preserve legacy
+unconditional exact-score and HT/FT Top 2 fields only as machine-readable diagnostics; never
+place them side by side as user scenarios, reorder them for terminal-result agreement, or fill
+a missing joint event by hand.
+
+If the artifact fails fixture, hash, cutoff, timing, normalization, tail, convergence, Hall
+feasibility, kernel reconstruction, or marginal consistency validation, publish `数据不足`
+and no joint scenario. A model average,
+old archive, prose conclusion, or terminal-result filter is not an accepted fallback.
+
+### 4.4 Market calibration is separate from the football model
 
 Read `<workspace>/.codex/soccer-predict/calibration.json` for forward-test metrics and
-guardrails. It does not modify the fitted score model. Use market prices only to calculate a
-no-vig comparison probability and EV; never blend the price back into the score matrix and
-then claim the resulting edge is independent.
+guardrails. It does not modify the fitted score model. By default, use market prices only to
+calculate a no-vig comparison probability and EV. A versioned strictly forward-calibrated
+conditioner may update the unified path posterior, but it must preserve the provenance of every
+market input and may not claim the same conditioning price as independent edge evidence.
 
 ### Market-alignment gate
 
@@ -275,7 +325,7 @@ Select exactly one primary only when the top candidate remains best under reason
 and probability sensitivity. Otherwise use no primary. Never force a direction merely to
 increase the number of predictions.
 
-### 4.4 Lineup and contextual effects
+### 4.5 Lineup and contextual effects
 
 Do not add fixed goal increments such as “goalkeeper absent = +0.75 goals” unless that
 coefficient was learned from the training population and versioned in the model. Confirmed
@@ -288,16 +338,17 @@ pick whose sign changes across the range.
 
 ## Step 5: Win Probability & Betting Advice
 
-Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate the expanded markets from their required distributions, calculate two exact-score candidates for every valid pre-match model, then calculate first-half and HT/FT markets when the required data is available.
+Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate every football-goal market and rank the user-facing paired joint events from one validated match-path posterior. Display two events normally and three only for a versioned complex head distribution. Keep standalone exact-score and HT/FT rankings as internal diagnostics only. Calculate the independent corner markets from their own required distribution.
 
 ### Win Probability Prediction
-Aggregate the canonical score matrix without blending bookmaker prices into it:
+Aggregate the validated unified path posterior; use a market-conditioned posterior only under the calibrated and provenance-safe rules above:
 - Asian handicap: full-win, half-win, push, half-loss, and full-loss probabilities for the exact side and line
 - Over/Under: the same five settlement states for the exact side and line
 - Goal ranges: sum every matching cell in the complete football score matrix
 - BTTS: sum cells where both teams score; the opposite side is its complement
-- 1X2 and exact score: sum or rank cells from this same matrix
-- Corner total and handicap: derive from independent total-corner and corner-margin distributions
+- 1X2 and exact score: sum or rank the full-time marginal of the same path posterior
+- HT/FT and joint display events: sum the same path cells, never combine independently ranked marginals
+- Corner total and handicap: derive from independent total-corner and corner-margin distributions and never bind them to a goal path without a separately validated cross-model joint distribution
 
 ### Expected Value (EV) Calculation
 
@@ -319,12 +370,12 @@ format. A caller-supplied value is only an assertion to audit; it is never autho
 
 ### Final Output
 1. Best threshold-qualified recommendation from the unified market pool; if none qualifies, show the highest-ranked observation as `不下注`
-2. Exactly two user-facing exact-score scenarios. Preserve the unconditional Top 2 internally; for a formal total primary, display the two highest-probability net-profit scenarios and label the conditioning explicitly
-3. Confidence level for each recommendation
-4. Best qualified first-half direction, or `无正EV建议`
-5. A 3x3 HT/FT probability matrix and exactly two probability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, then select the two largest joint cells with `probability_top2_v3_post_selection` and the canonical HH, HD, HA, DH, DD, DA, AH, AD, AA tie-break. Conditional follow-through, state continuity, aggregate full-time coherence, exact-score result classes, odds, and EV remain visible audits or qualification gates only; none may replace a probability Top-2 cell. Pass `league_key`, current model hash, and the registry-issued `league_pair_gate_evidence`; the ranker must verify its dataset/evaluation/model/league lineage instead of using a hard-coded historical table. Historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Metrics from an untimestamped full-time-opening research cohort stay confined to that cohort. Diagnostic price qualification additionally requires all nine executable current HT/FT odds from one market snapshot, with source and pre-kickoff collection time; partial prices plus caller-supplied probabilities cannot qualify. Under `strict-oos-market-policy-v1`, keep both scenarios observation-only and require the ranker to expose zero formal picks regardless of diagnostic gates.
+2. One highest-probability goal range plus its probability lead in the compact image; retain the complete goal-range distribution in text/audit
+3. Two user-facing `(HT/FT × full-time score)` joint events normally, or three only when the versioned complexity rule passes; if the artifact is unavailable, show `数据不足` and no fallback scenarios
+4. Confidence level for each recommendation and the best qualified first-half direction, or `无正EV建议`
+5. Complete half-time, 1X2 and BTTS distributions in text/audit, plus a 3x3 HT/FT marginal matrix when audit detail is useful. The legacy `probability_top2_v3_post_selection` HT/FT Top 2 may remain archived for component evaluation but is not a user-facing scenario list. Pass `league_key`, current model hash, and registry-issued evidence; historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Under `strict-oos-market-policy-v1`, HT/FT remains observation-only regardless of diagnostic gates.
 
-Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
+Treat joint events and standalone exact-score diagnostics only as high-variance references. Never include their Top-1 or Top-2 hits in primary-pick or all-formal accuracy/ROI.
 
 ---
 
@@ -339,7 +390,7 @@ Treat both exact scores only as shape/scenario references. Never include Top-1 o
 记录至少包含：
 
 - 比赛 ID、联赛、带时区的开球时间
-- 主客队和两个按概率排序的预测比分
+- 主客队、按联合概率排序的 `(HT/FT × 全场比分)` 事件，以及绑定的后验 artifact/hash；展示层通常取前 2 项，复杂分布按版本化规则取前 3 项
 - 亚盘选择方、盘口、赔率
 - 大小球方向、盘口、赔率
 - 合格的总进球区间、双方进球、角球大小或角球让球方向及其真实市场赔率
@@ -347,6 +398,6 @@ Treat both exact scores only as shape/scenario references. Never include Top-1 o
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件 Top 2，并让 `--predicted-score` 等于无条件第一项。若唯一主推是全场大小球，再通过两个 `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` 和 `--display-exact-score-event-probability` 保存面向用户的主推条件场景。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件比分 Top 2，仅作为机器可读的全场分布审计，并让 `--predicted-score` 等于无条件第一项；这些字段不得直接驱动卡片。面向用户的配对情景必须另行绑定通过校验的联合路径后验 artifact；展示层通常取联合概率前 2 项，只有头部复杂度规则通过时才取前 3 项。没有该 artifact 时显示 `数据不足`。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推，也不能与联合进球路径硬绑定。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆、联合情景和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from _corner_source_fixture import build_source_bound_dataset
+from scripts import htft_model, joint_scenario_model, score_model
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_store.py"
@@ -41,6 +42,25 @@ HTFT_OBSERVATION_MATRIX = {
 }
 
 CORNER_TEAMS = ("A", "B", "C", "D")
+
+JOINT_SAMPLE_ROWS = [
+    ("2025-01-01", "Alpha", "Bravo", 2, 0, 1, 0),
+    ("2025-01-08", "Charlie", "Delta", 1, 1, 0, 1),
+    ("2025-01-15", "Bravo", "Charlie", 0, 1, 0, 0),
+    ("2025-01-22", "Delta", "Alpha", 1, 3, 1, 1),
+    ("2025-02-01", "Alpha", "Charlie", 2, 1, 1, 0),
+    ("2025-02-08", "Bravo", "Delta", 1, 0, 0, 0),
+    ("2025-02-15", "Charlie", "Alpha", 2, 2, 1, 2),
+    ("2025-02-22", "Delta", "Bravo", 0, 0, 0, 0),
+    ("2025-03-01", "Alpha", "Delta", 3, 1, 2, 0),
+    ("2025-03-08", "Charlie", "Bravo", 1, 0, 0, 0),
+    ("2025-03-15", "Bravo", "Alpha", 1, 2, 1, 1),
+    ("2025-03-22", "Delta", "Charlie", 2, 1, 0, 1),
+]
+JOINT_FIXTURE_ID = "joint-fixture"
+JOINT_INPUT_GENERATED_AT = "2026-07-21T09:54:00Z"
+JOINT_GENERATED_AT = "2026-07-21T09:55:00Z"
+JOINT_KICKOFF = "2026-07-21T10:30:00Z"
 
 
 def write_corner_history(path: Path, *, days: int = 16) -> None:
@@ -121,8 +141,26 @@ def write_htft_observation_files(
     match_id: str,
     *,
     matrix=None,
+    half_time_anchor=None,
+    drop_ranker_anchor=False,
 ):
     probabilities = dict(matrix or HTFT_OBSERVATION_MATRIX)
+    half = {
+        result: sum(probabilities[f"{result}{full_result}"] for full_result in "HDA")
+        for result in "HDA"
+    }
+    full = {
+        result: sum(probabilities[f"{half_result}{result}"] for half_result in "HDA")
+        for result in "HDA"
+    }
+
+    def named_marginal(values):
+        return {
+            "home": values["H"],
+            "draw": values["D"],
+            "away": values["A"],
+        }
+
     model = {
         "artifact_type": "soccer_htft_prediction",
         "schema_version": "1.0.0",
@@ -139,6 +177,7 @@ def write_htft_observation_files(
             "generated_before_kickoff": True,
             "strictly_before_kickoff_utc_date": True,
             "training_cutoff_date": "2026-07-20",
+            "external_anchor_enabled": half_time_anchor is not None,
             "training": {
                 "competition_key": "test_league",
                 "source_data_hash": "sha256:" + "5" * 64,
@@ -146,24 +185,39 @@ def write_htft_observation_files(
                 "start_date": "2020-01-01",
                 "end_date": "2026-07-20",
             },
+            "marginal_targets": {
+                "half_time": (
+                    {
+                        "origin": "external_de_vigged_anchor",
+                        "de_vigged": True,
+                        "source": half_time_anchor["source"],
+                        "captured_at": half_time_anchor["captured_at"],
+                        "probabilities": named_marginal(half),
+                    }
+                    if half_time_anchor is not None
+                    else {
+                        "origin": "model_component",
+                        "probabilities": named_marginal(half),
+                    }
+                ),
+                "full_time": {
+                    "origin": "model_component",
+                    "probabilities": named_marginal(full),
+                },
+            },
         },
         "htft": {"code_probabilities": probabilities},
     }
     model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
-    half = {
-        result: sum(probabilities[f"{result}{full}"] for full in "HDA")
-        for result in "HDA"
-    }
-    full = {
-        result: sum(probabilities[f"{half_result}{result}"] for half_result in "HDA")
-        for result in "HDA"
-    }
     ranker = memory_store.htft_ranker.rank_htft(
         probabilities,
         half,
         full,
         league_key="test_league",
         model_hash=model["model_hash"],
+        anchor_context=(
+            None if drop_ranker_anchor else half_time_anchor
+        ),
     )
     model_path = Path(base_dir) / f"htft-model-{match_id}.json"
     ranker_path = Path(base_dir) / f"htft-ranker-{match_id}.json"
@@ -244,6 +298,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "notes": "",
         "model_version": "dixon-coles-time-decay/1.0.0",
         "score_model_file": None,
+        "joint_scenario_file": None,
         "htft_observation_model_file": None,
         "htft_observation_ranker_file": None,
         "corner_observation_model_dir": None,
@@ -618,6 +673,77 @@ class MemoryStoreTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.corner_temporary = tempfile.TemporaryDirectory()
         cls.corner_base = Path(cls.corner_temporary.name)
+        joint_history = cls.corner_base / "joint-history.csv"
+        with joint_history.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, lineterminator="\n")
+            writer.writerow(
+                [
+                    "date",
+                    "home_team",
+                    "away_team",
+                    "home_goals",
+                    "away_goals",
+                    "half_home_goals",
+                    "half_away_goals",
+                ]
+            )
+            writer.writerows(JOINT_SAMPLE_ROWS)
+        cls.joint_model = htft_model.fit_model(
+            joint_history,
+            iterations=30,
+            learning_rate=0.025,
+            regularization=0.03,
+            half_time_half_life_days=180.0,
+            second_half_half_life_days=180.0,
+            full_time_half_life_days=180.0,
+            competition_key="test_league",
+            dataset_manifest_hash="sha256:" + "a" * 64,
+        )
+        cls.joint_model["generated_at"] = "2026-07-20T00:00:00Z"
+        for component in cls.joint_model["components"].values():
+            component["generated_at"] = "2026-07-20T00:00:00Z"
+        htft_model.validate_model(cls.joint_model)
+        cls.joint_htft_prediction = htft_model.predict_model(
+            cls.joint_model,
+            "Alpha",
+            "Bravo",
+            kickoff=JOINT_KICKOFF,
+            generated_at=JOINT_INPUT_GENERATED_AT,
+            max_goals=12,
+            hard_max_goals=30,
+        )
+        cls.joint_score_prediction = score_model.predict_model(
+            cls.joint_model["components"]["full_time"],
+            "Alpha",
+            "Bravo",
+            kickoff=JOINT_KICKOFF,
+            generated_at=JOINT_INPUT_GENERATED_AT,
+            max_goals=12,
+            hard_max_goals=30,
+        )
+        cls.joint_prediction = joint_scenario_model.predict_joint_scenarios(
+            cls.joint_model,
+            cls.joint_score_prediction,
+            cls.joint_htft_prediction,
+            generated_at=JOINT_GENERATED_AT,
+            expected_match_id=JOINT_FIXTURE_ID,
+        )
+        matrix = cls.joint_htft_prediction["htft"]["code_probabilities"]
+        half = {
+            result: math.fsum(matrix[f"{result}{full}"] for full in "HDA")
+            for result in "HDA"
+        }
+        full = {
+            result: math.fsum(matrix[f"{half_result}{result}"] for half_result in "HDA")
+            for result in "HDA"
+        }
+        cls.joint_htft_ranking = memory_store.htft_ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            league_key="test_league",
+            model_hash=cls.joint_htft_prediction["model_hash"],
+        )
         source_dir = cls.corner_base / "source"
         source_dir.mkdir()
         cls.corner_history, _manifest = build_source_bound_dataset(
@@ -729,6 +855,388 @@ class MemoryStoreTests(unittest.TestCase):
             corner_observation_ranker_file=ranking_file,
             **overrides,
         )
+
+    def joint_record_args(
+        self,
+        base: str,
+        *,
+        joint_prediction: dict | None = None,
+        score_prediction: dict | None = None,
+        htft_prediction: dict | None = None,
+        htft_ranking: dict | None = None,
+        **overrides,
+    ) -> SimpleNamespace:
+        score = copy.deepcopy(score_prediction or self.joint_score_prediction)
+        htft = copy.deepcopy(htft_prediction or self.joint_htft_prediction)
+        ranking = copy.deepcopy(htft_ranking or self.joint_htft_ranking)
+        joint = copy.deepcopy(joint_prediction or self.joint_prediction)
+        paths = {
+            "score_model_file": Path(base) / "joint-score.json",
+            "htft_observation_model_file": Path(base) / "joint-htft.json",
+            "htft_observation_ranker_file": Path(base) / "joint-htft-ranker.json",
+            "joint_scenario_file": Path(base) / "joint-scenario.json",
+        }
+        for key, payload in (
+            ("score_model_file", score),
+            ("htft_observation_model_file", htft),
+            ("htft_observation_ranker_file", ranking),
+            ("joint_scenario_file", joint),
+        ):
+            paths[key].write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+
+        matrix = score["score_matrix"]["probabilities"]
+        ranked = sorted(
+            (
+                (float(probability), home, away)
+                for home, row in enumerate(matrix)
+                for away, probability in enumerate(row)
+            ),
+            key=lambda item: (-item[0], item[1], item[2]),
+        )
+        top_two = ranked[:2]
+        zero_zero_rank = next(
+            rank
+            for rank, (_probability, home, away) in enumerate(ranked, start=1)
+            if home == 0 and away == 0
+        )
+        one_x_two = score["one_x_two"]
+        return record_args(
+            base,
+            match_id=JOINT_FIXTURE_ID,
+            league="test_league",
+            home_team="Alpha",
+            away_team="Bravo",
+            predicted_score=f"{top_two[0][1]}-{top_two[0][2]}",
+            exact_score_pick=[
+                f"{home}-{away}:{probability:.17g}"
+                for probability, home, away in top_two
+            ],
+            zero_zero_probability=float(matrix[0][0]),
+            zero_zero_rank=zero_zero_rank,
+            home_win_probability=float(one_x_two["home"]),
+            draw_probability=float(one_x_two["draw"]),
+            away_win_probability=float(one_x_two["away"]),
+            primary_market="none",
+            asian_side=None,
+            total_side=None,
+            model_version=score["model_version"],
+            **{key: str(path) for key, path in paths.items()},
+            **overrides,
+        )
+
+    def test_record_parser_exposes_joint_scenario_file(self):
+        parsed = memory_store.build_parser().parse_args(
+            [
+                "record",
+                "--match-id",
+                "fixture",
+                "--league",
+                "test_league",
+                "--kickoff",
+                "2026-07-21T19:30:00+09:00",
+                "--page-status",
+                "prematch",
+                "--source-kickoff",
+                "2026-07-21T18:30:00+08:00",
+                "--source-timezone",
+                "Asia/Shanghai",
+                "--user-local-kickoff",
+                "2026-07-21T19:30:00+09:00",
+                "--user-timezone",
+                "Asia/Tokyo",
+                "--home-team",
+                "Alpha",
+                "--away-team",
+                "Bravo",
+                "--predicted-score",
+                "1-0",
+                "--zero-zero-probability",
+                "0.1",
+                "--zero-zero-rank",
+                "4",
+                "--primary-market",
+                "none",
+                "--joint-scenario-file",
+                "joint.json",
+            ]
+        )
+        self.assertEqual(parsed.joint_scenario_file, "joint.json")
+
+    def test_joint_scenario_artifact_is_archived_and_publicly_validated(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(self.joint_record_args(base))["record"]
+
+            audit = created["joint_scenario_audit"]
+            self.assertEqual(
+                audit["schema_version"],
+                memory_store.JOINT_SCENARIO_AUDIT_SCHEMA_VERSION,
+            )
+            self.assertEqual(audit["status"], "validated_diagnostic")
+            self.assertFalse(audit["formal_eligible"])
+            self.assertEqual(audit["fixture_binding"]["fixture_id"], JOINT_FIXTURE_ID)
+            self.assertEqual(audit["snapshot"], self.joint_prediction)
+            self.assertEqual(audit["joint_top_two"], self.joint_prediction["joint_top_two"])
+            self.assertEqual(audit["derived"], self.joint_prediction["derived"])
+            binding = audit["active_version_binding"]
+            self.assertEqual(
+                set(binding),
+                {
+                    "analysis_stage",
+                    "version_archived_at",
+                    "fixture_id",
+                    "canonical_score_content_hash",
+                    "htft_prediction_content_hash",
+                    "htft_prediction_hash",
+                    "registered_model_hash",
+                    "dataset_manifest_hash",
+                },
+            )
+            self.assertEqual(binding["analysis_stage"], "initial")
+            self.assertEqual(binding["version_archived_at"], created["updated_at"])
+            self.assertEqual(binding["fixture_id"], JOINT_FIXTURE_ID)
+            self.assertEqual(
+                memory_store.validated_joint_scenario_audit(created),
+                self.joint_prediction,
+            )
+            self.assertEqual(
+                memory_store.revision_snapshot(created)["joint_scenario_audit"],
+                audit,
+            )
+            self.assertEqual(
+                memory_store.settlement_basis_for_record(created)[
+                    "joint_scenario_audit"
+                ],
+                audit,
+            )
+
+    def test_joint_scenario_has_no_legacy_or_top_level_fallback(self):
+        legacy = {
+            "match_id": JOINT_FIXTURE_ID,
+            "exact_score_picks": [{"score": "1-0", "probability": 0.2}],
+            "htft_picks": [{"selection": "HH", "probability": 0.3}],
+            "predicted_score": "1-0",
+        }
+        self.assertIsNone(memory_store.validated_joint_scenario_audit(legacy))
+
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(self.joint_record_args(base))["record"]
+            frozen = copy.deepcopy(created)
+            frozen["settlement_basis"] = memory_store.settlement_basis_for_record(
+                created
+            )
+            frozen["status"] = "reviewed"
+            frozen["joint_scenario_audit"]["snapshot"] = {}
+            frozen["score_model_provenance"] = None
+            frozen["candidate_audits"] = []
+            self.assertEqual(
+                memory_store.validated_joint_scenario_audit(frozen),
+                self.joint_prediction,
+            )
+            frozen["settlement_basis"].pop("joint_scenario_audit")
+            self.assertIsNone(memory_store.validated_joint_scenario_audit(frozen))
+
+            reviewed_without_basis = copy.deepcopy(created)
+            reviewed_without_basis["status"] = "reviewed"
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(reviewed_without_basis)
+            )
+
+    def test_joint_scenario_generated_at_archive_and_kickoff_boundaries(self):
+        accepted = copy.deepcopy(self.joint_prediction)
+        accepted["generated_at"] = "2026-07-21T10:00:00.000000Z"
+        accepted["prediction_hash"] = joint_scenario_model.calculate_prediction_hash(
+            accepted
+        )
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                self.joint_record_args(base, joint_prediction=accepted)
+            )["record"]
+            self.assertEqual(
+                memory_store.validated_joint_scenario_audit(created)["generated_at"],
+                "2026-07-21T10:00:00.000000Z",
+            )
+
+        after_archive = copy.deepcopy(self.joint_prediction)
+        after_archive["generated_at"] = "2026-07-21T10:01:00.000000Z"
+        after_archive["prediction_hash"] = (
+            joint_scenario_model.calculate_prediction_hash(after_archive)
+        )
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "after archive time"):
+                memory_store.cmd_record(
+                    self.joint_record_args(base, joint_prediction=after_archive)
+                )
+
+        at_kickoff = copy.deepcopy(self.joint_prediction)
+        at_kickoff["generated_at"] = JOINT_KICKOFF
+        at_kickoff["prediction_hash"] = joint_scenario_model.calculate_prediction_hash(
+            at_kickoff
+        )
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "invalid joint scenario artifact"):
+                memory_store.cmd_record(
+                    self.joint_record_args(base, joint_prediction=at_kickoff)
+                )
+
+    def test_joint_scenario_fixture_binding_rejects_record_drift(self):
+        with tempfile.TemporaryDirectory() as base:
+            args = self.joint_record_args(base)
+            created = memory_store.cmd_record(args)["record"]
+            cases = (
+                ("match_id", "wrong-fixture", "fixture_id"),
+                ("home_team", "Other", "home_team"),
+                ("away_team", "Other", "away_team"),
+                ("kickoff", "2026-07-21T19:31:00+09:00", "kickoff"),
+            )
+            for field, value, message in cases:
+                with self.subTest(field=field):
+                    drifted = copy.deepcopy(created)
+                    drifted[field] = value
+                    with self.assertRaisesRegex(ValueError, message):
+                        memory_store.load_joint_scenario_audit(args, drifted)
+
+        missing_id = joint_scenario_model.predict_joint_scenarios(
+            self.joint_model,
+            self.joint_score_prediction,
+            self.joint_htft_prediction,
+            generated_at=JOINT_GENERATED_AT,
+        )
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "requires fixture_id or match_id"):
+                memory_store.cmd_record(
+                    self.joint_record_args(base, joint_prediction=missing_id)
+                )
+
+    def test_joint_scenario_rejects_bound_input_hash_and_lineage_tampering(self):
+        cases = []
+        score_hash = copy.deepcopy(self.joint_prediction)
+        score_hash["inputs"]["canonical_score_prediction"]["content_hash"] = (
+            "sha256:" + "f" * 64
+        )
+        cases.append((score_hash, "canonical score input hash"))
+
+        htft_hash = copy.deepcopy(self.joint_prediction)
+        htft_hash["inputs"]["htft_prediction"]["content_hash"] = (
+            "sha256:" + "e" * 64
+        )
+        cases.append((htft_hash, "HT/FT input hash"))
+
+        model_lineage = copy.deepcopy(self.joint_prediction)
+        model_lineage["inputs"]["registered_htft_model"]["model_hash"] = (
+            "sha256:" + "d" * 64
+        )
+        cases.append((model_lineage, "lineage do not match"))
+
+        for index, (artifact, message) in enumerate(cases):
+            artifact["prediction_hash"] = (
+                joint_scenario_model.calculate_prediction_hash(artifact)
+            )
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as base:
+                with self.assertRaisesRegex(ValueError, message):
+                    memory_store.cmd_record(
+                        self.joint_record_args(base, joint_prediction=artifact)
+                    )
+
+    def test_validated_joint_scenario_audit_fails_closed_on_wrapper_tampering(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(self.joint_record_args(base))["record"]
+            tampered = copy.deepcopy(created)
+            tampered["joint_scenario_audit"]["derived"] = {"forged": True}
+            tampered["joint_scenario_audit"]["audit_hash"] = (
+                memory_store.calculate_joint_scenario_audit_hash(
+                    tampered["joint_scenario_audit"]
+                )
+            )
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(tampered)
+            )
+
+            tampered = copy.deepcopy(created)
+            tampered["joint_scenario_audit"]["snapshot"]["joint_top_two"] = []
+            tampered["joint_scenario_audit"]["snapshot_hash"] = (
+                joint_scenario_model.content_hash(
+                    tampered["joint_scenario_audit"]["snapshot"]
+                )
+            )
+            tampered["joint_scenario_audit"]["audit_hash"] = (
+                memory_store.calculate_joint_scenario_audit_hash(
+                    tampered["joint_scenario_audit"]
+                )
+            )
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(tampered)
+            )
+
+    def test_joint_scenario_revision_preserves_the_previous_immutable_wrapper(self):
+        with tempfile.TemporaryDirectory() as base:
+            initial = memory_store.cmd_record(self.joint_record_args(base))["record"]
+            initial_audit = copy.deepcopy(initial["joint_scenario_audit"])
+
+            forged_lineup_context = copy.deepcopy(initial)
+            forged_lineup_context["analysis_stage"] = "lineup-check"
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(forged_lineup_context)
+            )
+
+            updated = memory_store.cmd_record(
+                self.joint_record_args(base, analysis_stage="lineup-check")
+            )["record"]
+
+            self.assertEqual(len(updated["revisions"]), 1)
+            self.assertEqual(
+                updated["revisions"][0]["joint_scenario_audit"], initial_audit
+            )
+            self.assertEqual(
+                updated["joint_scenario_audit"]["active_version_binding"][
+                    "analysis_stage"
+                ],
+                "lineup-check",
+            )
+            self.assertNotEqual(updated["joint_scenario_audit"], initial_audit)
+            self.assertEqual(
+                memory_store.validated_joint_scenario_audit(updated),
+                self.joint_prediction,
+            )
+
+            revision = copy.deepcopy(updated["revisions"][0])
+            self.assertEqual(
+                memory_store.validated_joint_scenario_audit(revision),
+                self.joint_prediction,
+            )
+            revision["joint_scenario_audit"]["active_version_binding"][
+                "canonical_score_content_hash"
+            ] = "sha256:" + "f" * 64
+            revision["joint_scenario_audit"]["audit_hash"] = (
+                memory_store.calculate_joint_scenario_audit_hash(
+                    revision["joint_scenario_audit"]
+                )
+            )
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(revision)
+            )
+
+            reused_initial = copy.deepcopy(updated)
+            reused_initial["joint_scenario_audit"] = initial_audit
+            self.assertIsNone(
+                memory_store.validated_joint_scenario_audit(reused_initial)
+            )
+
+    def test_joint_scenario_identical_rearchive_ignores_new_archive_timestamp(self):
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(self.joint_record_args(base))
+            previous_now = memory_store.utc_now
+            memory_store.utc_now = lambda: datetime(
+                2026, 7, 21, 10, 0, 1, tzinfo=timezone.utc
+            )
+            try:
+                duplicate = memory_store.cmd_record(self.joint_record_args(base))
+            finally:
+                memory_store.utc_now = previous_now
+
+            self.assertTrue(duplicate["duplicate_ignored"])
+            self.assertEqual(duplicate["record"]["revisions"], [])
 
     def enable_corner_formal_for_settlement_unit_test(self) -> None:
         """Exercise settlement mechanics without weakening the production policy."""
@@ -1025,6 +1533,84 @@ class MemoryStoreTests(unittest.TestCase):
 
     def tearDown(self):
         memory_store.utc_now = self._real_utc_now
+
+    def test_market_evidence_freshness_is_stage_aware_and_recursive(self):
+        archive_time = "2026-07-21T10:00:00Z"
+        initial = {
+            "analysis_stage": "initial",
+            "updated_at": archive_time,
+            "candidate_audits": [
+                {
+                    "candidates": [
+                        {"market_collected_at": "2026-07-21T09:00:00Z"}
+                    ]
+                }
+            ],
+        }
+        memory_store.validate_candidate_audit_freshness(initial)
+        initial["candidate_audits"][0]["candidates"][0][
+            "market_collected_at"
+        ] = "2026-07-21T08:59:59Z"
+        with self.assertRaisesRegex(ValueError, "stale for initial"):
+            memory_store.validate_candidate_audit_freshness(initial)
+
+        lineup = {
+            "analysis_stage": "lineup-check",
+            "updated_at": archive_time,
+            "candidate_audits": [
+                {
+                    "best_observation": {
+                        "market_collected_at": "2026-07-21T09:30:00Z"
+                    }
+                }
+            ],
+        }
+        memory_store.validate_candidate_audit_freshness(lineup)
+        lineup["candidate_audits"][0]["best_observation"][
+            "market_collected_at"
+        ] = "2026-07-21T09:29:59Z"
+        with self.assertRaisesRegex(ValueError, "stale for lineup-check"):
+            memory_store.validate_candidate_audit_freshness(lineup)
+
+    def test_formal_market_evidence_older_than_initial_ttl_is_rejected(self):
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "stale for initial"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="stale-initial-market",
+                        total_market_collected_at="2026-07-21T17:59:59+09:00",
+                    )
+                )
+
+    def test_joint_external_and_attached_evidence_use_stage_ttl(self):
+        base_snapshot = copy.deepcopy(self.joint_prediction)
+        model_only_context = {
+            "analysis_stage": "lineup-check",
+            "updated_at": "2026-07-21T10:00:00Z",
+        }
+        # A true model-only artifact has no external evidence and remains valid.
+        memory_store._validate_joint_market_evidence_freshness(
+            base_snapshot, model_only_context
+        )
+
+        anchored = copy.deepcopy(base_snapshot)
+        anchored["external_anchor_audit"].update(
+            {"enabled": True, "captured_at": "2026-07-21T09:29:59Z"}
+        )
+        with self.assertRaisesRegex(ValueError, "stale for lineup-check"):
+            memory_store._validate_joint_market_evidence_freshness(
+                anchored, model_only_context
+            )
+
+        attached = copy.deepcopy(base_snapshot)
+        attached["market_evidence"].update(
+            {"provided": True, "captured_at": "2026-07-21T09:29:59Z"}
+        )
+        with self.assertRaisesRegex(ValueError, "stale for lineup-check"):
+            memory_store._validate_joint_market_evidence_freshness(
+                attached, model_only_context
+            )
 
     def test_archive_time_state_is_strict_and_forward_only(self):
         with tempfile.TemporaryDirectory() as base:
@@ -1353,6 +1939,36 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(result["league_key"], "测试联赛")
             self.assertEqual(result["league_stats"]["reviewed_matches"], 1)
+
+    def test_review_rejects_half_time_goals_exceeding_full_time_by_team(self):
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(base, primary_market="none", total_side=None)
+            )
+            for half_home, half_away in ((2, 0), (1, 1)):
+                with self.subTest(
+                    half_home=half_home,
+                    half_away=half_away,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError, "cannot exceed the corresponding full-time"
+                    ):
+                        review_command(
+                            SimpleNamespace(
+                                base_dir=base,
+                                verified_finished=True,
+                                verification_source="https://example.test/final",
+                                verification_collected_at=(
+                                    "2026-07-21T21:00:00+09:00"
+                                ),
+                                match_id="1",
+                                home_score=1,
+                                away_score=0,
+                                half_home_score=half_home,
+                                half_away_score=half_away,
+                                key_learning="reject impossible period score",
+                            )
+                        )
 
     def test_review_settles_lineup_check_instead_of_initial_revision(self):
         with tempfile.TemporaryDirectory() as base:
@@ -3039,6 +3655,173 @@ class MemoryStoreTests(unittest.TestCase):
                         htft_observation_model_file=model_file,
                         htft_observation_ranker_file=ranker_file,
                     )
+                )
+
+    def test_htft_observation_requires_ranker_to_preserve_external_anchor(self):
+        with tempfile.TemporaryDirectory() as base:
+            anchor = {
+                "kind": "half_time_current_market",
+                "complete": True,
+                "de_vigged": True,
+                "source": "https://example.test/half-time-odds",
+                "captured_at": "2026-07-21T18:50:00+09:00",
+                "production_pair_mass_gate_validated": False,
+            }
+            model_file, ranker_file = write_htft_observation_files(
+                base,
+                "htft-anchor-drop",
+                half_time_anchor=anchor,
+                drop_ranker_anchor=True,
+            )
+            with self.assertRaisesRegex(
+                ValueError, "requires matching anchor_context"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="htft-anchor-drop",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def test_htft_observation_matches_external_anchor_source_and_absolute_time(self):
+        anchor = {
+            "kind": "half_time_current_market",
+            "complete": True,
+            "de_vigged": True,
+            "source": "https://example.test/half-time-odds",
+            "captured_at": "2026-07-21T18:50:00+09:00",
+            "production_pair_mass_gate_validated": False,
+        }
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base,
+                "htft-anchor-match",
+                half_time_anchor=anchor,
+            )
+            model = json.loads(Path(model_file).read_text(encoding="utf-8"))
+            model["provenance"]["marginal_targets"]["half_time"][
+                "captured_at"
+            ] = "2026-07-21T09:50:00Z"
+            model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
+            Path(model_file).write_text(
+                json.dumps(model, ensure_ascii=False), encoding="utf-8"
+            )
+
+            created = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="htft-anchor-match",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="none",
+                    model_version=None,
+                    score_model_file=None,
+                    htft_observation_model_file=model_file,
+                    htft_observation_ranker_file=ranker_file,
+                )
+            )["record"]
+            ranker_audit = created["candidate_audits"][0]["ranker"]
+            self.assertEqual(
+                ranker_audit["matrix_mode"], "half_time_market_anchor_unvalidated"
+            )
+            self.assertEqual(ranker_audit["anchor_context"]["source"], anchor["source"])
+
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base,
+                "htft-anchor-source-mismatch",
+                half_time_anchor=anchor,
+            )
+            model = json.loads(Path(model_file).read_text(encoding="utf-8"))
+            model["provenance"]["marginal_targets"]["half_time"][
+                "source"
+            ] = "https://example.test/different-source"
+            model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
+            Path(model_file).write_text(
+                json.dumps(model, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "does not match model marginal"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="htft-anchor-source-mismatch",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def _assert_htft_anchor_time_rejected(
+        self,
+        *,
+        match_id: str,
+        captured_at: str,
+        message: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            anchor = {
+                "kind": "half_time_current_market",
+                "complete": True,
+                "de_vigged": True,
+                "source": "https://example.test/half-time-odds",
+                "captured_at": captured_at,
+                "production_pair_mass_gate_validated": False,
+            }
+            model_file, ranker_file = write_htft_observation_files(
+                base,
+                match_id,
+                half_time_anchor=anchor,
+            )
+            with self.assertRaisesRegex(ValueError, message):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id=match_id,
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def test_htft_observation_rejects_anchor_after_model_generation(self):
+        self._assert_htft_anchor_time_rejected(
+            match_id="htft-anchor-after-generation",
+            captured_at="2026-07-21T18:56:00+09:00",
+            message="cannot be after model generated_at",
+        )
+
+    def test_htft_observation_rejects_anchor_after_archive_time(self):
+        self._assert_htft_anchor_time_rejected(
+            match_id="htft-anchor-after-archive",
+            captured_at="2026-07-21T19:01:00+09:00",
+            message="cannot be after archive time",
+        )
+
+    def test_htft_observation_rejects_anchor_at_or_after_kickoff(self):
+        for label, captured_at in (
+            ("at-kickoff", "2026-07-21T19:30:00+09:00"),
+            ("after-kickoff", "2026-07-21T19:31:00+09:00"),
+        ):
+            with self.subTest(label=label):
+                self._assert_htft_anchor_time_rejected(
+                    match_id=f"htft-anchor-{label}",
+                    captured_at=captured_at,
+                    message="must be strictly before kickoff",
                 )
 
     def test_htft_observation_without_half_score_stays_ungraded_and_never_blocks_review(self):

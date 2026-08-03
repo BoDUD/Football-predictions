@@ -1,6 +1,6 @@
 # Soccer Predict
 
-面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型；1X2、大小球、亚盘、总进球区间、双方进球和波胆仍统一从同一全场比分矩阵派生。
+面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
@@ -23,19 +23,24 @@ npx skills add BoDUD/Football-predictions
 ## 工作流
 
 1. **模型拟合**：用严格早于预测时间的历史比赛分别拟合联赛全场与半全场模型，固化数据、联赛、配置和模型哈希。
-2. **初始分析**：核验比赛状态与时区，生成统一比分矩阵，抓取完整当前市场和基本面数据，输出可视化分析并在开球前归档。
+2. **初始分析**：核验比赛状态与时区，生成比分先验和统一比赛路径后验，抓取完整当前市场和基本面数据，输出可视化分析并在开球前归档。
 3. **T−30 临场复查**：固定在开赛前约 30 分钟执行，不提前；重新核验首发、伤停与即时盘口，并明确“主推维持/变更”。
 4. **赛后复盘**：只在 Titan 明确显示完场后结算，保存结果来源/采集时间、因果学习、统计与校准快照。
 
 Titan 中文页时间默认按 `Asia/Shanghai` 解析，再转换为 Codex 环境中的用户时区。比赛状态始终以页面明确的未开场、进行中或完场标识为准。
 
-默认输出改为“扫盘图片 + 正常分析文字”：图片集中展示比赛、最强方向、总进球、半全场和比分参考，正式主推后标红色 `★`，未过门禁的重点观察用 `◇`，两者不会混淆。文字补充概率、赔率、EV/edge、证据和风险，不再重复追加一份 `可复制纯文本版`；只有明确要求纯文字或复制版时才输出该块。赛后即使没有主推，仍保留 `主推：无正式推荐（不结算、不计战绩）`、本场关键及累计战绩。项目不包含微信或其他聊天软件的自动发送、RPA、账号配置或外部消息投递能力。
+默认输出为“简单图片 + 正常分析文字”。初盘和临场复查统一使用同一张 8 列表格：`编号`、`时间`、`赛事`、`主队 vs 客队`、`主推`、`总进球`、`半全场`、`波胆`。图片中的总进球只展示概率最高的一个区间及其领先差；半全场与波胆必须来自同一比赛路径后验并按同一顺序成对展示，通常显示 2 组，只有概率分布复杂时才由版本化规则自动显示 3 组。系统内部仍完整计算半场、1X2、全部总进球区间、BTTS、EV/edge 与证据审计，并在配套文字或机器归档中保留，不因图片精简而跳过分析。正式主推后标红色 `★`，只有通过诊断资格的观察才可用 `◇`。严禁独立排列半全场与比分后暗示对应，也严禁按终场方向硬配比分或手填 fallback；没有通过校验并绑定指定 `analysis_stage` 与版本哈希的联合后验 artifact 时，对应单元格必须显示 `数据不足`。
+
+所有图片都禁止用 `…` 或三个点截断内容；必须通过语义换行、缩小至可读字号、增加行高或扩展画布显示完整文字。赛后复盘同样生成同风格图片，绑定最终有效赛前版本和已核验赛果，不得根据结果回改赛前结论；无主推复盘必须保留 `主推：无正式推荐（不结算、不计战绩）`、本场关键及累计战绩。项目不包含微信或其他聊天软件的自动发送、RPA、账号配置或外部消息投递能力，也不承诺胜率、收益或盈利。
 
 ## 推荐与统计口径
 
 - 每个 active 赛前版本最多一个机器可读的 `primary_pick`；其他合格方向标为 `secondary`。
 - 亚盘、大小球、总进球区间、双方进球、角球大小和角球让球进入同一个候选池，不预设亚盘或大小球优先。
 - 候选必须先通过可复算审计：明确赔率格式、完整当前市场、no-vig 市场概率、来源与采集时间、公司数、统一模型 provenance、五态结算概率，以及服务端重算的 EV/edge。
+- 当前市场只能在版本化严格前向校准证明相应条件化方法有效时进入联合后验；参与条件化的同一价格不能再作为一份独立 EV/edge 证据。未达到该条件时，市场仅用于审计比较。
+- 市场证据按归档阶段设硬时效：初盘最多 60 分钟，`lineup-check` 最多 30 分钟；过期证据整字段关闭，不能以“临场”名义复用。纯 `model_only` 联合分布不依赖该盘口时效。
+- 面向卡片的联合事件只能由通过哈希、时序、归一化、尾部质量和边际一致性校验的联合后验 artifact 产生；缺少 artifact 时不得从旧字段、文字结论或人工映射补齐。
 - 当前 `strict-oos-market-policy-v1` 将亚盘、半场、半全场、角球大小和角球让球设为观察市场；只有未来的版本化政策在干净前向样本证明校准后才能恢复正式主推。角球历史 walk-forward 只决定模型能否进入下一阶段，不能单独解禁角球主推。
 - 通过审计的候选按版本化政策排序；模型概率不能通过“安全率、EV、edge”被包装成三份独立证据。如果领先不稳健，就明确不下注。
 - `lineup-check` 替换 active 版本时记录主推 `maintained` 或 `changed`，历史版本保留在 `revisions`。
@@ -90,9 +95,26 @@ python scripts/league_model_manager.py inspect \
 
 半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。扩展导入覆盖 14 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。保存阶段标签不等于已经为每个阶段训练独立模型：当前注册 manager 只用 `competition_regime=regular` 拟合，其他赛制保留排除计数与漂移证据。
 
+面向用户的比赛情景不是 HT/FT 九格与全场比分两个边际榜单的拼接。联合路径 artifact 必须在同一状态空间中表示半场进球和下半场进球，使全场比分由路径相加得到，并验证其全场比分、半场边际和 HT/FT 九格边际全部与绑定的 canonical artifacts 一致。新 artifact 使用紧凑四维路径 kernel，并在 IPF 前执行全部 Hall 支持可行性审计；验证器会从 kernel 重建 HT、下半场、FT、HT/FT、所有派生市场及排序事件，任一篡改都关闭输出。卡片按真实联合概率通常选择前 2 个 `(HT/FT × 全场比分)` 事件；当头部概率接近且第三项达到版本化复杂度门槛时自动显示 3 个。联合概率必须从路径单元求和，不能用两个边际概率相乘，也不能为满足终场方向而替换任一结果。历史冻结的 1.1.0 artifact 继续只读兼容，不会被赛后重写。
+
+```bash
+python scripts/joint_scenario_model.py predict \
+  --model registered-htft-model.json \
+  --score-prediction canonical-score.json \
+  --htft-prediction htft-prediction.json \
+  --market-evidence timestamped-market-evidence.json \
+  --expected-match-id MATCH_ID \
+  --generated-at 2030-08-10T18:20:00+09:00 \
+  --output joint-scenarios.json
+
+python scripts/joint_scenario_model.py validate --prediction joint-scenarios.json
+```
+
+结构化市场证据必须绑定同一联赛、主客队、开球时间和比赛 ID。当前 schema 只将未通过严格前向融合校准的盘口保存为诊断证据，不改变模型概率，也不授权使用同一价格重复证明 EV。
+
 不要在文档中固化某次导出的总行数、评估分数或各联赛 `candidate`/`shadow` 名单。当前准确总量以数据集 `manifest.json` 为准；log loss、Brier、Top-1/Top-2、覆盖率和基线差值以同源、通过校验的 evaluation artifact 为准；部署状态与分联赛 pair-gate 证据以当前 `registry.json` 为准。`candidate` 至少需要 100 场固定 2025 留出中的已知球队样本，并且该切片的 log loss、Brier 相对训练窗经验频率基线的均值及 paired-bootstrap 95% 置信区间上界都小于零；否则只能是 `shadow`。所有 `partial_as_of_*`（包括尚未完整的 2026 赛季）只进入 research/shadow，不能参与晋级证据；所有 HT/FT 注册模型仍必须保持 `formal_htft_eligible=false`，直到完整九路可执行价格和干净 live-forward 验证同时满足。
 
-角球采用独立的角球数模型和注册表。现阶段角球 manager 只绑定历史数据、模型和 walk-forward 回测，`formal_corner_total_eligible` 与 `formal_corner_handicap_eligible` 必须为 `false`；赛前可展示 `◇` 观察，但不能使用 `★` 或写入正式主推。只有未来 manager 绑定独立 strict live-forward 评估并显式放行相应 formal flag，同时当前盘口、证据与结算审计全部通过，才允许进入正式候选池。
+角球采用独立的角球数模型和注册表。现阶段角球 manager 只绑定历史数据、模型和 walk-forward 回测，`formal_corner_total_eligible` 与 `formal_corner_handicap_eligible` 必须为 `false`；赛前可展示 `◇` 观察，但不能使用 `★` 或写入正式主推。除非未来另有通过严格样本外验证的进球—角球联合模型，否则角球只能放在独立面板，不能与某条比分/半全场路径相乘、配对或写成同一证据链。只有未来 manager 绑定独立 strict live-forward 评估并显式放行相应 formal flag，同时当前盘口、证据与结算审计全部通过，才允许进入正式候选池。
 
 同一份用户 Excel 可以保留角球审计数据并继续用于足球/HTFT 导入：赛事主表前 87 列仍是严格兼容区，后面只允许登记的 12 个角球审计列；`角球盘口` 与 `数据质量` 是只读辅助 sheet。`history_importer.py` 只把主表前 87 列导入足球/HTFT，不会把赛后角球或辅助 sheet 偷渡成同场特征。角球训练从采集器的 source-bound JSON 独立生成 CSV：
 
@@ -121,7 +143,7 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 注册表预测会同时输出半全场 artifact、同源全场比分 artifact 和 bundle manifest，并拒绝数据/模型哈希、训练截止、联赛、部署状态或全场 1X2 边际不一致。完整、去水、带来源与赛前时间戳的半场 1X2 可显式锚定半场边际；在系统尚不能把外部全场边际同步写回同一 canonical 比分矩阵前，注册表路径会拒绝全场外部锚定，避免生成两个互相冲突的全场观点。未知球队默认报错；显式使用联赛均值 fallback 时必须单独标记。
 
-暂停的 HT/FT 不再是“算完后丢弃”。`memory_store.py record` 可通过 `--htft-observation-model-file` 与 `--htft-observation-ranker-file` 固化矩阵、Top 2、pair mass、模型/预测/制品哈希和逐门槛失败原因。赛后只计算观察用 Top-1/Top-2、九分类 Brier 与 log loss，并在 `stats`/`calibrate` 输出 gate funnel；它始终不计主推、注额、胜负、收益或 ROI，复盘文字继续保留 `主推：无正式推荐（不结算、不计战绩）`。
+暂停的 HT/FT 不再是“算完后丢弃”。`memory_store.py record` 可通过 `--htft-observation-model-file` 与 `--htft-observation-ranker-file` 固化矩阵、诊断 Top 2、pair mass、模型/预测/制品哈希和逐门槛失败原因；该诊断 Top 2 只服务内部校准，不能与独立比分榜单组成用户卡片。赛后只计算观察用 Top-1/Top-2、九分类 Brier 与 log loss，并在 `stats`/`calibrate` 输出 gate funnel；它始终不计主推、注额、胜负、收益或 ROI，复盘文字继续保留 `主推：无正式推荐（不结算、不计战绩）`。
 
 完整输入契约见 [`references/history-workbook-data.md`](references/history-workbook-data.md)，半全场构造与选择规则见 [`references/half-time-full-time.md`](references/half-time-full-time.md)。
 本地数据哈希、分联赛门槛、fallback 与赛制漂移的可执行核验见
@@ -173,6 +195,9 @@ soccer-predict/
 ├── scripts/history_importer.py
 ├── scripts/htft_model.py
 ├── scripts/htft_ranker.py
+├── scripts/joint_scenario_model.py
+├── scripts/joint_path_kernel.py
+├── scripts/public_market_outlook.py
 ├── scripts/htft_holdout_evaluator.py
 ├── scripts/league_model_manager.py
 ├── scripts/corner_model.py
@@ -185,6 +210,7 @@ soccer-predict/
 ├── scripts/memory_store.py
 ├── scripts/plain_text_formatter.py
 ├── scripts/prediction_card_renderer.py
+├── scripts/review_card_renderer.py
 ├── references/
 │   ├── data-collection.md
 │   ├── expanded-history-runbook.md

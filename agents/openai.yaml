@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
-  short_description: "Audited football posters, HT/FT and score models"
-  default_prompt: "Use $soccer-predict to generate a deterministic prediction poster plus concise analysis text, mark only a gate-qualified formal primary with a star, build an auditable league-trained HT/FT matrix and canonical full-time score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."
+  short_description: "Audited football posters and joint match-path models"
+  default_prompt: "Use $soccer-predict to generate a deterministic prediction poster plus concise analysis text, mark only a gate-qualified formal primary with a star, derive HT/FT, exact score, 1X2 and total-goal fields from one validated joint match-path posterior, compare complete current markets without double counting, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."

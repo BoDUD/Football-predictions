@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plain_text_formatter.py"
@@ -77,7 +78,123 @@ def write_history(base: str, records: list[dict]) -> None:
     path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
 
 
+def joint_artifact() -> dict:
+    base_audit = {
+        "provenance": "validated_joint_cells",
+        "probability_mode": "model_only",
+        "status": "model_probability_reference",
+        "recommendation_eligible": False,
+        "template_fallback_allowed": False,
+    }
+    audits = {
+        field: dict(base_audit)
+        for field in ("htft_marginal", "one_x_two", "goal_ranges", "btts")
+    }
+    audits["joint_top_two"] = {
+        "provenance": "validated_joint_cells_probability_ranking",
+        "probability_mode": "model_only",
+        "status": "high_variance_reference",
+        "recommendation_eligible": False,
+        "template_fallback_allowed": False,
+    }
+    leading = [
+        ("DD", "1-1", 0.058),
+        ("AA", "1-2", 0.045),
+    ]
+    used = {(htft, score) for htft, score, _probability in leading}
+    fillers: list[tuple[str, str]] = []
+    for home_goals in range(7):
+        for away_goals in range(7):
+            full = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            score = f"{home_goals}-{away_goals}"
+            for half in ("H", "D", "A"):
+                key = (half + full, score)
+                if key not in used:
+                    fillers.append(key)
+            if len(fillers) >= 60:
+                break
+        if len(fillers) >= 60:
+            break
+    filler_probability = (1.0 - sum(item[2] for item in leading)) / len(fillers)
+    joint_cells = []
+    for htft, score, probability_value in leading:
+        home_goals, away_goals = (int(item) for item in score.split("-"))
+        joint_cells.append(
+            {
+                "htft": htft,
+                "score": score,
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "probability": probability_value,
+            }
+        )
+    for htft, score in fillers:
+        home_goals, away_goals = (int(item) for item in score.split("-"))
+        joint_cells.append(
+            {
+                "htft": htft,
+                "score": score,
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "probability": filler_probability,
+            }
+        )
+
+    return {
+        "schema_version": formatter.public_market_outlook.joint_scenario_model.LEGACY_SCHEMA_VERSION,
+        "model_version": formatter.public_market_outlook.joint_scenario_model.LEGACY_MODEL_VERSION,
+        "prediction_hash": "sha256:" + "a" * 64,
+        "probability_mode": "model_only",
+        "formal_eligible": False,
+        "htft_marginal": {
+            "half_time_result_probabilities": {"H": 0.31, "D": 0.44, "A": 0.25},
+            "full_time_result_probabilities": {"H": 0.29, "D": 0.25, "A": 0.46},
+        },
+        "derived": {
+            "one_x_two": {"home": 0.29, "draw": 0.25, "away": 0.46},
+            "goal_ranges": {"0-1": 0.14, "2-3": 0.41, "4-6": 0.39, "7+": 0.06},
+            "btts": {"yes": 0.62, "no": 0.38},
+        },
+        "joint_top_two": [
+            {
+                "slot": 1,
+                "htft": "DD",
+                "score": "1-1",
+                "home_goals": 1,
+                "away_goals": 1,
+                "probability": 0.058,
+                "status": "high_variance_reference",
+                "recommendation_eligible": False,
+                "counts_toward_primary_record": False,
+                "odds_available": False,
+            },
+            {
+                "slot": 2,
+                "htft": "AA",
+                "score": "1-2",
+                "home_goals": 1,
+                "away_goals": 2,
+                "probability": 0.045,
+                "status": "high_variance_reference",
+                "recommendation_eligible": False,
+                "counts_toward_primary_record": False,
+                "odds_available": False,
+            },
+        ],
+        "joint_cells": joint_cells,
+        "derived_field_audits": audits,
+    }
+
+
 class PlainTextFormatterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        validator = patch.object(
+            formatter.public_market_outlook.joint_scenario_model,
+            "validate_prediction",
+        )
+        validator.start()
+        self.addCleanup(validator.stop)
+
     def test_no_automatic_external_message_delivery_surface(self):
         root = Path(__file__).resolve().parents[1]
         removed_paths = (
@@ -120,8 +237,17 @@ class PlainTextFormatterTests(unittest.TestCase):
             write_history(base, [base_record()])
             text = formatter.render(base, "42", "initial")
             self.assertTrue(text.startswith("【初盘分析｜42】\n"))
-            for field in ("赛事：芬超", "比赛：主队 vs 客队", "开赛：", "主推：小2.5 @0.92", "次选参考：", "比分参考："):
+            for field in (
+                "赛事：芬超",
+                "比赛：主队 vs 客队",
+                "开赛：",
+                "主推：小2.5 @0.92",
+                "次选参考：",
+                "胜平负：数据不足",
+                "联合情景：数据不足",
+            ):
                 self.assertIn(field, text)
+            self.assertNotIn("比分参考：", text)
             self.assertNotIn("0-0核验：", text)
             self.assertNotIn("0-0（12.0%）", text)
             self.assert_plain(text)
@@ -154,7 +280,7 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertNotIn("半场 客队 +1", text)
             self.assert_plain(text)
 
-    def test_primary_conditioned_scores_are_used_in_user_facing_plain_text(self):
+    def test_legacy_independent_scores_never_leak_into_prematch_text(self):
         record = base_record()
         record["primary_pick"]["side"] = "over"
         record["total_pick"]["side"] = "over"
@@ -186,12 +312,47 @@ class PlainTextFormatterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "initial")
+            self.assertIn("联合情景：数据不足", text)
+            self.assertNotIn("2-1（全场9.9%", text)
+            self.assertNotIn("比分参考：", text)
+            self.assert_plain(text)
+
+    def test_every_descriptive_field_comes_from_one_validated_joint_artifact(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [base_record()])
+            with patch.object(
+                formatter.memory_store,
+                "validated_joint_scenario_audit",
+                return_value=joint_artifact(),
+            ):
+                text = formatter.render(base, "42", "initial")
+
             self.assertIn(
-                "比分参考：2-1（全场9.9%，主推成立时18.0%）、"
-                "3-1（全场6.0%，主推成立时10.9%）",
+                "半场倾向：平44.0% / 主胜31.0%"
+                "（较明确，前二差13.0个百分点）",
                 text,
             )
-            self.assertNotIn("比分参考：1-0", text)
+            self.assertIn(
+                "胜平负：客胜46.0% / 主胜29.0%"
+                "（较明确，前二差17.0个百分点）",
+                text,
+            )
+            self.assertIn(
+                "总进球：2-3球41.0%"
+                "（分歧，领先第二名2.0个百分点）",
+                text,
+            )
+            self.assertIn(
+                "双方进球：是62.0% / 否38.0%（较明确，前二差24.0个百分点）",
+                text,
+            )
+            self.assertIn(
+                "联合情景：高方差参考（不作推荐）：平平·1-1 5.8% / 负负·1-2 4.5%",
+                text,
+            )
+            self.assertIn("纯模型（未混入过期盘口）", text)
+            self.assertNotIn("比分参考：", text)
+            self.assertNotIn("半全场：", text)
             self.assert_plain(text)
 
     def test_format_pick_supports_expanded_markets(self):
@@ -327,20 +488,22 @@ class PlainTextFormatterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "initial")
-            self.assertIn("比分参考：0-0（24.0%）、1-0（19.0%）", text)
+            self.assertIn("联合情景：数据不足", text)
+            self.assertNotIn("比分参考：0-0", text)
             self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
-    def test_initial_plain_text_does_not_truncate_long_fields(self):
+    def test_free_text_cannot_bypass_structured_prediction_gates(self):
         record = base_record()
         record["recommendation"] = "R" * 220
         record["notes"] = "N" * 500
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "initial")
-            self.assertIn(record["recommendation"], text)
-            self.assertIn(record["notes"], text)
-            self.assertNotIn("…", text)
+            self.assertNotIn(record["recommendation"], text)
+            self.assertNotIn(record["notes"], text)
+            self.assertIn("模型说明：正式主推来自归档门控", text)
+            self.assertIn("证据状态：数据质量未知", text)
             self.assert_plain(text)
 
     def test_hidden_zero_zero_audit_does_not_leak_through_user_facing_prose(self):
@@ -350,9 +513,19 @@ class PlainTextFormatterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "initial")
-            self.assertIn("核心判断：小球方向更稳；低节奏判断保留。", text)
-            self.assertIn("风险：阵容仍有不确定性；其他风险保留。", text)
-            for hidden in ("0-0核验", "对应比分0-0", "概率12.0%", "赔率12", "EV44%"):
+            self.assertIn("模型说明：正式主推来自归档门控", text)
+            self.assertIn("证据状态：数据质量未知", text)
+            for hidden in (
+                "小球方向更稳",
+                "低节奏判断保留",
+                "阵容仍有不确定性",
+                "其他风险保留",
+                "0-0核验",
+                "对应比分0-0",
+                "概率12.0%",
+                "赔率12",
+                "EV44%",
+            ):
                 self.assertNotIn(hidden, text)
             self.assert_plain(text)
 
@@ -454,11 +627,8 @@ class PlainTextFormatterTests(unittest.TestCase):
             lineup_text = formatter.render(base, "42", "lineup-check")
             self.assertIn("主推取消：小2.5 @0.92 → 不下注", lineup_text)
             self.assertIn("当前主推：无正式推荐", lineup_text)
-            self.assertIn(
-                "半全场：观察 主/主（30.0%）、平/主（20.0%），合计50.0%；"
-                "未通过：当前政策放行、完整当前9路赔率",
-                lineup_text,
-            )
+            self.assertIn("联合情景：数据不足", lineup_text)
+            self.assertNotIn("半全场：观察", lineup_text)
             self.assert_plain(lineup_text)
 
             record.update({

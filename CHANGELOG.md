@@ -6,11 +6,23 @@
 - Expanded the audited 2020–2026 history contract to fourteen competitions, including Finland Veikkausliiga, with 2026 retained as a partial-at-cutoff research cohort.
 - Added source-bound regulation-time corner-result and pre-kickoff corner-price collectors, offline schedule normalization, league dataset generation, chronological corner models, registered replay validation, and fixed untouched holdouts.
 - Added a deterministic daily prediction-card renderer that derives `★`, `◇`, and no-primary status from the archived active record instead of caller-supplied labels.
+- Added a feasible score-path/IPF artifact that produces genuine `(HT/FT × full-time score)` joint probabilities while reproducing the canonical full-time score matrix and registered HT/FT marginal.
+- Added immutable joint-artifact archiving with fixture, timestamp, model-lineage, input-hash, convergence, tail-mass, and tamper validation.
+- Added a compact four-dimensional path kernel with complete Hall support-feasibility auditing and reconstruction-based HT/second-half/FT/HTFT/derived-market validation.
+- Added a shared `public_market_outlook` layer that keeps complete half-time, 1X2, goal-range and BTTS distributions with probability-gap audits while producing the compact public selections from the same posterior.
+- Added deterministic post-match review images bound to the final active settlement basis and verified result.
 
 ### Changed
 - Hardened HT/FT evaluation and registration around fixed known-team holdouts, paired baseline uncertainty, dataset/model/evaluation lineage, and fail-closed non-formal deployment flags.
 - Kept corner totals, corner handicaps, and HT/FT observation-only until separate clean live-forward evidence enables a later policy; historical `candidate` status never authorizes a formal pick.
 - Preserved legacy and no-primary review wording and learning records while keeping them outside primary win rate, stake, profit, and ROI.
+- Replaced independent user-facing HT/FT and exact-score lists with globally ranked joint path events. The display normally uses two paired events and adds a third only when the versioned complexity rule identifies a divided head distribution; 1X2, total-goal counts, goal ranges, and BTTS come from the same validated artifact or fail closed as `数据不足`.
+- Standardized initial and lineup-check images on the same simple eight-column table (`编号`, `时间`, `赛事`, `主队 vs 客队`, `主推`, `总进球`, `半全场`, `波胆`). Total goals now show only the top range and its probability lead, while complete distributions remain in text/audit.
+- Removed ellipsis-based image truncation. Long titles, team names, cells, legends, and review wording now use wrapping, readable font reduction, row growth, or canvas expansion.
+- Bound structured Titan market evidence to the exact fixture and pre-kickoff collection time. Until a versioned market-fusion method passes strict forward calibration, those prices remain diagnostic and cannot be double-counted as both conditioning input and independent EV proof.
+- Removed standalone HT/FT observations from the poster's observation marker; only a separately validated eligible observation model, such as the current corner diagnostic, may receive `◇`.
+- Bound every poster row to an exact archive stage and version hash, verified its fixture time/league/teams, and blocked cross-stage artifact leakage, unqualified corner observations, and free-form recommendation/notes from becoming public directions.
+- Enforced 60-minute initial and 30-minute lineup-check market-evidence TTLs, plus impossible half-time/full-time score rejection during review.
 
 ## [3.1.0] - 2026-08-02
 
