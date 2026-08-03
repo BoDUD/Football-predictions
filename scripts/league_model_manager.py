@@ -24,17 +24,28 @@ import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 try:  # Works when imported from the repository root.
-    from scripts import history_importer, htft_model, score_model
+    from scripts import (
+        history_importer,
+        htft_holdout_evaluator,
+        htft_model,
+        score_model,
+    )
 except ImportError:  # Works when invoked directly as scripts/league_model_manager.py.
+    script_directory = str(Path(__file__).resolve().parent)
+    if script_directory not in sys.path:
+        sys.path.insert(0, script_directory)
     import history_importer  # type: ignore[no-redef]
+    import htft_holdout_evaluator  # type: ignore[no-redef]
     import htft_model  # type: ignore[no-redef]
     import score_model  # type: ignore[no-redef]
 
 
 REGISTRY_ARTIFACT_TYPE = "soccer_league_model_registry"
-REGISTRY_SCHEMA_VERSION = "1.1.0"
+REGISTRY_SCHEMA_VERSION = "1.4.0"
 PREDICTION_BUNDLE_ARTIFACT_TYPE = "soccer_league_prediction_bundle"
-PREDICTION_BUNDLE_SCHEMA_VERSION = "1.0.0"
+PREDICTION_BUNDLE_SCHEMA_VERSION = "1.2.0"
+REGISTRY_INSPECTION_ARTIFACT_TYPE = "soccer_league_model_registry_inspection"
+REGISTRY_INSPECTION_SCHEMA_VERSION = "1.1.0"
 REGISTRY_FILENAME = "registry.json"
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -43,7 +54,87 @@ LEAGUE_NAMES = {
     "norway_eliteserien": "挪超",
     "japan_j1": "日职",
     "usa_mls": "美职联",
+    "england_premier_league": "英超",
+    "france_ligue_1": "法甲",
+    "spain_la_liga": "西甲",
+    "germany_bundesliga": "德甲",
+    "italy_serie_a": "意甲",
+    "korea_k_league_1": "韩K联",
+    "sweden_allsvenskan": "瑞典超",
+    "finland_veikkausliiga": "芬超",
+    "uefa_champions_league": "欧冠",
+    "afc_champions_league": "亚冠",
 }
+
+DEPLOYMENT_POLICY_VERSION = "htft-deployment-gate/1.1.0"
+DEPLOYMENT_STATUSES = ("candidate", "shadow")
+FIXED_HOLDOUT_SPLIT_ID = "fixed_holdout_2025"
+FIXED_HOLDOUT_ROLE = "model_fit_holdout_selector_development"
+FIXED_HOLDOUT_MINIMUM_SAMPLE = 100
+FIXED_HOLDOUT_DECISION_RULE = (
+    "candidate iff fixed_holdout_2025 has at least 100 known-team samples and the mean "
+    "and paired-bootstrap 95% CI upper bound for both nine-class log-loss and "
+    "Brier deltas versus the training-only empirical frequency baseline are "
+    "negative; otherwise shadow"
+)
+LEAGUE_PAIR_GATE_EVIDENCE_VERSION = "registry-bound-htft-evidence/1.0.0"
+LEAGUE_PAIR_GATE_SOURCE_ROLE = "historical_post_selection_development_evidence"
+MODEL_ONLY_PAIR_MASS_THRESHOLD = 0.46
+SPECIAL_REGIME_WARNING = (
+    "special competition regimes were excluded from production training; "
+    "current-regime transfer is unconfirmed"
+)
+FORMAL_HTFT_INELIGIBLE_REASON = (
+    "formal HT/FT promotion is blocked because complete current nine-way HT/FT "
+    "odds and clean live-forward validation evidence are unavailable"
+)
+DEPLOYMENT_POLICY = {
+    "version": DEPLOYMENT_POLICY_VERSION,
+    "allowed_statuses": list(DEPLOYMENT_STATUSES),
+    "formal_htft_eligible": False,
+    "formal_htft_ineligible_reason": FORMAL_HTFT_INELIGIBLE_REASON,
+}
+DEPLOYMENT_FIELD_NAMES = (
+    "deployment_status",
+    "formal_htft_eligible",
+    "formal_htft_ineligible_reason",
+    "deployment_policy_version",
+    "league_pair_gate_evidence",
+)
+
+LEAGUE_PAIR_GATE_EVIDENCE_FIELDS = frozenset(
+    {
+        "version",
+        "dataset_manifest_hash",
+        "evaluation_hash",
+        "model_hash",
+        "league_key",
+        "source_role",
+        "threshold",
+        "eligible_sample_count",
+        "covered_count",
+        "hit_count",
+        "deployment_status",
+        "regime_warning",
+        "formal_htft_eligible",
+        "production_confidence_eligible",
+    }
+)
+FIXED_HOLDOUT_EVIDENCE_FIELDS = frozenset(
+    {
+        "split_id",
+        "role",
+        "status",
+        "evidence_cohort",
+        "sample_count",
+        "minimum_sample_count",
+        "nine_class_log_loss_mean_delta",
+        "nine_class_log_loss_ci95_high",
+        "nine_class_brier_mean_delta",
+        "nine_class_brier_ci95_high",
+        "decision_rule",
+    }
+)
 
 VALIDATED_TRAINING_CONFIG = {
     "half_time_half_life_days": 730.0,
@@ -66,6 +157,204 @@ PRODUCTION_TRAINING_REGIMES = ("regular",)
 
 class LeagueModelManagerError(ValueError):
     """Raised when local datasets, registry entries, or models are unsafe."""
+
+
+def _deployment_status_from_fixed_holdout(
+    fixed_holdout: Mapping[str, Any],
+) -> str:
+    sample_count = fixed_holdout.get("sample_count")
+    log_loss_delta = fixed_holdout.get("nine_class_log_loss_mean_delta")
+    log_loss_ci_high = fixed_holdout.get("nine_class_log_loss_ci95_high")
+    brier_delta = fixed_holdout.get("nine_class_brier_mean_delta")
+    brier_ci_high = fixed_holdout.get("nine_class_brier_ci95_high")
+    if (
+        not isinstance(sample_count, bool)
+        and isinstance(sample_count, int)
+        and sample_count >= FIXED_HOLDOUT_MINIMUM_SAMPLE
+        and fixed_holdout.get("minimum_sample_count")
+        == FIXED_HOLDOUT_MINIMUM_SAMPLE
+        and not isinstance(log_loss_delta, bool)
+        and isinstance(log_loss_delta, (int, float))
+        and math.isfinite(float(log_loss_delta))
+        and float(log_loss_delta) < 0.0
+        and not isinstance(log_loss_ci_high, bool)
+        and isinstance(log_loss_ci_high, (int, float))
+        and math.isfinite(float(log_loss_ci_high))
+        and float(log_loss_ci_high) < 0.0
+        and not isinstance(brier_delta, bool)
+        and isinstance(brier_delta, (int, float))
+        and math.isfinite(float(brier_delta))
+        and float(brier_delta) < 0.0
+        and not isinstance(brier_ci_high, bool)
+        and isinstance(brier_ci_high, (int, float))
+        and math.isfinite(float(brier_ci_high))
+        and float(brier_ci_high) < 0.0
+    ):
+        return "candidate"
+    return "shadow"
+
+
+def _regime_warning(regime_policy: Mapping[str, Any]) -> str | None:
+    excluded_rows = regime_policy.get("excluded_rows")
+    if isinstance(excluded_rows, bool) or not isinstance(excluded_rows, int):
+        raise LeagueModelManagerError("competition regime excluded_rows is invalid")
+    return SPECIAL_REGIME_WARNING if excluded_rows > 0 else None
+
+
+def _validate_fixed_holdout_decision(
+    decision: Any, *, name: str
+) -> str:
+    if not isinstance(decision, Mapping):
+        raise LeagueModelManagerError(f"{name} must be an object")
+    if set(decision) != FIXED_HOLDOUT_EVIDENCE_FIELDS:
+        raise LeagueModelManagerError(f"{name} fields are invalid")
+    if (
+        decision.get("split_id") != FIXED_HOLDOUT_SPLIT_ID
+        or decision.get("role") != FIXED_HOLDOUT_ROLE
+        or decision.get("decision_rule") != FIXED_HOLDOUT_DECISION_RULE
+        or decision.get("evidence_cohort") != "known_teams"
+        or decision.get("minimum_sample_count")
+        != FIXED_HOLDOUT_MINIMUM_SAMPLE
+    ):
+        raise LeagueModelManagerError(f"{name} policy is invalid")
+    sample_count = decision.get("sample_count")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count < 0
+    ):
+        raise LeagueModelManagerError(f"{name}.sample_count is invalid")
+    status = decision.get("status")
+    if not isinstance(status, str) or not status:
+        raise LeagueModelManagerError(f"{name}.status is invalid")
+    deltas = (
+        decision.get("nine_class_log_loss_mean_delta"),
+        decision.get("nine_class_log_loss_ci95_high"),
+        decision.get("nine_class_brier_mean_delta"),
+        decision.get("nine_class_brier_ci95_high"),
+    )
+    if status == "evaluated":
+        if sample_count < 1 or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in deltas
+        ):
+            raise LeagueModelManagerError(f"{name} evaluated metrics are invalid")
+    elif sample_count != 0 or any(value is not None for value in deltas):
+        raise LeagueModelManagerError(
+            f"{name} unevaluated metrics must be empty"
+        )
+    return _deployment_status_from_fixed_holdout(decision)
+
+
+def _validate_pair_gate_evidence(
+    evidence: Any,
+    *,
+    league_key: str,
+    name: str,
+    dataset_manifest_hash: str | None = None,
+    evaluation_hash: str | None = None,
+    model_hash: str | None = None,
+    deployment_status: str | None = None,
+    regime_warning: str | None | object = ...,
+) -> None:
+    if not isinstance(evidence, Mapping):
+        raise LeagueModelManagerError(f"{name} must be an object")
+    if set(evidence) != LEAGUE_PAIR_GATE_EVIDENCE_FIELDS:
+        raise LeagueModelManagerError(
+            f"{name} fields do not match the registry-bound evidence contract"
+        )
+    if evidence.get("version") != LEAGUE_PAIR_GATE_EVIDENCE_VERSION:
+        raise LeagueModelManagerError(f"{name}.version is unsupported")
+    if evidence.get("league_key") != league_key:
+        raise LeagueModelManagerError(f"{name}.league_key does not match")
+    if evidence.get("source_role") != LEAGUE_PAIR_GATE_SOURCE_ROLE:
+        raise LeagueModelManagerError(f"{name}.source_role is invalid")
+    threshold = evidence.get("threshold")
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(float(threshold))
+        or abs(float(threshold) - MODEL_ONLY_PAIR_MASS_THRESHOLD) > 1e-12
+    ):
+        raise LeagueModelManagerError(f"{name}.threshold is invalid")
+    counts: dict[str, int] = {}
+    for field in ("eligible_sample_count", "covered_count", "hit_count"):
+        value = evidence.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise LeagueModelManagerError(f"{name}.{field} is invalid")
+        counts[field] = value
+    if (
+        counts["covered_count"] > counts["eligible_sample_count"]
+        or counts["hit_count"] > counts["covered_count"]
+    ):
+        raise LeagueModelManagerError(f"{name} cohort counts are inconsistent")
+    if evidence.get("deployment_status") not in DEPLOYMENT_STATUSES:
+        raise LeagueModelManagerError(f"{name}.deployment_status is invalid")
+    warning = evidence.get("regime_warning")
+    if warning is not None and (
+        not isinstance(warning, str) or not warning.strip()
+    ):
+        raise LeagueModelManagerError(f"{name}.regime_warning is invalid")
+    if (
+        evidence.get("formal_htft_eligible") is not False
+        or evidence.get("production_confidence_eligible") is not False
+    ):
+        raise LeagueModelManagerError(
+            f"{name} cannot authorize formal or production HT/FT confidence"
+        )
+    for field, expected in (
+        ("dataset_manifest_hash", dataset_manifest_hash),
+        ("evaluation_hash", evaluation_hash),
+        ("model_hash", model_hash),
+    ):
+        actual = _required_hash(evidence.get(field), f"{name}.{field}")
+        if expected is not None and actual != expected:
+            raise LeagueModelManagerError(f"{name}.{field} does not match")
+    if deployment_status is not None and evidence.get(
+        "deployment_status"
+    ) != deployment_status:
+        raise LeagueModelManagerError(f"{name}.deployment_status does not match")
+    if regime_warning is not ... and warning != regime_warning:
+        raise LeagueModelManagerError(f"{name}.regime_warning does not match")
+
+
+def _validate_deployment_fields(
+    artifact: Mapping[str, Any],
+    *,
+    league_key: str,
+    name: str,
+    dataset_manifest_hash: str | None = None,
+    evaluation_hash: str | None = None,
+    model_hash: str | None = None,
+    regime_warning: str | None | object = ...,
+) -> None:
+    deployment_status = artifact.get("deployment_status")
+    if deployment_status not in DEPLOYMENT_STATUSES:
+        raise LeagueModelManagerError(
+            f"{name}.deployment_status does not satisfy the deployment gate"
+        )
+    expected = {
+        "formal_htft_eligible": False,
+        "formal_htft_ineligible_reason": FORMAL_HTFT_INELIGIBLE_REASON,
+        "deployment_policy_version": DEPLOYMENT_POLICY_VERSION,
+    }
+    for field, expected_value in expected.items():
+        if artifact.get(field) != expected_value:
+            raise LeagueModelManagerError(
+                f"{name}.{field} does not satisfy the deployment gate"
+            )
+    _validate_pair_gate_evidence(
+        artifact.get("league_pair_gate_evidence"),
+        league_key=league_key,
+        name=f"{name}.league_pair_gate_evidence",
+        dataset_manifest_hash=dataset_manifest_hash,
+        evaluation_hash=evaluation_hash,
+        model_hash=model_hash,
+        deployment_status=str(deployment_status),
+        regime_warning=regime_warning,
+    )
 
 
 def _utc_now() -> str:
@@ -164,6 +453,12 @@ def calculate_prediction_bundle_hash(manifest: Mapping[str, Any]) -> str:
     return _canonical_hash(payload)
 
 
+def calculate_registry_inspection_hash(inspection: Mapping[str, Any]) -> str:
+    payload = dict(inspection)
+    payload.pop("inspection_hash", None)
+    return _canonical_hash(payload)
+
+
 def _required_hash(value: Any, name: str) -> str:
     if not isinstance(value, str) or not HASH_RE.fullmatch(value):
         raise LeagueModelManagerError(f"{name} must be a SHA-256 hash")
@@ -249,6 +544,11 @@ def load_dataset_bundle(
             raise LeagueModelManagerError(
                 f"{name}.league does not match {league_key}"
             )
+        aliases = raw.get("aliases")
+        if not isinstance(aliases, list) or not aliases or any(
+            not isinstance(alias, str) or not alias.strip() for alias in aliases
+        ):
+            raise LeagueModelManagerError(f"{name}.aliases must be non-empty strings")
         score_dataset = raw.get("score_dataset")
         if not isinstance(score_dataset, Mapping):
             raise LeagueModelManagerError(f"{name}.score_dataset is missing")
@@ -275,7 +575,7 @@ def load_dataset_bundle(
             {
                 "league_key": league_key,
                 "league": league_name,
-                "aliases": [league_key, league_name],
+                "aliases": list(aliases),
                 "score_file": filename,
                 "score_path": source_path,
                 "score_sha256": expected_hash,
@@ -285,6 +585,258 @@ def load_dataset_bundle(
         )
     resolved.sort(key=lambda item: item["league_key"])
     return manifest, resolved
+
+
+def _load_evaluation_artifact(path: str | Path) -> dict[str, Any]:
+    source = Path(path).resolve()
+    if not source.is_file():
+        raise LeagueModelManagerError(
+            f"evaluation artifact does not exist: {source}"
+        )
+    try:
+        evaluation = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LeagueModelManagerError(
+            f"evaluation artifact is not valid UTF-8 JSON: {source}"
+        ) from exc
+    if not isinstance(evaluation, dict):
+        raise LeagueModelManagerError("evaluation artifact must contain an object")
+    return evaluation
+
+
+def _fixed_holdout_evidence(
+    league_evaluation: Mapping[str, Any], *, league_key: str
+) -> tuple[dict[str, Any], dict[str, int]]:
+    splits = league_evaluation.get("splits")
+    if not isinstance(splits, list):
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} has no fixed splits"
+        )
+    matches = [
+        split
+        for split in splits
+        if isinstance(split, Mapping)
+        and split.get("split_id") == FIXED_HOLDOUT_SPLIT_ID
+    ]
+    if len(matches) != 1:
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} must contain exactly one "
+            f"{FIXED_HOLDOUT_SPLIT_ID} split"
+        )
+    split = matches[0]
+    if split.get("role") != FIXED_HOLDOUT_ROLE:
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} fixed holdout role is invalid"
+        )
+    if split.get("status") != "evaluated":
+        return (
+            {
+                "split_id": FIXED_HOLDOUT_SPLIT_ID,
+                "role": FIXED_HOLDOUT_ROLE,
+                "status": str(split.get("status")),
+                "evidence_cohort": "known_teams",
+                "sample_count": 0,
+                "minimum_sample_count": FIXED_HOLDOUT_MINIMUM_SAMPLE,
+                "nine_class_log_loss_mean_delta": None,
+                "nine_class_log_loss_ci95_high": None,
+                "nine_class_brier_mean_delta": None,
+                "nine_class_brier_ci95_high": None,
+                "decision_rule": FIXED_HOLDOUT_DECISION_RULE,
+            },
+            {
+                "eligible_sample_count": 0,
+                "covered_count": 0,
+                "hit_count": 0,
+            },
+        )
+    try:
+        comparison = split[
+            "model_minus_empirical_baseline_by_team_availability"
+        ]["known_teams"]
+        sample_count = comparison["sample_count"]
+        log_loss_delta = comparison["nine_class_log_loss"]["mean_delta"]
+        log_loss_ci_high = comparison["nine_class_log_loss"]["ci95_high"]
+        brier_delta = comparison["nine_class_brier"]["mean_delta"]
+        brier_ci_high = comparison["nine_class_brier"]["ci95_high"]
+        pair_gate = split["model_only"]["known_teams"]["pair_mass_gate"]
+    except (KeyError, TypeError) as exc:
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} fixed holdout evidence is incomplete"
+        ) from exc
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count < 1
+    ):
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} fixed holdout sample_count is invalid"
+        )
+    for metric_name, value in (
+        ("nine-class log-loss delta", log_loss_delta),
+        ("nine-class log-loss CI upper bound", log_loss_ci_high),
+        ("nine-class Brier delta", brier_delta),
+        ("nine-class Brier CI upper bound", brier_ci_high),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise LeagueModelManagerError(
+                f"evaluation league {league_key} fixed holdout {metric_name} is invalid"
+            )
+    threshold = pair_gate.get("threshold")
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(float(threshold))
+        or abs(float(threshold) - MODEL_ONLY_PAIR_MASS_THRESHOLD) > 1e-12
+    ):
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} pair-mass threshold is invalid"
+        )
+    counts: dict[str, int] = {}
+    for field in ("eligible_sample_count", "covered_count", "hit_count"):
+        value = pair_gate.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise LeagueModelManagerError(
+                f"evaluation league {league_key} pair-mass {field} is invalid"
+            )
+        counts[field] = value
+    if (
+        counts["eligible_sample_count"] != sample_count
+        or counts["covered_count"] > counts["eligible_sample_count"]
+        or counts["hit_count"] > counts["covered_count"]
+    ):
+        raise LeagueModelManagerError(
+            f"evaluation league {league_key} pair-mass counts are inconsistent"
+        )
+    decision = {
+        "split_id": FIXED_HOLDOUT_SPLIT_ID,
+        "role": FIXED_HOLDOUT_ROLE,
+        "status": "evaluated",
+        "evidence_cohort": "known_teams",
+        "sample_count": sample_count,
+        "minimum_sample_count": FIXED_HOLDOUT_MINIMUM_SAMPLE,
+        "nine_class_log_loss_mean_delta": float(log_loss_delta),
+        "nine_class_log_loss_ci95_high": float(log_loss_ci_high),
+        "nine_class_brier_mean_delta": float(brier_delta),
+        "nine_class_brier_ci95_high": float(brier_ci_high),
+        "decision_rule": FIXED_HOLDOUT_DECISION_RULE,
+    }
+    return decision, counts
+
+
+def _validate_source_bound_evaluation(
+    evaluation: Mapping[str, Any],
+    *,
+    dataset_dir: Path,
+    dataset_manifest_hash: str,
+    league_keys: set[str],
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    try:
+        htft_holdout_evaluator.validate_evaluation(
+            evaluation,
+            dataset_dir=dataset_dir,
+        )
+    except htft_holdout_evaluator.HoldoutEvaluationError as exc:
+        raise LeagueModelManagerError(
+            f"source-bound HT/FT evaluation is invalid: {exc}"
+        ) from exc
+    evaluation_hash = _required_hash(
+        evaluation.get("evaluation_hash"), "evaluation.evaluation_hash"
+    )
+    if evaluation_hash != htft_holdout_evaluator.calculate_evaluation_hash(
+        evaluation
+    ):
+        raise LeagueModelManagerError(
+            "evaluation_hash does not match evaluation contents"
+        )
+    dataset = evaluation.get("dataset")
+    if not isinstance(dataset, Mapping) or dataset.get(
+        "manifest_bundle_hash"
+    ) != dataset_manifest_hash:
+        raise LeagueModelManagerError(
+            "evaluation dataset manifest hash does not match the training bundle"
+        )
+    if evaluation.get("fit_config") != htft_holdout_evaluator.PROMOTED_FIT_CONFIG:
+        raise LeagueModelManagerError(
+            "evaluation fit_config is not the registered promoted configuration"
+        )
+    promotion = evaluation.get("promotion")
+    if not isinstance(promotion, Mapping) or promotion.get(
+        "registered_manager_compatible"
+    ) is not True:
+        raise LeagueModelManagerError(
+            "evaluation is not compatible with the registered manager"
+        )
+    raw_leagues = evaluation.get("leagues")
+    if not isinstance(raw_leagues, list):
+        raise LeagueModelManagerError("evaluation contains no league evidence")
+    by_league: dict[str, dict[str, Any]] = {}
+    for item in raw_leagues:
+        if not isinstance(item, Mapping):
+            raise LeagueModelManagerError("evaluation league evidence must be an object")
+        league_key = item.get("league_key")
+        if not isinstance(league_key, str) or league_key in by_league:
+            raise LeagueModelManagerError(
+                "evaluation league_key is missing or duplicated"
+            )
+        decision, pair_counts = _fixed_holdout_evidence(
+            item, league_key=league_key
+        )
+        by_league[league_key] = {
+            "fixed_holdout_evaluation": decision,
+            "pair_counts": pair_counts,
+            "deployment_status": _deployment_status_from_fixed_holdout(decision),
+        }
+    if set(by_league) != league_keys:
+        missing = sorted(league_keys - set(by_league))
+        extra = sorted(set(by_league) - league_keys)
+        raise LeagueModelManagerError(
+            "evaluation league coverage does not match the training bundle; "
+            f"missing={missing}, extra={extra}"
+        )
+    return evaluation_hash, by_league
+
+
+def _league_pair_gate_evidence(
+    *,
+    league_key: str,
+    dataset_manifest_hash: str,
+    evaluation_hash: str,
+    model_hash: str,
+    deployment_status: str,
+    pair_counts: Mapping[str, int],
+    regime_warning: str | None,
+) -> dict[str, Any]:
+    evidence = {
+        "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+        "dataset_manifest_hash": dataset_manifest_hash,
+        "evaluation_hash": evaluation_hash,
+        "model_hash": model_hash,
+        "league_key": league_key,
+        "source_role": LEAGUE_PAIR_GATE_SOURCE_ROLE,
+        "threshold": MODEL_ONLY_PAIR_MASS_THRESHOLD,
+        "eligible_sample_count": pair_counts["eligible_sample_count"],
+        "covered_count": pair_counts["covered_count"],
+        "hit_count": pair_counts["hit_count"],
+        "deployment_status": deployment_status,
+        "regime_warning": regime_warning,
+        "formal_htft_eligible": False,
+        "production_confidence_eligible": False,
+    }
+    _validate_pair_gate_evidence(
+        evidence,
+        league_key=league_key,
+        name="league_pair_gate_evidence",
+        dataset_manifest_hash=dataset_manifest_hash,
+        evaluation_hash=evaluation_hash,
+        model_hash=model_hash,
+        deployment_status=deployment_status,
+        regime_warning=regime_warning,
+    )
+    return evidence
 
 
 def _expected_htft_model_config(
@@ -489,11 +1041,12 @@ def train_models(
     dataset_dir: str | Path,
     model_dir: str | Path,
     *,
+    evaluation_artifact: str | Path,
     iterations: int = 1200,
     learning_rate: float = 0.03,
     regularization: float = 0.02,
 ) -> dict[str, Any]:
-    """Fit every league in an audited bundle and atomically publish a registry."""
+    """Fit a source-validated bundle and bind every model to holdout evidence."""
 
     requested_fit = {
         "iterations": iterations,
@@ -509,10 +1062,18 @@ def train_models(
             "configuration; use htft_model directly for experiments"
         )
 
-    _manifest, datasets = load_dataset_bundle(dataset_dir)
+    dataset_directory = Path(dataset_dir).resolve()
+    _manifest, datasets = load_dataset_bundle(dataset_directory)
+    bundle_hash = datasets[0]["bundle_hash"]
+    evaluation = _load_evaluation_artifact(evaluation_artifact)
+    evaluation_hash, evaluation_by_league = _validate_source_bound_evaluation(
+        evaluation,
+        dataset_dir=dataset_directory,
+        dataset_manifest_hash=bundle_hash,
+        league_keys={dataset["league_key"] for dataset in datasets},
+    )
     destination = Path(model_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    bundle_hash = datasets[0]["bundle_hash"]
     entries: list[dict[str, Any]] = []
     for dataset in datasets:
         with tempfile.TemporaryDirectory(
@@ -573,6 +1134,18 @@ def train_models(
         )
         model_path = destination / model_filename
         model_file_hash = _atomic_json(model_path, model)
+        evaluation_record = evaluation_by_league[dataset["league_key"]]
+        deployment_status = evaluation_record["deployment_status"]
+        regime_warning = _regime_warning(regime_policy)
+        pair_evidence = _league_pair_gate_evidence(
+            league_key=dataset["league_key"],
+            dataset_manifest_hash=bundle_hash,
+            evaluation_hash=evaluation_hash,
+            model_hash=model_hash,
+            deployment_status=deployment_status,
+            pair_counts=evaluation_record["pair_counts"],
+            regime_warning=regime_warning,
+        )
         entries.append(
             {
                 "league_key": dataset["league_key"],
@@ -580,6 +1153,7 @@ def train_models(
                 "aliases": list(dataset["aliases"]),
                 "competition_key": dataset["league_key"],
                 "dataset_manifest_hash": bundle_hash,
+                "evaluation_hash": evaluation_hash,
                 "dataset_file": dataset["score_file"],
                 "dataset_file_sha256": dataset["score_sha256"],
                 "dataset_rows": dataset["rows"],
@@ -595,6 +1169,14 @@ def train_models(
                 "full_time_component_model_hash": model["components"]["full_time"][
                     "model_hash"
                 ],
+                "fixed_holdout_evaluation": copy.deepcopy(
+                    evaluation_record["fixed_holdout_evaluation"]
+                ),
+                "deployment_status": deployment_status,
+                "formal_htft_eligible": False,
+                "formal_htft_ineligible_reason": FORMAL_HTFT_INELIGIBLE_REASON,
+                "deployment_policy_version": DEPLOYMENT_POLICY_VERSION,
+                "league_pair_gate_evidence": pair_evidence,
             }
         )
 
@@ -603,7 +1185,9 @@ def train_models(
         "schema_version": REGISTRY_SCHEMA_VERSION,
         "generated_at": _utc_now(),
         "dataset_manifest_hash": bundle_hash,
+        "evaluation_hash": evaluation_hash,
         "validated_training_config": dict(VALIDATED_TRAINING_CONFIG),
+        "deployment_policy": copy.deepcopy(DEPLOYMENT_POLICY),
         "leagues": sorted(entries, key=lambda item: item["league_key"]),
     }
     registry["registry_hash"] = calculate_registry_hash(registry)
@@ -625,10 +1209,15 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
     bundle_hash = _required_hash(
         registry.get("dataset_manifest_hash"), "registry.dataset_manifest_hash"
     )
+    evaluation_hash = _required_hash(
+        registry.get("evaluation_hash"), "registry.evaluation_hash"
+    )
     if registry.get("validated_training_config") != VALIDATED_TRAINING_CONFIG:
         raise LeagueModelManagerError(
             "registry validated_training_config is not the promoted configuration"
         )
+    if registry.get("deployment_policy") != DEPLOYMENT_POLICY:
+        raise LeagueModelManagerError("registry deployment_policy is invalid")
     leagues = registry.get("leagues")
     if not isinstance(leagues, list) or not leagues:
         raise LeagueModelManagerError("registry contains no league models")
@@ -639,7 +1228,11 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
         if not isinstance(entry, Mapping):
             raise LeagueModelManagerError(f"{name} must be an object")
         league_key = entry.get("league_key")
-        if league_key not in LEAGUE_NAMES or league_key in observed_keys:
+        if (
+            not isinstance(league_key, str)
+            or league_key not in LEAGUE_NAMES
+            or league_key in observed_keys
+        ):
             raise LeagueModelManagerError(f"{name}.league_key is invalid or duplicated")
         observed_keys.add(league_key)
         if entry.get("league") != LEAGUE_NAMES[league_key]:
@@ -651,6 +1244,10 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
         if entry.get("dataset_manifest_hash") != bundle_hash:
             raise LeagueModelManagerError(
                 f"{name}.dataset_manifest_hash does not match registry"
+            )
+        if entry.get("evaluation_hash") != evaluation_hash:
+            raise LeagueModelManagerError(
+                f"{name}.evaluation_hash does not match registry"
             )
         aliases = entry.get("aliases")
         if not isinstance(aliases, list) or not aliases or any(
@@ -674,6 +1271,14 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
             "source_data_hash",
         ):
             _required_hash(entry.get(field), f"{name}.{field}")
+        derived_deployment_status = _validate_fixed_holdout_decision(
+            entry.get("fixed_holdout_evaluation"),
+            name=f"{name}.fixed_holdout_evaluation",
+        )
+        if entry.get("deployment_status") != derived_deployment_status:
+            raise LeagueModelManagerError(
+                f"{name}.deployment_status does not match fixed holdout evidence"
+            )
         cutoff = entry.get("training_cutoff")
         if not isinstance(cutoff, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
             raise LeagueModelManagerError(f"{name}.training_cutoff must be an ISO date")
@@ -728,6 +1333,21 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
             or entry.get("excluded_training_rows") != excluded_rows
         ):
             raise LeagueModelManagerError(f"{name} regime row counts are inconsistent")
+        _validate_deployment_fields(
+            entry,
+            league_key=league_key,
+            name=name,
+            dataset_manifest_hash=bundle_hash,
+            evaluation_hash=evaluation_hash,
+            model_hash=entry["model_hash"],
+            regime_warning=_regime_warning(regime_policy),
+        )
+        if entry["league_pair_gate_evidence"].get(
+            "eligible_sample_count"
+        ) != entry["fixed_holdout_evaluation"].get("sample_count"):
+            raise LeagueModelManagerError(
+                f"{name} fixed holdout and pair-gate sample counts disagree"
+            )
 
 
 def load_registry(model_dir: str | Path) -> dict[str, Any]:
@@ -755,6 +1375,160 @@ def _resolve_registry_entry(
     if len(matches) != 1:
         raise LeagueModelManagerError(f"league alias is ambiguous: {league}")
     return matches[0]
+
+
+def validate_registry_inspection(
+    inspection: Mapping[str, Any], *, registry: Mapping[str, Any] | None = None
+) -> None:
+    if not isinstance(inspection, Mapping):
+        raise LeagueModelManagerError("registry inspection must be a JSON object")
+    if inspection.get("artifact_type") != REGISTRY_INSPECTION_ARTIFACT_TYPE:
+        raise LeagueModelManagerError("unexpected registry inspection artifact_type")
+    if inspection.get("schema_version") != REGISTRY_INSPECTION_SCHEMA_VERSION:
+        raise LeagueModelManagerError("unsupported registry inspection schema_version")
+    _parse_aware_datetime(inspection.get("generated_at"), "inspection.generated_at")
+    stored_hash = _required_hash(
+        inspection.get("inspection_hash"), "inspection.inspection_hash"
+    )
+    if stored_hash != calculate_registry_inspection_hash(inspection):
+        raise LeagueModelManagerError(
+            "inspection_hash does not match registry inspection contents"
+        )
+    if inspection.get("deployment_policy") != DEPLOYMENT_POLICY:
+        raise LeagueModelManagerError("registry inspection deployment_policy is invalid")
+    _required_hash(inspection.get("registry_hash"), "inspection.registry_hash")
+    _required_hash(
+        inspection.get("dataset_manifest_hash"),
+        "inspection.dataset_manifest_hash",
+    )
+    _required_hash(inspection.get("evaluation_hash"), "inspection.evaluation_hash")
+    models = inspection.get("models")
+    if not isinstance(models, list) or not models:
+        raise LeagueModelManagerError("registry inspection contains no models")
+    model_count = inspection.get("model_count")
+    if (
+        isinstance(model_count, bool)
+        or not isinstance(model_count, int)
+        or model_count != len(models)
+    ):
+        raise LeagueModelManagerError("registry inspection model_count is inconsistent")
+    observed_keys: set[str] = set()
+    for index, item in enumerate(models):
+        name = f"inspection.models[{index}]"
+        if not isinstance(item, Mapping):
+            raise LeagueModelManagerError(f"{name} must be an object")
+        league_key = item.get("league_key")
+        if (
+            not isinstance(league_key, str)
+            or league_key not in LEAGUE_NAMES
+            or league_key in observed_keys
+        ):
+            raise LeagueModelManagerError(f"{name}.league_key is invalid or duplicated")
+        observed_keys.add(league_key)
+        if item.get("league") != LEAGUE_NAMES[league_key]:
+            raise LeagueModelManagerError(f"{name}.league does not match league_key")
+        _required_hash(item.get("model_hash"), f"{name}.model_hash")
+        _required_hash(
+            item.get("full_time_component_model_hash"),
+            f"{name}.full_time_component_model_hash",
+        )
+        cutoff = item.get("training_cutoff")
+        if not isinstance(cutoff, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+            raise LeagueModelManagerError(f"{name}.training_cutoff must be an ISO date")
+        derived_status = _validate_fixed_holdout_decision(
+            item.get("fixed_holdout_evaluation"),
+            name=f"{name}.fixed_holdout_evaluation",
+        )
+        if item.get("deployment_status") != derived_status:
+            raise LeagueModelManagerError(
+                f"{name}.deployment_status does not match fixed holdout evidence"
+            )
+        _validate_deployment_fields(
+            item,
+            league_key=league_key,
+            name=name,
+            dataset_manifest_hash=inspection["dataset_manifest_hash"],
+            evaluation_hash=inspection["evaluation_hash"],
+            model_hash=item["model_hash"],
+        )
+
+    if registry is not None:
+        validate_registry(registry)
+        if inspection.get("registry_hash") != registry.get("registry_hash"):
+            raise LeagueModelManagerError(
+                "registry inspection registry_hash does not match registry"
+            )
+        if inspection.get("dataset_manifest_hash") != registry.get(
+            "dataset_manifest_hash"
+        ):
+            raise LeagueModelManagerError(
+                "registry inspection dataset_manifest_hash does not match registry"
+            )
+        if inspection.get("evaluation_hash") != registry.get("evaluation_hash"):
+            raise LeagueModelManagerError(
+                "registry inspection evaluation_hash does not match registry"
+            )
+        for item in models:
+            entry = _resolve_registry_entry(registry, item["league_key"])
+            for field in (
+                "league",
+                "model_hash",
+                "full_time_component_model_hash",
+                "training_cutoff",
+                "fixed_holdout_evaluation",
+                *DEPLOYMENT_FIELD_NAMES,
+            ):
+                if item.get(field) != entry.get(field):
+                    raise LeagueModelManagerError(
+                        f"registry inspection {field} does not match registry entry"
+                    )
+
+
+def inspect_registry(
+    model_dir: str | Path, league: str | None = None
+) -> dict[str, Any]:
+    """Return a hash-protected, read-only deployment view of registered models."""
+
+    registry = load_registry(model_dir)
+    entries = (
+        [_resolve_registry_entry(registry, league)]
+        if league is not None
+        else list(registry["leagues"])
+    )
+    models = []
+    for entry in entries:
+        models.append(
+            {
+                "league_key": entry["league_key"],
+                "league": entry["league"],
+                "model_hash": entry["model_hash"],
+                "full_time_component_model_hash": entry[
+                    "full_time_component_model_hash"
+                ],
+                "training_cutoff": entry["training_cutoff"],
+                "fixed_holdout_evaluation": copy.deepcopy(
+                    entry["fixed_holdout_evaluation"]
+                ),
+                **{
+                    field: copy.deepcopy(entry[field])
+                    for field in DEPLOYMENT_FIELD_NAMES
+                },
+            }
+        )
+    inspection: dict[str, Any] = {
+        "artifact_type": REGISTRY_INSPECTION_ARTIFACT_TYPE,
+        "schema_version": REGISTRY_INSPECTION_SCHEMA_VERSION,
+        "generated_at": _utc_now(),
+        "registry_hash": registry["registry_hash"],
+        "dataset_manifest_hash": registry["dataset_manifest_hash"],
+        "evaluation_hash": registry["evaluation_hash"],
+        "deployment_policy": copy.deepcopy(registry["deployment_policy"]),
+        "model_count": len(models),
+        "models": models,
+    }
+    inspection["inspection_hash"] = calculate_registry_inspection_hash(inspection)
+    validate_registry_inspection(inspection, registry=registry)
+    return inspection
 
 
 def _validate_prediction_timing(
@@ -1059,6 +1833,27 @@ def validate_prediction_bundle(
         raise LeagueModelManagerError(
             "prediction_bundle_hash does not match manifest contents"
         )
+    league_key = manifest.get("league_key")
+    if not isinstance(league_key, str) or league_key not in LEAGUE_NAMES:
+        raise LeagueModelManagerError("prediction bundle league_key is unsupported")
+    bundle_dataset_hash = _required_hash(
+        manifest.get("dataset_manifest_hash"),
+        "prediction bundle dataset_manifest_hash",
+    )
+    bundle_evaluation_hash = _required_hash(
+        manifest.get("evaluation_hash"), "prediction bundle evaluation_hash"
+    )
+    bundle_model_hash = _required_hash(
+        manifest.get("model_hash"), "prediction bundle model_hash"
+    )
+    _validate_deployment_fields(
+        manifest,
+        league_key=league_key,
+        name="prediction bundle",
+        dataset_manifest_hash=bundle_dataset_hash,
+        evaluation_hash=bundle_evaluation_hash,
+        model_hash=bundle_model_hash,
+    )
     try:
         htft_model.validate_prediction(htft_prediction, model=model)
     except htft_model.HTFTModelError as exc:
@@ -1067,6 +1862,23 @@ def validate_prediction_bundle(
     if htft_prediction.get("prediction_hash") != calculated_htft_hash:
         raise LeagueModelManagerError("HT/FT prediction hash does not match contents")
     validate_score_prediction(score_prediction)
+    for artifact_name, artifact in (
+        ("HT/FT prediction", htft_prediction),
+        ("canonical score prediction", score_prediction),
+    ):
+        _validate_deployment_fields(
+            artifact,
+            league_key=league_key,
+            name=artifact_name,
+            dataset_manifest_hash=bundle_dataset_hash,
+            evaluation_hash=bundle_evaluation_hash,
+            model_hash=bundle_model_hash,
+        )
+        for field in DEPLOYMENT_FIELD_NAMES:
+            if artifact.get(field) != manifest.get(field):
+                raise LeagueModelManagerError(
+                    f"{artifact_name} {field} does not match bundle"
+                )
     calculated_score_hash = _canonical_hash(score_prediction)
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, Mapping):
@@ -1099,12 +1911,11 @@ def validate_prediction_bundle(
             raise LeagueModelManagerError(
                 f"score and HT/FT fixture {field} do not match"
             )
-    league_key = manifest.get("league_key")
     if htft_fixture.get("competition_key") != league_key:
         raise LeagueModelManagerError(
             "HT/FT fixture competition_key does not match bundle league"
         )
-    model_hash = _required_hash(manifest.get("model_hash"), "bundle model_hash")
+    model_hash = bundle_model_hash
     if htft_prediction.get("model_hash") != model_hash:
         raise LeagueModelManagerError("HT/FT model hash does not match bundle")
     try:
@@ -1185,11 +1996,20 @@ def validate_prediction_bundle(
             raise LeagueModelManagerError(
                 "bundle dataset manifest hash does not match registry"
             )
+        if manifest.get("evaluation_hash") != registry.get("evaluation_hash"):
+            raise LeagueModelManagerError(
+                "bundle evaluation hash does not match registry"
+            )
         entry = _resolve_registry_entry(registry, str(league_key))
         bindings = {
             "model_hash": model_hash,
             "full_time_component_model_hash": expected_component_hash,
             "training_cutoff": cutoff,
+            "evaluation_hash": bundle_evaluation_hash,
+            **{
+                field: manifest.get(field)
+                for field in DEPLOYMENT_FIELD_NAMES
+            },
         }
         for field, actual in bindings.items():
             if entry.get(field) != actual:
@@ -1295,6 +2115,14 @@ def predict_registered_model(
         )
     except (htft_model.HTFTModelError, score_model.ScoreModelError) as exc:
         raise LeagueModelManagerError(f"prediction failed: {exc}") from exc
+    deployment_fields = {
+        field: copy.deepcopy(entry[field]) for field in DEPLOYMENT_FIELD_NAMES
+    }
+    htft_prediction.update(copy.deepcopy(deployment_fields))
+    score_prediction.update(copy.deepcopy(deployment_fields))
+    htft_prediction["prediction_hash"] = htft_model.calculate_prediction_hash(
+        htft_prediction
+    )
     consistency = _validate_probability_consistency(
         htft_prediction,
         score_prediction,
@@ -1312,11 +2140,13 @@ def predict_registered_model(
         "league": entry["league"],
         "registry_hash": registry["registry_hash"],
         "dataset_manifest_hash": registry["dataset_manifest_hash"],
+        "evaluation_hash": registry["evaluation_hash"],
         "model_hash": entry["model_hash"],
         "full_time_component_model_hash": entry[
             "full_time_component_model_hash"
         ],
         "training_cutoff": entry["training_cutoff"],
+        **copy.deepcopy(deployment_fields),
         "fixture": copy.deepcopy(htft_prediction.get("fixture")),
         "external_anchors": {
             "half_time": half_time_anchor is not None,
@@ -1409,9 +2239,28 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train", help="train every league in a dataset bundle")
     train.add_argument("--dataset-dir", required=True)
     train.add_argument("--model-dir", required=True)
+    train.add_argument(
+        "--evaluation-artifact",
+        "--evaluation",
+        dest="evaluation_artifact",
+        required=True,
+        help=(
+            "fixed-season HT/FT evaluation JSON; its source files are reopened "
+            "and validated against --dataset-dir"
+        ),
+    )
     train.add_argument("--iterations", type=int, default=1200)
     train.add_argument("--learning-rate", type=float, default=0.03)
     train.add_argument("--regularization", type=float, default=0.02)
+
+    inspect_command = subparsers.add_parser(
+        "inspect", help="inspect model hashes and deployment eligibility"
+    )
+    inspect_command.add_argument("--model-dir", required=True)
+    inspect_command.add_argument(
+        "--league", help="optional league key or registered Chinese name"
+    )
+    inspect_command.add_argument("--output", help="optional inspection JSON artifact")
 
     predict = subparsers.add_parser("predict", help="predict with a registered league model")
     predict.add_argument("--model-dir", required=True)
@@ -1466,16 +2315,27 @@ def _output_manifest_with_files(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
     try:
         if arguments.command == "train":
             registry = train_models(
                 arguments.dataset_dir,
                 arguments.model_dir,
+                evaluation_artifact=arguments.evaluation_artifact,
                 iterations=arguments.iterations,
                 learning_rate=arguments.learning_rate,
                 regularization=arguments.regularization,
             )
             sys.stdout.write(_json_bytes(registry).decode("utf-8"))
+            return 0
+
+        if arguments.command == "inspect":
+            inspection = inspect_registry(arguments.model_dir, arguments.league)
+            if arguments.output:
+                _atomic_json(Path(arguments.output).resolve(), inspection)
+            sys.stdout.write(_json_bytes(inspection).decode("utf-8"))
             return 0
 
         if arguments.score_output and not arguments.manifest_output:

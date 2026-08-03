@@ -44,6 +44,34 @@ ODDS_CONTEXT = {
     "captured_at": "2026-08-02T12:00:00Z",
     "kickoff": "2026-08-02T13:00:00Z",
 }
+MODEL_HASH = "sha256:" + "1" * 64
+
+
+def league_evidence(
+    league_key: str,
+    *,
+    eligible: int,
+    covered: int,
+    hits: int,
+    deployment_status: str = "candidate",
+    regime_warning: str | None = None,
+) -> dict[str, object]:
+    return {
+        "version": ranker.LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+        "dataset_manifest_hash": "sha256:" + "2" * 64,
+        "evaluation_hash": "sha256:" + "3" * 64,
+        "model_hash": MODEL_HASH,
+        "league_key": league_key,
+        "source_role": "historical_post_selection_development_evidence",
+        "threshold": ranker.MODEL_ONLY_PAIR_MASS_THRESHOLD,
+        "eligible_sample_count": eligible,
+        "covered_count": covered,
+        "hit_count": hits,
+        "deployment_status": deployment_status,
+        "regime_warning": regime_warning,
+        "formal_htft_eligible": False,
+        "production_confidence_eligible": False,
+    }
 
 
 def market_with_scenario_edges() -> dict[str, float]:
@@ -369,6 +397,10 @@ class HtftRankerTests(unittest.TestCase):
             firm_count=6,
             data_quality="high",
             league_key="brazil_serie_a",
+            league_evidence=league_evidence(
+                "brazil_serie_a", eligible=380, covered=125, hits=60
+            ),
+            model_hash=MODEL_HASH,
         )
         self.assertAlmostEqual(model_only["pair_mass"], 0.48)
         self.assertEqual(model_only["pair_mass_threshold"], 0.46)
@@ -462,12 +494,39 @@ class HtftRankerTests(unittest.TestCase):
             half,
             full,
             league_key="japan_j1",
+            league_evidence=league_evidence(
+                "japan_j1",
+                eligible=380,
+                covered=66,
+                hits=32,
+                regime_warning="special-season regime shift is unconfirmed",
+            ),
+            model_hash=MODEL_HASH,
         )
         korea = ranker.rank_htft(
             matrix,
             half,
             full,
-            league_key="korea_k1",
+            league_key="korea_k_league_1",
+            league_evidence=league_evidence(
+                "korea_k_league_1",
+                eligible=228,
+                covered=29,
+                hits=10,
+                deployment_status="shadow",
+                regime_warning="historical model did not clear the deployment gate",
+            ),
+            model_hash=MODEL_HASH,
+        )
+        spain = ranker.rank_htft(
+            matrix,
+            half,
+            full,
+            league_key="spain_la_liga",
+            league_evidence=league_evidence(
+                "spain_la_liga", eligible=380, covered=143, hits=94
+            ),
+            model_hash=MODEL_HASH,
         )
 
         self.assertTrue(japan["pair_mass_threshold_crossed"])
@@ -482,8 +541,20 @@ class HtftRankerTests(unittest.TestCase):
         )
         self.assertEqual(
             korea["confidence_status"],
-            "unsupported_league_no_training_evidence",
+            "shadow_model_live_forward_unconfirmed",
         )
+        self.assertEqual(korea["league_gate_evidence"]["deployment_status"], "shadow")
+        self.assertAlmostEqual(
+            korea["league_gate_evidence"]["hit_rate_when_covered"], 10 / 29
+        )
+        self.assertFalse(korea["league_gate_evidence"]["historical_component_signal"])
+        self.assertEqual(
+            spain["league_gate_evidence"]["status"],
+            "historical_component_signal_live_forward_unconfirmed",
+        )
+        self.assertTrue(spain["league_gate_evidence"]["historical_component_signal"])
+        self.assertFalse(spain["league_gate_evidence"]["production_confidence_eligible"])
+        self.assertFalse(spain["pair_mass_gate_passed"])
         self.assertEqual(korea["formal_count"], 0)
 
     def test_odds_context_requires_pre_kickoff_provenance(self):

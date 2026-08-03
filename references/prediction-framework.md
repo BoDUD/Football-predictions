@@ -227,7 +227,8 @@ then claim the resulting edge is independent.
 
 ### Market-alignment gate
 
-The current strict forward policy keeps Asian handicap, first-half, and HT/FT directions
+The current strict forward policy keeps Asian handicap, first-half, HT/FT, corner-total, and
+corner-handicap directions
 `observation_only`. They may be calculated and archived for calibration, but cannot become a
 formal primary until a later versioned policy is supported by enough clean out-of-sample
 records. Legacy or backfilled wins do not count toward re-enabling a market.
@@ -261,7 +262,7 @@ Any formal total-goals direction needs consensus from at least five firms and ei
 
 ### Expanded-market evidence gate
 
-Read [expanded-markets.md](expanded-markets.md). Goal ranges and BTTS need a complete mutually exclusive current market plus chance-quality or confirmed attacking-configuration evidence. Corner totals and handicaps need a complete two-way market from at least three firms plus independent corner-profile evidence. A historical percentage, raw goals average, possession figure, or isolated price cannot satisfy these gates alone.
+Read [expanded-markets.md](expanded-markets.md). Goal ranges and BTTS need a complete mutually exclusive current market plus chance-quality or confirmed attacking-configuration evidence. Corner totals and handicaps need a complete two-way market from at least three firms plus independent corner-profile evidence even for diagnostic qualification. The current corner manager is historical-only and returns `formal_corner_total_eligible=false` and `formal_corner_handicap_eligible=false`, so these candidates remain observations until a future manager binds separate strict live-forward validation. A historical percentage, raw goals average, possession figure, or isolated price cannot satisfy these gates alone.
 
 Build one pool only from candidates that pass every audit and market-specific gate. Use
 the versioned selection policy emitted by `memory_store.py`; do not rank with an informal
@@ -321,7 +322,7 @@ format. A caller-supplied value is only an assertion to audit; it is never autho
 2. Exactly two user-facing exact-score scenarios. Preserve the unconditional Top 2 internally; for a formal total primary, display the two highest-probability net-profit scenarios and label the conditioning explicitly
 3. Confidence level for each recommendation
 4. Best qualified first-half direction, or `无正EV建议`
-5. A 3x3 HT/FT probability matrix and exactly two probability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, then select the two largest joint cells with `probability_top2_v3_post_selection` and the canonical HH, HD, HA, DH, DD, DA, AH, AD, AA tie-break. Conditional follow-through, state continuity, aggregate full-time coherence, exact-score result classes, odds, and EV remain visible audits or qualification gates only; none may replace a probability Top-2 cell. Pass `league_key` and display its league-specific 2025 development evidence. The 0.46 model-only pair-mass threshold is descriptive, not a confirmed confidence label: the Wilson 95% lower bound for every supported league remains at or below 50%. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. The 0.50 gate is confined to the evaluator's untimestamped full-time-opening research cohort. Diagnostic price qualification additionally requires all nine executable current HT/FT odds from one market snapshot, with source and pre-kickoff collection time; partial prices plus caller-supplied probabilities cannot qualify. Under `strict-oos-market-policy-v1`, keep both scenarios observation-only and require the ranker to expose zero formal picks regardless of diagnostic gates.
+5. A 3x3 HT/FT probability matrix and exactly two probability-selected HT/FT scenarios whenever the matrix can be calculated. Validate its half-time row and full-time column marginals, then select the two largest joint cells with `probability_top2_v3_post_selection` and the canonical HH, HD, HA, DH, DD, DA, AH, AD, AA tie-break. Conditional follow-through, state continuity, aggregate full-time coherence, exact-score result classes, odds, and EV remain visible audits or qualification gates only; none may replace a probability Top-2 cell. Pass `league_key`, current model hash, and the registry-issued `league_pair_gate_evidence`; the ranker must verify its dataset/evaluation/model/league lineage instead of using a hard-coded historical table. Historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Metrics from an untimestamped full-time-opening research cohort stay confined to that cohort. Diagnostic price qualification additionally requires all nine executable current HT/FT odds from one market snapshot, with source and pre-kickoff collection time; partial prices plus caller-supplied probabilities cannot qualify. Under `strict-oos-market-policy-v1`, keep both scenarios observation-only and require the ranker to expose zero formal picks regardless of diagnostic gates.
 
 Treat both exact scores only as shape/scenario references. Never include Top-1 or Top-2 exact-score hits in primary-pick or all-formal accuracy/ROI.
 
@@ -346,6 +347,6 @@ Treat both exact scores only as shape/scenario references. Never include Top-1 o
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件 Top 2，并让 `--predicted-score` 等于无条件第一项。若唯一主推是全场大小球，再通过两个 `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` 和 `--display-exact-score-event-probability` 保存面向用户的主推条件场景。只有通过阈值的正式推荐写入 `asian_pick`、`total_pick`、`goal_range_pick`、`btts_pick`、`corner_total_pick`、`corner_handicap_pick`、`half_time_pick` 和 `htft_picks`。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件 Top 2，并让 `--predicted-score` 等于无条件第一项。若唯一主推是全场大小球，再通过两个 `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` 和 `--display-exact-score-event-probability` 保存面向用户的主推条件场景。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

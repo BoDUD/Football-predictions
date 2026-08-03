@@ -2,6 +2,14 @@
 
 Treat all supported markets as one candidate pool. Asian handicap and full-time totals have no automatic priority over the markets below. Select at most one primary from the whole pool; archive other threshold-qualified directions as secondary references only. Never settle, grade, stake, or include a secondary in accuracy or ROI.
 
+“Supported” does not mean “currently formal-enabled.” Under
+`strict-oos-market-policy-v1`, corner totals and corner handicaps are
+`observation_only`. The current corner manager binds historical training and walk-forward
+artifacts but deliberately emits `formal_corner_total_eligible=false` and
+`formal_corner_handicap_eligible=false`. Until a later manager version binds independent
+strict live-forward validation and turns on the matching flag, a corner candidate may be
+shown only as `◇` observation and cannot be the primary or a settled secondary.
+
 ## Supported markets
 
 | Market key | Display example | Model basis | Required current market |
@@ -11,7 +19,11 @@ Treat all supported markets as one candidate pool. Asian handicap and full-time 
 | `corner_total` | 角球大 10.5 | Independent total-corners distribution | Both over and under at the selected line |
 | `corner_handicap` | 主队角球 -1.5 | Independent corner-margin distribution | Both home and away at the selected line |
 
-Use `goal_range_pick`, `btts_pick`, `corner_total_pick`, and `corner_handicap_pick` as the machine-readable record fields. Give each formal pick a role; exactly one formal pick must be `primary` and every other formal pick must be `secondary`.
+Use `goal_range_pick` and `btts_pick` for policy-enabled formal records. The
+`corner_total_pick` and `corner_handicap_pick` fields are reserved for a future policy version
+or quarantined legacy compatibility; do not populate them while the corresponding manager
+formal flag is false. Give each admitted formal pick a role; exactly one formal pick must be
+`primary` and every other formal pick must be `secondary`.
 
 ## Probabilities
 
@@ -24,7 +36,14 @@ Use the same complete score matrix as exact-score and total-goals analysis:
 
 Do not create a new goal distribution only to favor a market. Preserve 0-0 and the distribution tail when calculating every band, including `7+`.
 
-Build corner probabilities separately. Use recent home/away corners for and against, opponent-adjusted corner rates, dangerous attacks, width and crossing, set-piece volume, match state tendencies, and confirmed lineup roles. Produce both a total-corners distribution and a home-minus-away corner-margin distribution. Football goals, possession, or xG alone are not corner evidence.
+Build corner probabilities separately with the registered corner-count model. Its training
+data must contain verified 90-minute home and away corner counts, chronological fixture
+times, normalized league/team identities, dataset hash, and an as-of cutoff. Derive both the
+total-corners and home-minus-away distributions from that one registered joint prediction.
+Width/crossing, dangerous attacks, set-piece volume, match-state tendencies, and confirmed
+personnel are independent evidence or sensitivity inputs unless a later versioned model
+actually learns them; do not hand-adjust the probability artifact from prose. Football
+goals, possession, or xG alone are not corner evidence.
 
 ## Prices and evidence
 
@@ -33,7 +52,8 @@ Build corner probabilities separately. Use recent home/away corners for and agai
 - Record source, timezone-aware collection time, bookmaker count, market completeness, odds format, `consensus` or `median` price basis, model probability, no-vig market probability, edge, EV, and market signal.
 - Require strictly positive EV and edge plus medium/high data quality for an ordinary formal direction. EV `8%` and edge `4pp` remain adverse-signal qualification thresholds, not generic targets or evidence to tune toward.
 - Require chance-quality evidence or an attacking configuration supported by confirmed lineups for goal ranges and BTTS.
-- Require at least three firms plus `corner_profile_evidence` for corner totals and corner handicaps.
+- For diagnostic corner qualification, require at least three firms plus
+  `corner_profile_evidence`. This still cannot override a false manager formal flag.
 - When line and related markets move materially against or materially conflict with a selection, require EV `>= 8%`, edge `>= 4pp`, at least five firms, and independent confirmed-lineup or fundamental evidence.
 
 Compare candidates using an executable consensus or median price, edge, evidence quality, and market depth. Do not rank a single-firm outlier price as the best candidate merely because its raw EV is highest.
@@ -72,9 +92,9 @@ Use the dedicated `record` arguments:
 - Repeat `--goal-range-market-odds LABEL:PRICE` for every complete outcome. Use the equivalent repeated `--*-market-odds` flag for each other formal market.
 - The equivalent `--btts-*`, `--corner-total-*`, or `--corner-handicap-*` arguments for those markets
 - For each corner market, also pass the five `--*-full-win-probability`, `--*-half-win-probability`, `--*-push-probability`, `--*-half-loss-probability`, and `--*-loss-probability` values
-- `--corner-profile-evidence` whenever a formal corner pick is archived
+- `--corner-profile-evidence` whenever a future policy-enabled formal corner pick is archived
 
-Pass the relevant `--*-market-complete` flag only after every required outcome of that current market has been verified.
+Pass the relevant `--*-market-complete` flag only after every required outcome of that current market has been verified. While the manager formal flags remain false, keep these values in a corner-ranker observation artifact and do not pass formal corner-pick arguments to `memory_store.py record`.
 The archive retains the complete outcome prices, raw implied probabilities, server-calculated no-vig probabilities, and audit metadata. The validator checks `edge_pp = 100 * (model_probability - market_probability)`.
 
 A lineup check may maintain, replace, or cancel any market. Compare goal-range identity by its range, BTTS identity by its side, and corner identity by side plus line. Recalculate the versioned selection policy at current prices: when the old thesis remains eligible, replacement needs a current confidence gain of at least five points; when hard information invalidates it, archive that reason and use the new safe Rank 1 or no primary. Preserve the previous version append-only in `revisions` and settle only the final active version.

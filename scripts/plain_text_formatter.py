@@ -27,6 +27,19 @@ RESULT_LABELS = {
     "loss": "黑",
 }
 HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
+OBSERVATION_GATE_LABELS = {
+    "complete_current_market": "完整当前9路赔率",
+    "odds_provenance": "赛前赔率来源时间戳",
+    "positive_ev": "正EV",
+    "positive_edge": "正边际",
+    "bookmaker_depth": "至少5家公司",
+    "data_quality": "中高数据质量",
+    "scenario_stability": "形态稳定性",
+    "scenario_coherence": "全场一致性",
+    "descriptive_pair_mass_threshold": "Top2概率和描述阈值",
+    "league_forward_evidence": "联赛前向验证",
+    "market_policy_enabled": "当前政策放行",
+}
 FORBIDDEN_MARKUP = re.compile(r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I)
 ZERO_ZERO_REFERENCE = re.compile(r"0-0", re.IGNORECASE)
 ZERO_ZERO_CONTINUATION = re.compile(
@@ -252,7 +265,72 @@ def half_time_text(version: dict[str, Any], record: dict[str, Any]) -> str:
 
 def htft_text(version: dict[str, Any], record: dict[str, Any]) -> str:
     picks = [pick for pick in version.get("htft_picks", []) if isinstance(pick, dict)]
-    return "、".join(format_pick("htft", pick, record) for pick in picks[:2]) if picks else "观察或赔率缺失"
+    if picks:
+        return "、".join(format_pick("htft", pick, record) for pick in picks[:2])
+    audits = [
+        audit
+        for audit in version.get("candidate_audits", [])
+        if isinstance(audit, dict) and audit.get("market") == "htft"
+    ]
+    if not audits:
+        return "观察或赔率缺失"
+    audit = audits[-1]
+    top_two = [
+        item for item in audit.get("top_two", []) if isinstance(item, dict)
+    ][:2]
+    if not top_two:
+        return "观察或赔率缺失"
+    scenarios = "、".join(
+        f"{format_pick('htft', item, record)}（{percentage(item.get('probability'))}）"
+        for item in top_two
+    )
+    priority = (
+        "market_policy_enabled",
+        "complete_current_market",
+        "odds_provenance",
+        "bookmaker_depth",
+        "positive_ev",
+        "positive_edge",
+        "league_forward_evidence",
+        "data_quality",
+        "scenario_stability",
+        "scenario_coherence",
+        "descriptive_pair_mass_threshold",
+    )
+    failed = {
+        str(gate.get("gate"))
+        for item in top_two
+        for gate in item.get("gates", [])
+        if isinstance(gate, dict) and gate.get("passed") is False
+    }
+    labels = [OBSERVATION_GATE_LABELS[name] for name in priority if name in failed][:3]
+    pair_mass = audit.get("pair_probability_mass")
+    mass_text = f"，合计{percentage(pair_mass)}" if pair_mass is not None else ""
+    failure_text = f"；未通过：{'、'.join(labels)}" if labels else ""
+    return f"观察 {scenarios}{mass_text}{failure_text}"
+
+
+def observation_review_text(record: dict[str, Any]) -> str | None:
+    diagnostics = [
+        item
+        for item in record.get("observation_diagnostics", [])
+        if isinstance(item, dict) and item.get("market") == "htft"
+    ]
+    if not diagnostics:
+        return None
+    diagnostic = diagnostics[-1]
+    if diagnostic.get("status") != "graded_observation":
+        return "半全场观察诊断：缺半场比分，未评级（不结算、不计战绩）"
+    actual = "/".join(
+        HTFT_LABELS.get(char, char)
+        for char in str(diagnostic.get("actual_selection") or "")
+    )
+    top1 = "命中" if diagnostic.get("top1_hit") is True else "未命中"
+    top2 = "命中" if diagnostic.get("top2_hit") is True else "未命中"
+    return (
+        f"半全场观察诊断：实际{actual}，Top1{top1}、Top2{top2}"
+        "（不结算、不计战绩）"
+    )
 
 
 def validate_plain_text(lines: list[str]) -> str:
@@ -371,6 +449,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         if primary
         else "学习归档：无主推观察样本（只用于规则与数据质量复核）"
     )
+    observation_line = observation_review_text(record)
     return validate_plain_text([
         f"【赛后复盘｜{league_key}｜{record.get('match_id')}】",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
@@ -378,6 +457,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         f"结算依据：{basis_label}最终有效推荐",
         primary_result_line,
         learning_scope_line,
+        observation_line,
         f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",
         f"比分参考：{exact_scores(record)}｜命中排名："
         f"{record.get('display_exact_score_hit_rank', record.get('exact_score_hit_rank')) or '未命中'}",

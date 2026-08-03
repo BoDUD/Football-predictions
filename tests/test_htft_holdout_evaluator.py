@@ -38,10 +38,19 @@ def _row(
     half: tuple[int, int],
     *,
     competition_regime: str = "regular",
+    format_version: str | None = None,
+    phase_group: str | None = None,
+    season_status: str | None = None,
+    round_label: str = "1",
 ) -> dict[str, str | int]:
     match_date = f"{season}-{month_day}"
     half_result = _result_code(*half)
     full_result = _result_code(*full)
+    league_name, _spec = next(
+        (name, spec)
+        for name, spec in evaluator.history_importer.LEAGUE_SPECS.items()
+        if spec["league_key"] == league_key
+    )
     return {
         "date": match_date,
         "home_team": home,
@@ -54,14 +63,21 @@ def _row(
         "full_result": full_result,
         "htft_result": half_result + full_result,
         "league_key": league_key,
-        "league": league_key.upper(),
+        "league": league_name,
         "season": season,
         "competition_regime": competition_regime,
-        "round": "1",
-        "source_row": "2",
-        "source_kickoff": match_date + "T12:00:00+00:00",
+        "format_version": format_version
+        or evaluator.history_importer._format_version(league_key, season),
+        "phase_group": phase_group
+        or evaluator.history_importer._phase_group(league_key, round_label),
+        # The complete/partial label is source-count dependent and is finalized
+        # by _build_bundle after every synthetic fixture has been assembled.
+        "season_status": season_status or "pending_test_bundle_status",
+        "round": round_label,
+        "source_row": "3",
+        "source_kickoff": match_date + "T12:00+00:00",
         "source_timezone": "UTC",
-        "kickoff_utc": match_date + "T12:00:00Z",
+        "kickoff_utc": match_date + "T12:00Z",
     }
 
 
@@ -117,11 +133,14 @@ def _write_csv(path: Path, fields: tuple[str, ...], rows: list[dict[str, object]
 def _market_rows(score_rows: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for score in score_rows:
-        for bookmaker, odds in (
-            ("alpha", (2.20, 3.30, 3.10)),
-            ("beta", (2.30, 3.20, 3.00)),
-            ("gamma", (2.25, 3.25, 3.05)),
-            ("delta", (2.28, 3.22, 3.02)),
+        for (bookmaker, _label), odds in zip(
+            evaluator.history_importer.BOOKMAKERS,
+            (
+                (2.20, 3.30, 3.10),
+                (2.30, 3.20, 3.00),
+                (2.25, 3.25, 3.05),
+                (2.28, 3.22, 3.02),
+            ),
         ):
             rows.append(
                 {
@@ -129,6 +148,9 @@ def _market_rows(score_rows: list[dict[str, object]]) -> list[dict[str, object]]
                     "league": score["league"],
                     "season": score["season"],
                     "competition_regime": score["competition_regime"],
+                    "format_version": score["format_version"],
+                    "phase_group": score["phase_group"],
+                    "season_status": score["season_status"],
                     "round": score["round"],
                     "source_row": score["source_row"],
                     "source_kickoff": score["source_kickoff"],
@@ -169,8 +191,8 @@ def _build_bundle(
                 if int(row["season"]) == 2026:
                     if row["date"] == "2026-02-01":
                         row["date"] = "2026-02-06"
-                        row["source_kickoff"] = "2026-02-06T12:00:00+00:00"
-                        row["kickoff_utc"] = "2026-02-06T12:00:00Z"
+                        row["source_kickoff"] = "2026-02-06T12:00+00:00"
+                        row["kickoff_utc"] = "2026-02-06T12:00Z"
                     row["competition_regime"] = (
                         evaluator.history_importer.JAPAN_J1_VISION_REGIME
                     )
@@ -178,7 +200,7 @@ def _build_bundle(
                 _row(
                     league_key,
                     2026,
-                    "08-07",
+                    "06-07",
                     "A",
                     "B",
                     (1, 0),
@@ -187,7 +209,29 @@ def _build_bundle(
             )
         if leak_training_date:
             score_rows[5]["date"] = "2024-12-01"
-            score_rows[5]["kickoff_utc"] = "2024-12-01T12:00:00Z"
+            score_rows[5]["source_kickoff"] = "2024-12-01T12:00+00:00"
+            score_rows[5]["kickoff_utc"] = "2024-12-01T12:00Z"
+
+        season_counts: dict[int, int] = {}
+        for row in score_rows:
+            season = int(row["season"])
+            season_counts[season] = season_counts.get(season, 0) + 1
+        # Synthetic fixtures deliberately use compact seasons. Register their
+        # audited schedule totals for this isolated evaluator module so that
+        # 2022-2025 are complete while the as-of 2026 cohort remains partial.
+        registered_counts = evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS.setdefault(
+            league_key, {}
+        )
+        for season, count in season_counts.items():
+            registered_counts[season] = count + (1 if season == 2026 else 0)
+        for row in score_rows:
+            season = int(row["season"])
+            row["season_status"] = evaluator.history_importer._season_status(
+                league_key,
+                season,
+                season_counts[season],
+                "2026-08-03",
+            )
         score_name = f"{league_key}-scores.csv"
         market_name = f"{league_key}-opening-markets.csv"
         score_path = root / score_name
@@ -197,24 +241,85 @@ def _build_bundle(
         _write_csv(market_path, MARKET_FIELDS, market_rows)
         seasons: dict[str, int] = {}
         regimes: dict[str, dict[str, int]] = {}
+        formats: dict[str, dict[str, int]] = {}
+        phases: dict[str, dict[str, int]] = {}
+        statuses: dict[str, dict[str, int]] = {}
         for row in score_rows:
             season = str(row["season"])
             regime = str(row["competition_regime"])
+            format_version = str(row["format_version"])
+            phase_group = str(row["phase_group"])
+            season_status = str(row["season_status"])
             seasons[season] = seasons.get(season, 0) + 1
             by_regime = regimes.setdefault(season, {})
             by_regime[regime] = by_regime.get(regime, 0) + 1
+            by_format = formats.setdefault(season, {})
+            by_format[format_version] = by_format.get(format_version, 0) + 1
+            by_phase = phases.setdefault(season, {})
+            by_phase[phase_group] = by_phase.get(phase_group, 0) + 1
+            by_status = statuses.setdefault(season, {})
+            by_status[season_status] = by_status.get(season_status, 0) + 1
+        league_name, spec = next(
+            (name, item)
+            for name, item in evaluator.history_importer.LEAGUE_SPECS.items()
+            if item["league_key"] == league_key
+        )
+        season_completeness = {
+            season: evaluator.history_importer._season_completeness(
+                league_key,
+                int(season),
+                count,
+                "2026-08-03",
+            )
+            for season, count in sorted(
+                seasons.items(), key=lambda item: int(item[0])
+            )
+        }
+        bookmaker_completeness = {
+            bookmaker: {
+                "opening_1x2": {"rows": len(score_rows), "rate": 1.0},
+                "opening_asian": {"rows": 0, "rate": 0.0},
+                "opening_total": {"rows": 0, "rate": 0.0},
+            }
+            for bookmaker, _label in evaluator.history_importer.BOOKMAKERS
+        }
         leagues.append(
             {
                 "league_key": league_key,
-                "league": league_key.upper(),
+                "league": league_name,
+                "aliases": list(spec.get("aliases", (league_key, league_name))),
+                "output_stem": spec["filename"],
                 "rows": len(score_rows),
                 "seasons": dict(sorted(seasons.items(), key=lambda item: int(item[0]))),
+                "season_completeness": season_completeness,
                 "competition_regimes": {
                     season: dict(sorted(counts.items()))
                     for season, counts in sorted(
                         regimes.items(), key=lambda item: int(item[0])
                     )
                 },
+                "format_versions": {
+                    season: dict(sorted(counts.items()))
+                    for season, counts in sorted(
+                        formats.items(), key=lambda item: int(item[0])
+                    )
+                },
+                "phase_groups": {
+                    season: dict(sorted(counts.items()))
+                    for season, counts in sorted(
+                        phases.items(), key=lambda item: int(item[0])
+                    )
+                },
+                "season_statuses": {
+                    season: dict(sorted(counts.items()))
+                    for season, counts in sorted(
+                        statuses.items(), key=lambda item: int(item[0])
+                    )
+                },
+                "utc_date_start": min(str(row["date"]) for row in score_rows),
+                "utc_date_end": max(str(row["date"]) for row in score_rows),
+                "calendar_rollovers": [],
+                "bookmaker_opening_completeness": bookmaker_completeness,
                 "score_dataset": {
                     "file": score_name,
                     "sha256": evaluator._file_hash(score_path),
@@ -232,8 +337,46 @@ def _build_bundle(
         "artifact_type": "soccer_history_dataset_bundle",
         "schema_version": evaluator.history_importer.DATASET_SCHEMA_VERSION,
         "importer_version": evaluator.history_importer.IMPORTER_VERSION,
+        "as_of_date": "2026-08-03",
+        "season_completeness_policy": dict(
+            evaluator.history_importer.SEASON_COMPLETENESS_POLICY
+        ),
         "source_timezone": "UTC",
-        "leagues": leagues,
+        "kickoff_year_policy": (
+            "explicit per-competition calendar policy; cross-year rollover is "
+            "allowed once only for autumn-to-spring competitions and the documented "
+            "Brazil 2020/AFC 2022 exceptions"
+        ),
+        "training_feature_whitelist": ["date", "home_team", "away_team"],
+        "outcome_label_fields": [
+            "home_goals",
+            "away_goals",
+            "half_home_goals",
+            "half_away_goals",
+            "half_result",
+            "full_result",
+            "htft_result",
+        ],
+        "research_only_fields": [
+            "opening 1X2",
+            "opening Asian handicap",
+            "opening goal total",
+        ],
+        "quarantined_fields": [
+            "all closing prices",
+            "rankings",
+            "total-goals label",
+            "half-time/full-time result label",
+            "win/draw/loss result label",
+        ],
+        "caveats": [
+            "The workbooks do not contain the exact collection timestamp for opening prices.",
+            "Opening prices may be used only as a research baseline until pre-kickoff provenance is verified.",
+            "Source kickoff timezone is supplied explicitly by the importer operator.",
+            "Rows labelled partial_as_of_* are right-censored snapshots and cannot support model promotion.",
+            "Competition format_version and phase_group labels must be evaluated as separate cohorts when material.",
+        ],
+        "leagues": sorted(leagues, key=lambda item: str(item["league_key"])),
     }
     manifest["competition_regime_counts"] = [
         {
@@ -248,7 +391,9 @@ def _build_bundle(
         )
         for regime, count in sorted(counts.items())
     ]
-    manifest["bundle_hash"] = evaluator._canonical_hash(manifest)
+    manifest["bundle_hash"] = evaluator.history_importer._canonical_manifest_hash(
+        manifest
+    )
     manifest_path = root / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -264,8 +409,14 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
     by_split: dict[str, list[dict[str, object]]] = {
         split["split_id"]: [] for split in evaluation["split_policy"]["splits"]
     }
+    promotion_eligible_accumulators: list[dict[str, object]] = []
+    promotion_eligible_cohorts: list[dict[str, str]] = []
+    research_shadow_cohorts: list[dict[str, str]] = []
     for league in evaluation["leagues"]:
         league_accumulators: list[dict[str, object]] = []
+        league_promotion_accumulators: list[dict[str, object]] = []
+        league_promotion_cohorts: list[dict[str, str]] = []
+        league_research_shadow_cohorts: list[dict[str, str]] = []
         for split in league["splits"]:
             model = evaluator._cohort_accumulators(
                 evaluator.MODEL_PAIR_MASS_THRESHOLD
@@ -276,7 +427,9 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
             baseline = evaluator._new_accumulator(
                 evaluator.MODEL_PAIR_MASS_THRESHOLD
             )
-            paired = evaluator._new_paired_accumulator()
+            paired_cohorts = evaluator._new_paired_cohorts()
+            paired = paired_cohorts["overall"]
+            context_slices = evaluator._new_context_slice_accumulators()
             for forecast in split["forecasts"]:
                 used_fallback = forecast["used_league_average_fallback"]
                 evaluator._add_cohort_score(
@@ -297,6 +450,28 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
                     forecast["actual_class"],
                     group=league["league_key"],
                 )
+                cohort = (
+                    "league_average_fallback" if used_fallback else "known_teams"
+                )
+                evaluator._add_paired_score(
+                    paired_cohorts[cohort],
+                    forecast["model_probabilities"],
+                    forecast["empirical_baseline_probabilities"],
+                    forecast["actual_class"],
+                    group=league["league_key"],
+                )
+                evaluator._add_context_slice_score(
+                    context_slices,
+                    format_version=forecast["format_version"],
+                    phase_group=forecast["phase_group"],
+                    model_probabilities=forecast["model_probabilities"],
+                    baseline_probabilities=forecast[
+                        "empirical_baseline_probabilities"
+                    ],
+                    actual_class=forecast["actual_class"],
+                    used_fallback=used_fallback,
+                    group=league["league_key"],
+                )
             split["fallback_fixture_count"] = sum(
                 int(item["used_league_average_fallback"])
                 for item in split["forecasts"]
@@ -312,17 +487,51 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
                     bootstrap_seed=seed,
                 )
             )
+            split["model_minus_empirical_baseline_by_team_availability"] = (
+                evaluator._finalize_paired_cohorts(
+                    paired_cohorts,
+                    bootstrap_repetitions=repetitions,
+                    bootstrap_seed=seed,
+                )
+            )
+            split["context_slices"] = evaluator._finalize_context_slices(
+                context_slices,
+                bootstrap_repetitions=repetitions,
+                bootstrap_seed=seed,
+            )
             accumulators = {
                 "model": model,
                 "market": market,
                 "baseline": baseline,
                 "paired": paired,
+                "context_slices": context_slices,
             }
             league_accumulators.append(accumulators)
             all_accumulators.append(accumulators)
             by_split[split["split_id"]].append(accumulators)
+            cohort = {
+                "league_key": league["league_key"],
+                "split_id": split["split_id"],
+            }
+            if split["evaluation_scope"][
+                "component_promotion_evidence_included"
+            ]:
+                league_promotion_accumulators.append(accumulators)
+                league_promotion_cohorts.append(cohort)
+                promotion_eligible_accumulators.append(accumulators)
+                promotion_eligible_cohorts.append(cohort)
+            else:
+                league_research_shadow_cohorts.append(cohort)
+                research_shadow_cohorts.append(cohort)
         league["summary"] = evaluator._aggregate_split_cohorts(
             league_accumulators,
+            bootstrap_repetitions=repetitions,
+            bootstrap_seed=seed,
+        )
+        league["promotion_evidence"] = evaluator._promotion_evidence_summary(
+            eligible_cohorts=league_promotion_cohorts,
+            research_shadow_cohorts=league_research_shadow_cohorts,
+            eligible_accumulators=league_promotion_accumulators,
             bootstrap_repetitions=repetitions,
             bootstrap_seed=seed,
         )
@@ -341,9 +550,210 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
             bootstrap_seed=seed,
         ),
     }
+    evaluation["promotion_evidence"] = evaluator._promotion_evidence_summary(
+        eligible_cohorts=promotion_eligible_cohorts,
+        research_shadow_cohorts=research_shadow_cohorts,
+        eligible_accumulators=promotion_eligible_accumulators,
+        bootstrap_repetitions=repetitions,
+        bootstrap_seed=seed,
+    )
 
 
 class HtftHoldoutEvaluatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._expected_season_counts = copy.deepcopy(
+            evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS
+        )
+
+    def tearDown(self) -> None:
+        evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS.clear()
+        evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS.update(
+            self._expected_season_counts
+        )
+
+    def test_missing_context_columns_use_conservative_legacy_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            score_path = root / "legacy-scores.csv"
+            legacy_fields = tuple(
+                field
+                for field in SCORE_FIELDS
+                if field not in evaluator.OPTIONAL_CONTEXT_COLUMNS
+            )
+            source_row = _row(
+                "brazil_serie_a",
+                2024,
+                "02-01",
+                "A",
+                "B",
+                (1, 0),
+                (0, 0),
+            )
+            _write_csv(
+                score_path,
+                legacy_fields,
+                [{field: source_row[field] for field in legacy_fields}],
+            )
+
+            rows = evaluator._load_score_rows(
+                score_path,
+                league_key="brazil_serie_a",
+                expected_hash=evaluator._file_hash(score_path),
+                expected_rows=1,
+            )
+
+            self.assertEqual(rows[0]["season_status"], evaluator.LEGACY_SEASON_STATUS)
+            self.assertEqual(rows[0]["format_version"], evaluator.LEGACY_FORMAT_VERSION)
+            self.assertEqual(rows[0]["phase_group"], evaluator.LEGACY_PHASE_GROUP)
+            scope = evaluator._split_evaluation_scope(rows, evaluator.SPLITS[0])
+            self.assertEqual(
+                scope["evidence_role"],
+                "research_shadow_unverified_season_status",
+            )
+            self.assertFalse(scope["component_promotion_evidence_included"])
+
+    def test_partial_2026_is_shadow_only_and_excluded_from_promotion_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+
+            shadow = result["leagues"][0]["splits"][2]
+            scope = shadow["evaluation_scope"]
+            self.assertEqual(
+                scope["season_status_counts"],
+                {"partial_as_of_2026-08-03": shadow["test_match_count"]},
+            )
+            self.assertTrue(scope["partial_test_season"])
+            self.assertFalse(scope["complete_test_season_status_verified"])
+            self.assertEqual(
+                scope["evidence_role"], "research_shadow_partial_season"
+            )
+            self.assertFalse(scope["component_promotion_evidence_included"])
+            self.assertFalse(scope["promotion_ready"])
+            promotion_evidence = result["promotion_evidence"]
+            self.assertEqual(
+                promotion_evidence["research_shadow_cohorts"],
+                [{"league_key": "brazil_serie_a", "split_id": "shadow_2026"}],
+            )
+            self.assertNotIn(
+                "shadow_2026",
+                {
+                    cohort["split_id"]
+                    for cohort in promotion_evidence["eligible_cohorts"]
+                },
+            )
+            self.assertEqual(
+                promotion_evidence["eligible_classification_summary"]["model_only"]
+                ["overall"]["metrics"]["sample_count"],
+                4,
+            )
+            self.assertFalse(result["formal_htft_eligible"])
+            self.assertFalse(
+                result["complete_prekickoff_nine_way_htft_odds_available"]
+            )
+            self.assertFalse(result["ev_roi_evaluation_available"])
+            self.assertEqual(
+                result["evaluation_scope"], "nine_class_probability_accuracy_only"
+            )
+
+    def test_context_slices_are_emitted_and_reconcile_to_total_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(
+                root,
+                [("brazil_serie_a", 0), ("france_ligue_1", 0)],
+            )
+
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+
+            all_splits = result["summary"]["all_splits"]
+            total = all_splits["model_only"]["overall"]["metrics"][
+                "sample_count"
+            ]
+            slices = all_splits["context_slices"]
+            self.assertEqual(
+                set(slices["format_version"]),
+                {"standard_league_format", "ligue1_18_team"},
+            )
+            self.assertEqual(set(slices["phase_group"]), {"regular_season"})
+            for dimension in ("format_version", "phase_group"):
+                self.assertEqual(
+                    sum(item["sample_count"] for item in slices[dimension].values()),
+                    total,
+                )
+                for item in slices[dimension].values():
+                    self.assertEqual(
+                        item["sample_count"],
+                        item["model_only"]["overall"]["metrics"]["sample_count"],
+                    )
+                    self.assertEqual(
+                        item["sample_count"],
+                        item["league_empirical_frequency_baseline"]["metrics"]
+                        ["sample_count"],
+                    )
+                    self.assertIn(
+                        "nine_class_log_loss",
+                        item["model_minus_empirical_baseline"],
+                    )
+
+    def test_partial_scope_cannot_be_promoted_by_rehashing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            tampered = copy.deepcopy(result)
+            scope = tampered["leagues"][0]["splits"][2]["evaluation_scope"]
+            scope["component_promotion_evidence_included"] = True
+            scope["evidence_role"] = "configuration_experiment_shadow"
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
+
+            with self.assertRaisesRegex(
+                evaluator.HoldoutEvaluationError,
+                "evaluation scope does not match forecast evidence",
+            ):
+                evaluator.validate_evaluation(tampered)
+
+    def test_existing_cli_arguments_remain_accepted(self):
+        args = evaluator.build_parser().parse_args(
+            [
+                "--dataset-dir",
+                "dataset",
+                "--output",
+                "evaluation.json",
+                "--include-opening-market",
+                "--iterations",
+                "2",
+                "--learning-rate",
+                "0.005",
+                "--experimental-override",
+            ]
+        )
+
+        self.assertEqual(args.dataset_dir, "dataset")
+        self.assertEqual(args.output, "evaluation.json")
+        self.assertTrue(args.include_opening_market)
+        self.assertTrue(args.experimental_override)
+
     def test_special_regime_is_counted_but_not_fit_scored_or_aggregated(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -675,6 +1085,76 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 evaluator.HoldoutEvaluationError,
                 "source outcomes",
+            ):
+                evaluator.validate_evaluation(tampered, dataset_dir=root)
+
+    def test_rehashed_known_team_paired_metrics_are_recomputed_from_forecasts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            tampered = copy.deepcopy(result)
+            split = tampered["leagues"][0]["splits"][0]
+            known = split[
+                "model_minus_empirical_baseline_by_team_availability"
+            ]["known_teams"]
+            known["nine_class_log_loss"]["mean_delta"] = -999.0
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(
+                tampered
+            )
+
+            with self.assertRaisesRegex(
+                evaluator.HoldoutEvaluationError,
+                "paired cohort deltas",
+            ):
+                evaluator.validate_evaluation(tampered)
+
+    def test_source_binding_refits_and_rejects_rehashed_fake_probabilities(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            tampered = copy.deepcopy(result)
+            forecast = tampered["leagues"][0]["splits"][0]["forecasts"][0]
+            probabilities = forecast["model_probabilities"]
+            first, last = evaluator.htft_model.HTFT_CLASSES[0], evaluator.htft_model.HTFT_CLASSES[-1]
+            probabilities[first], probabilities[last] = probabilities[last], probabilities[first]
+            ranked = sorted(
+                evaluator.htft_model.HTFT_CLASSES,
+                key=lambda name: (
+                    -probabilities[name],
+                    evaluator.htft_model.HTFT_CLASSES.index(name),
+                ),
+            )
+            forecast["model_top_two"] = [
+                {"class": name, "probability": probabilities[name]}
+                for name in ranked[:2]
+            ]
+            forecast["model_pair_mass"] = sum(
+                probabilities[name] for name in ranked[:2]
+            )
+            _rewrite_summaries_from_forecasts(tampered)
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
+
+            # The internal summaries are deliberately self-consistent.  Only
+            # validation against the source bundle can prove the forecast came
+            # from the declared deterministic training run.
+            evaluator.validate_evaluation(tampered)
+            with self.assertRaisesRegex(
+                evaluator.HoldoutEvaluationError,
+                "model probabilities",
             ):
                 evaluator.validate_evaluation(tampered, dataset_dir=root)
 

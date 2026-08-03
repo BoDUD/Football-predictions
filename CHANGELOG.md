@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.2.0] - 2026-08-03
+
+### Added
+- Expanded the audited 2020–2026 history contract to fourteen competitions, including Finland Veikkausliiga, with 2026 retained as a partial-at-cutoff research cohort.
+- Added source-bound regulation-time corner-result and pre-kickoff corner-price collectors, offline schedule normalization, league dataset generation, chronological corner models, registered replay validation, and fixed untouched holdouts.
+- Added a deterministic daily prediction-card renderer that derives `★`, `◇`, and no-primary status from the archived active record instead of caller-supplied labels.
+
+### Changed
+- Hardened HT/FT evaluation and registration around fixed known-team holdouts, paired baseline uncertainty, dataset/model/evaluation lineage, and fail-closed non-formal deployment flags.
+- Kept corner totals, corner handicaps, and HT/FT observation-only until separate clean live-forward evidence enables a later policy; historical `candidate` status never authorizes a formal pick.
+- Preserved legacy and no-primary review wording and learning records while keeping them outside primary win rate, stake, profit, and ROI.
+
 ## [3.1.0] - 2026-08-02
 
 ### Added

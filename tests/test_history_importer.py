@@ -26,6 +26,7 @@ DOCUMENT_REL_NS = (
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 CLOSING_SENTINEL = "CLOSE_ONLY_SECRET"
+AS_OF_DATE = "2026-12-31"
 
 
 def _column_name(index: int) -> str:
@@ -79,6 +80,9 @@ def _write_workbook(
     top_header: list[object] | None = None,
     lower_header: list[object] | None = None,
     formula_ref: str | None = None,
+    corner_extension: bool = False,
+    auxiliary_sheets: tuple[str, ...] = (),
+    auxiliary_formula_ref: str | None = None,
 ) -> None:
     top = [None] * len(history_importer.EXPECTED_HEADERS)
     for column, value in history_importer.EXPECTED_TOP_HEADERS.items():
@@ -88,6 +92,30 @@ def _write_workbook(
     lower = list(history_importer.EXPECTED_HEADERS)
     if lower_header is not None:
         lower = lower_header
+    output_rows = [list(row) for row in data_rows]
+    if corner_extension:
+        top.extend(
+            [history_importer.CORNER_AUDIT_TOP_HEADER]
+            + [None] * (len(history_importer.CORNER_AUDIT_HEADERS) - 1)
+        )
+        lower.extend(history_importer.CORNER_AUDIT_HEADERS)
+        for index, row in enumerate(output_rows, start=1):
+            row.extend(
+                [
+                    1000000 + index,
+                    6,
+                    4,
+                    10,
+                    2,
+                    None,
+                    None,
+                    None,
+                    "complete",
+                    "https://example.test/corners",
+                    "2026-08-03T00:00:00Z",
+                    "regulation_90",
+                ]
+            )
 
     workbook = ET.Element(
         f"{{{SPREADSHEET_NS}}}workbook",
@@ -103,6 +131,16 @@ def _write_workbook(
             f"{{{DOCUMENT_REL_NS}}}id": "rId1",
         },
     )
+    for index, auxiliary_name in enumerate(auxiliary_sheets, start=2):
+        ET.SubElement(
+            sheets,
+            f"{{{SPREADSHEET_NS}}}sheet",
+            {
+                "name": auxiliary_name,
+                "sheetId": str(index),
+                f"{{{DOCUMENT_REL_NS}}}id": f"rId{index}",
+            },
+        )
 
     workbook_relationships = ET.Element(f"{{{PACKAGE_REL_NS}}}Relationships")
     ET.SubElement(
@@ -114,6 +152,16 @@ def _write_workbook(
             "Target": "worksheets/sheet1.xml",
         },
     )
+    for index, _auxiliary_name in enumerate(auxiliary_sheets, start=2):
+        ET.SubElement(
+            workbook_relationships,
+            f"{{{PACKAGE_REL_NS}}}Relationship",
+            {
+                "Id": f"rId{index}",
+                "Type": f"{DOCUMENT_REL_NS}/worksheet",
+                "Target": f"worksheets/sheet{index}.xml",
+            },
+        )
 
     package_relationships = ET.Element(f"{{{PACKAGE_REL_NS}}}Relationships")
     ET.SubElement(
@@ -125,7 +173,6 @@ def _write_workbook(
             "Target": "xl/workbook.xml",
         },
     )
-
     content_types = ET.Element(f"{{{CONTENT_TYPES_NS}}}Types")
     ET.SubElement(
         content_types,
@@ -145,6 +192,15 @@ def _write_workbook(
             "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
         },
     )
+    for index, _auxiliary_name in enumerate(auxiliary_sheets, start=2):
+        ET.SubElement(
+            content_types,
+            f"{{{CONTENT_TYPES_NS}}}Override",
+            {
+                "PartName": f"/xl/worksheets/sheet{index}.xml",
+                "ContentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+            },
+        )
     ET.SubElement(
         content_types,
         f"{{{CONTENT_TYPES_NS}}}Override",
@@ -163,8 +219,16 @@ def _write_workbook(
         )
         archive.writestr(
             "xl/worksheets/sheet1.xml",
-            _worksheet_xml([top, lower, *data_rows], formula_ref=formula_ref),
+            _worksheet_xml([top, lower, *output_rows], formula_ref=formula_ref),
         )
+        for index, auxiliary_name in enumerate(auxiliary_sheets, start=2):
+            archive.writestr(
+                f"xl/worksheets/sheet{index}.xml",
+                _worksheet_xml(
+                    [[auxiliary_name], ["审计数据"]],
+                    formula_ref=auxiliary_formula_ref,
+                ),
+            )
 
 
 def _result_label(home: int, away: int) -> str:
@@ -186,6 +250,7 @@ def _data_row(
     full_score: str = "1-0",
     total_goals: int | None = None,
     league: str = "巴甲",
+    round_label: str | None = None,
 ) -> list[object]:
     half_home, half_away = map(int, half_score.split("-"))
     full_home, full_away = map(int, full_score.split("-"))
@@ -194,7 +259,7 @@ def _data_row(
         identifier,
         season,
         league,
-        f"{league} 第{identifier}轮",
+        round_label or f"{league} 第{identifier}轮",
         kickoff,
         "完",
         1,
@@ -240,11 +305,64 @@ class HistoryImporterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _import(self, rows: list[list[object]], **workbook_options):
+    def _import(
+        self,
+        rows: list[list[object]],
+        *,
+        as_of_date: str = AS_OF_DATE,
+        **workbook_options,
+    ):
         path = self.base / "history.xlsx"
         _write_workbook(path, rows, **workbook_options)
         return history_importer.import_workbook(
-            path, source_timezone="Asia/Shanghai"
+            path,
+            source_timezone="Asia/Shanghai",
+            as_of_date=as_of_date,
+        )
+
+    def _bundle(
+        self,
+        name: str,
+        rows: list[list[object]],
+        *,
+        sheet_name: str = "巴甲",
+        as_of_date: str = AS_OF_DATE,
+    ) -> tuple[Path, dict[str, object]]:
+        workbook = self.base / f"{name}.xlsx"
+        output_dir = self.base / f"{name}-bundle"
+        _write_workbook(workbook, rows, sheet_name=sheet_name)
+        manifest = history_importer.import_bundle(
+            [workbook],
+            output_dir,
+            source_timezone="Asia/Shanghai",
+            as_of_date=as_of_date,
+        )
+        return output_dir, manifest
+
+    def _tamper_csv_and_rehash(
+        self,
+        output_dir: Path,
+        manifest: dict[str, object],
+        *,
+        metadata_key: str,
+        fields: tuple[str, ...],
+        mutate,
+    ) -> None:
+        league = manifest["leagues"][0]
+        metadata = league[metadata_key]
+        path = output_dir / metadata["file"]
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        mutate(rows)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        metadata["sha256"] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest["bundle_hash"] = history_importer._canonical_manifest_hash(manifest)
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
 
     def test_two_level_headers_and_half_full_time_labels_are_normalized(self):
@@ -268,14 +386,122 @@ class HistoryImporterTests(unittest.TestCase):
         self.assertEqual(score_rows[0]["full_result"], "H")
         self.assertEqual(score_rows[0]["htft_result"], "DH")
         self.assertEqual(score_rows[0]["competition_regime"], "regular")
+        self.assertEqual(score_rows[0]["format_version"], "standard_league_format")
+        self.assertEqual(score_rows[0]["phase_group"], "regular_season")
+        self.assertEqual(
+            score_rows[0]["season_status"], "partial_as_of_2026-12-31"
+        )
         self.assertTrue(
             all(row["competition_regime"] == "regular" for row in market_rows)
         )
         self.assertEqual(set(score_rows[0]), set(history_importer.SCORE_FIELDS))
 
-    def test_japan_2026_vision_batch_marks_all_180_source_fixtures(self):
+    def test_expanded_competition_workbooks_have_stable_model_keys(self):
+        expected = {
+            "英超": ("england_premier_league", "england-premier-league"),
+            "法甲": ("france_ligue_1", "france-ligue-1"),
+            "西甲": ("spain_la_liga", "spain-la-liga"),
+            "德甲": ("germany_bundesliga", "germany-bundesliga"),
+            "意甲": ("italy_serie_a", "italy-serie-a"),
+            "韩K联": ("korea_k_league_1", "korea-k-league-1"),
+            "瑞典超": ("sweden_allsvenskan", "sweden-allsvenskan"),
+            "芬超": ("finland_veikkausliiga", "finland-veikkausliiga"),
+            "欧冠": ("uefa_champions_league", "uefa-champions-league"),
+            "亚冠": ("afc_champions_league", "afc-champions-league"),
+        }
+
+        for league, (league_key, output_stem) in expected.items():
+            with self.subTest(league=league):
+                summary, score_rows, _market_rows = self._import(
+                    [_data_row(1, "08-01 20:00", league=league)],
+                    sheet_name=league,
+                )
+                self.assertEqual(summary["league_key"], league_key)
+                self.assertEqual(summary["output_stem"], output_stem)
+                self.assertEqual(score_rows[0]["league_key"], league_key)
+
+    def test_finland_multistage_format_aliases_and_partial_status_are_audited(self):
+        summary, score_rows, market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "04-04 18:00",
+                    season=2026,
+                    home="甲",
+                    away="乙",
+                    league="芬超",
+                    round_label="第1轮",
+                ),
+                _data_row(
+                    2,
+                    "09-09 18:00",
+                    season=2026,
+                    home="丙",
+                    away="丁",
+                    league="芬超",
+                    round_label="争冠组 第1轮",
+                ),
+                _data_row(
+                    3,
+                    "09-10 18:00",
+                    season=2026,
+                    home="戊",
+                    away="己",
+                    league="芬超",
+                    round_label="保级组 第1轮",
+                ),
+                _data_row(
+                    4,
+                    "10-20 18:00",
+                    season=2026,
+                    home="庚",
+                    away="辛",
+                    league="芬超",
+                    round_label="欧会杯附加赛",
+                ),
+            ],
+            sheet_name="芬超",
+        )
+
+        self.assertEqual(summary["league_key"], "finland_veikkausliiga")
+        self.assertEqual(
+            summary["aliases"],
+            [
+                "finland_veikkausliiga",
+                "芬超",
+                "芬兰超级联赛",
+                "Veikkausliiga",
+                "Finland Veikkausliiga",
+            ],
+        )
+        self.assertEqual(
+            [row["phase_group"] for row in score_rows],
+            [
+                "regular_season",
+                "championship_split",
+                "relegation_split",
+                "european_playoff",
+            ],
+        )
+        self.assertEqual(
+            {row["format_version"] for row in score_rows},
+            {"veikkausliiga_12_team_double_championship_split"},
+        )
+        self.assertEqual(
+            {row["season_status"] for row in score_rows},
+            {"partial_as_of_2026-12-31"},
+        )
+        self.assertEqual(
+            summary["season_completeness"]["2026"]["expected_matches"], 179
+        )
+        self.assertEqual(
+            summary["season_completeness"]["2026"]["remaining_matches"], 175
+        )
+        self.assertEqual(len(market_rows), 4 * len(history_importer.BOOKMAKERS))
+
+    def test_japan_2026_vision_batch_marks_all_source_fixtures(self):
         start = date(2026, 2, 6)
-        end = date(2026, 5, 24)
+        end = date(2026, 6, 6)
         span_days = (end - start).days
         rows: list[list[object]] = []
         slots_by_date: dict[date, int] = {}
@@ -309,11 +535,32 @@ class HistoryImporterTests(unittest.TestCase):
         )
         self.assertEqual(len(market_rows), 180 * len(history_importer.BOOKMAKERS))
         self.assertEqual(
+            {row["season_status"] for row in score_rows},
+            {"partial_as_of_2026-12-31"},
+        )
+        self.assertEqual(
+            summary["season_completeness"]["2026"],
+            {
+                "as_of_date": AS_OF_DATE,
+                "observed_matches": 180,
+                "expected_matches": 200,
+                "remaining_matches": 20,
+                "expectation_id": (
+                    "known-schedule-match-counts-v1:japan_j1:2026"
+                ),
+                "expectation_basis": (
+                    "versioned source-scope competition schedule total"
+                ),
+                "expectation_verified": True,
+                "status": "partial_as_of_2026-12-31",
+            },
+        )
+        self.assertEqual(
             {row["competition_regime"] for row in market_rows},
             {"2026_vision_regional"},
         )
 
-    def test_japan_vision_date_bounds_are_inclusive_and_other_rows_are_regular(self):
+    def test_japan_vision_date_bounds_include_placement_finals(self):
         _summary, score_rows, _market_rows = self._import(
             [
                 _data_row(
@@ -334,7 +581,7 @@ class HistoryImporterTests(unittest.TestCase):
                 ),
                 _data_row(
                     3,
-                    "05-24 12:00",
+                    "06-06 12:00",
                     season=2026,
                     home="戊",
                     away="己",
@@ -342,7 +589,7 @@ class HistoryImporterTests(unittest.TestCase):
                 ),
                 _data_row(
                     4,
-                    "05-25 12:00",
+                    "06-07 12:00",
                     season=2026,
                     home="庚",
                     away="辛",
@@ -407,11 +654,230 @@ class HistoryImporterTests(unittest.TestCase):
             ],
         )
 
+    def test_afc_delayed_season_august_to_february_rollover_is_explicit(self):
+        summary, score_rows, _market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "08-25 18:30",
+                    season=2022,
+                    home="甲",
+                    away="乙",
+                    league="亚冠",
+                ),
+                _data_row(
+                    2,
+                    "02-19 23:00",
+                    season=2022,
+                    home="丙",
+                    away="丁",
+                    league="亚冠",
+                ),
+            ],
+            sheet_name="亚冠",
+        )
+
+        self.assertEqual(score_rows[0]["source_kickoff"], "2022-08-25T18:30+08:00")
+        self.assertEqual(score_rows[1]["source_kickoff"], "2023-02-19T23:00+08:00")
+        self.assertEqual(
+            summary["calendar_rollovers"],
+            [
+                {
+                    "season": 2022,
+                    "source_row": 4,
+                    "from_calendar_year": 2022,
+                    "to_calendar_year": 2023,
+                    "trigger": "08->02",
+                }
+            ],
+        )
+
+    def test_calendar_year_league_cannot_infer_august_to_february_rollover(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "kickoff order goes backwards"
+        ):
+            self._import(
+                [
+                    _data_row(
+                        1,
+                        "08-25 18:30",
+                        season=2022,
+                        home="甲",
+                        away="乙",
+                        league="韩K联",
+                    ),
+                    _data_row(
+                        2,
+                        "02-19 19:00",
+                        season=2022,
+                        home="丙",
+                        away="丁",
+                        league="韩K联",
+                    ),
+                ],
+                sheet_name="韩K联",
+            )
+
+    def test_format_phase_and_partial_season_semantics_are_preserved(self):
+        summary, score_rows, market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "03-01 18:00",
+                    season=2026,
+                    home="甲",
+                    away="乙",
+                    league="韩K联",
+                    round_label="第1轮",
+                ),
+                _data_row(
+                    2,
+                    "10-20 18:00",
+                    season=2026,
+                    home="丙",
+                    away="丁",
+                    league="韩K联",
+                    round_label="争冠组 第1轮",
+                ),
+                _data_row(
+                    3,
+                    "10-21 18:00",
+                    season=2026,
+                    home="戊",
+                    away="己",
+                    league="韩K联",
+                    round_label="保级组 第1轮",
+                ),
+            ],
+            sheet_name="韩K联",
+        )
+
+        self.assertEqual(
+            [row["round"] for row in score_rows],
+            ["1", "争冠组 第1轮", "保级组 第1轮"],
+        )
+        self.assertEqual(
+            [row["phase_group"] for row in score_rows],
+            ["regular_season", "championship_split", "relegation_split"],
+        )
+        self.assertEqual(
+            {row["format_version"] for row in score_rows},
+            {"k1_12_team_split"},
+        )
+        self.assertEqual(
+            {row["season_status"] for row in score_rows},
+            {"partial_as_of_2026-12-31"},
+        )
+        self.assertEqual(
+            summary["phase_groups"],
+            {
+                "2026": {
+                    "championship_split": 1,
+                    "regular_season": 1,
+                    "relegation_split": 1,
+                }
+            },
+        )
+        self.assertTrue(
+            all(row["season_status"] == "partial_as_of_2026-12-31" for row in market_rows)
+        )
+
+    def test_ucl_format_version_changes_without_merging_phase_labels(self):
+        _summary, score_rows, _market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "09-01 20:00",
+                    season=2023,
+                    home="甲",
+                    away="乙",
+                    league="欧冠",
+                    round_label="分组赛 第1轮",
+                ),
+                _data_row(
+                    2,
+                    "09-02 20:00",
+                    season=2024,
+                    home="丙",
+                    away="丁",
+                    league="欧冠",
+                    round_label="联赛阶段 第1轮",
+                ),
+            ],
+            sheet_name="欧冠",
+        )
+
+        self.assertEqual(
+            [row["format_version"] for row in score_rows],
+            ["ucl_32_team_group", "ucl_36_team_league_phase"],
+        )
+        self.assertEqual(
+            [row["phase_group"] for row in score_rows],
+            ["group_stage", "league_phase"],
+        )
+        self.assertEqual(
+            [row["round"] for row in score_rows],
+            ["分组赛 第1轮", "联赛阶段 第1轮"],
+        )
+
     def test_any_formula_is_rejected_even_when_a_cached_value_exists(self):
         with self.assertRaisesRegex(
             history_importer.HistoryImportError, "formulas are not allowed"
         ):
             self._import([_data_row(1, "08-01 20:00")], formula_ref="P3")
+
+    def test_registered_corner_extension_and_audit_sheets_are_importable(self):
+        summary, score_rows, market_rows = self._import(
+            [_data_row(1, "08-01 20:00")],
+            corner_extension=True,
+            auxiliary_sheets=("角球盘口", "数据质量"),
+        )
+        self.assertEqual(summary["rows"], 1)
+        self.assertEqual(len(score_rows), 1)
+        self.assertEqual(len(market_rows), len(history_importer.BOOKMAKERS))
+
+    def test_unregistered_auxiliary_sheet_is_rejected(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "unsupported auxiliary worksheets",
+        ):
+            self._import(
+                [_data_row(1, "08-01 20:00")],
+                auxiliary_sheets=("任意隐藏训练特征",),
+            )
+
+    def test_corner_extension_header_must_match_exact_registered_schema(self):
+        top = [None] * len(history_importer.EXPECTED_HEADERS)
+        for column, value in history_importer.EXPECTED_TOP_HEADERS.items():
+            top[column - 1] = value
+        top.extend(
+            [history_importer.CORNER_AUDIT_TOP_HEADER]
+            + [None] * (len(history_importer.CORNER_AUDIT_HEADERS) - 1)
+        )
+        lower = list(history_importer.EXPECTED_HEADERS) + list(
+            history_importer.CORNER_AUDIT_HEADERS
+        )
+        lower[-1] = "可疑未来特征"
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "corner-audit column schema",
+        ):
+            self._import(
+                [_data_row(1, "08-01 20:00")],
+                top_header=top,
+                lower_header=lower,
+            )
+
+    def test_formula_in_registered_auxiliary_sheet_is_rejected(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "formulas are not allowed.*角球盘口",
+        ):
+            self._import(
+                [_data_row(1, "08-01 20:00")],
+                auxiliary_sheets=("角球盘口",),
+                auxiliary_formula_ref="A1",
+            )
 
     def test_malformed_score_is_rejected(self):
         row = _data_row(1, "08-01 20:00")
@@ -457,13 +923,41 @@ class HistoryImporterTests(unittest.TestCase):
                 ]
             )
 
+    def test_finished_fixture_after_explicit_as_of_date_is_rejected(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "after as_of_date 2026-08-03"
+        ):
+            self._import(
+                [
+                    _data_row(
+                        1,
+                        "08-04 18:00",
+                        season=2026,
+                        league="芬超",
+                    )
+                ],
+                sheet_name="芬超",
+                as_of_date="2026-08-03",
+            )
+
+    def test_known_schedule_overflow_is_rejected(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "exceeding the audited schedule expectation"
+        ):
+            history_importer._season_completeness(
+                "brazil_serie_a", 2026, 381, "2026-12-31"
+            )
+
     def test_bundle_outputs_opening_markets_but_never_closing_prices(self):
         workbook = self.base / "history.xlsx"
         _write_workbook(workbook, [_data_row(1, "08-01 20:00")])
         output_dir = self.base / "bundle"
 
         manifest = history_importer.import_bundle(
-            [workbook], output_dir, source_timezone="Asia/Shanghai"
+            [workbook],
+            output_dir,
+            source_timezone="Asia/Shanghai",
+            as_of_date=AS_OF_DATE,
         )
         score_path = output_dir / "brazil-serie-a-scores.csv"
         market_path = output_dir / "brazil-serie-a-opening-markets.csv"
@@ -481,6 +975,11 @@ class HistoryImporterTests(unittest.TestCase):
             )
             self.assertEqual(len(list(reader)), len(history_importer.BOOKMAKERS))
         self.assertIn("all closing prices", manifest["quarantined_fields"])
+        self.assertEqual(manifest["as_of_date"], AS_OF_DATE)
+        self.assertEqual(
+            manifest["season_completeness_policy"],
+            history_importer.SEASON_COMPLETENESS_POLICY,
+        )
         self.assertEqual(
             manifest["outcome_label_fields"][-3:],
             ["half_result", "full_result", "htft_result"],
@@ -514,7 +1013,10 @@ class HistoryImporterTests(unittest.TestCase):
         )
         output_dir = self.base / "bundle"
         manifest = history_importer.import_bundle(
-            [workbook], output_dir, source_timezone="Asia/Shanghai"
+            [workbook],
+            output_dir,
+            source_timezone="Asia/Shanghai",
+            as_of_date=AS_OF_DATE,
         )
         score_path = output_dir / "japan-j1-scores.csv"
         with score_path.open("r", encoding="utf-8", newline="") as handle:
@@ -552,6 +1054,134 @@ class HistoryImporterTests(unittest.TestCase):
         ):
             history_importer.validate_bundle(output_dir)
 
+    def test_semantic_validator_rejects_rehashed_score_tampering(self):
+        cases = (
+            (
+                "negative-goal",
+                lambda rows: rows[0].update({"home_goals": "-1"}),
+                "home_goals must be a non-negative integer",
+            ),
+            (
+                "half-exceeds-full",
+                lambda rows: rows[0].update(
+                    {"home_goals": "1", "half_home_goals": "2"}
+                ),
+                "half-time goals cannot exceed full-time goals",
+            ),
+            (
+                "result-label",
+                lambda rows: rows[0].update({"htft_result": "AA"}),
+                "htft_result disagrees with scores",
+            ),
+            (
+                "half-result-label",
+                lambda rows: rows[0].update({"half_result": "H"}),
+                "half_result disagrees with scores",
+            ),
+            (
+                "full-result-label",
+                lambda rows: rows[0].update({"full_result": "A"}),
+                "full_result disagrees with scores",
+            ),
+            (
+                "date-kickoff",
+                lambda rows: rows[0].update({"date": "2020-08-02"}),
+                "date and kickoff_utc disagree",
+            ),
+            (
+                "source-utc-kickoff",
+                lambda rows: rows[0].update(
+                    {"source_kickoff": "2020-08-01T21:00+08:00"}
+                ),
+                "source_kickoff and kickoff_utc disagree",
+            ),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name=name):
+                output_dir, manifest = self._bundle(
+                    name, [_data_row(1, "08-01 20:00")]
+                )
+                self._tamper_csv_and_rehash(
+                    output_dir,
+                    manifest,
+                    metadata_key="score_dataset",
+                    fields=history_importer.SCORE_FIELDS,
+                    mutate=mutate,
+                )
+                with self.assertRaisesRegex(
+                    history_importer.HistoryImportError, message
+                ):
+                    history_importer.validate_bundle(output_dir)
+
+    def test_semantic_validator_rejects_rehashed_duplicate_score_fixture(self):
+        output_dir, manifest = self._bundle(
+            "duplicate-score",
+            [
+                _data_row(1, "08-01 20:00", home="甲", away="乙"),
+                _data_row(2, "08-02 20:00", home="丙", away="丁"),
+            ],
+        )
+
+        def duplicate(rows):
+            for field in (
+                "date",
+                "home_team",
+                "away_team",
+                "source_kickoff",
+                "kickoff_utc",
+            ):
+                rows[1][field] = rows[0][field]
+
+        self._tamper_csv_and_rehash(
+            output_dir,
+            manifest,
+            metadata_key="score_dataset",
+            fields=history_importer.SCORE_FIELDS,
+            mutate=duplicate,
+        )
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "duplicate fixture"
+        ):
+            history_importer.validate_bundle(output_dir)
+
+    def test_semantic_validator_rejects_rehashed_market_company_tampering(self):
+        output_dir, manifest = self._bundle(
+            "market-company", [_data_row(1, "08-01 20:00")]
+        )
+
+        def duplicate_company(rows):
+            crown = next(row for row in rows if row["bookmaker"] == "crown")
+            crown["bookmaker"] = "36"
+
+        self._tamper_csv_and_rehash(
+            output_dir,
+            manifest,
+            metadata_key="opening_market_research",
+            fields=history_importer.MARKET_FIELDS,
+            mutate=duplicate_company,
+        )
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "duplicate bookmaker 36"
+        ):
+            history_importer.validate_bundle(output_dir)
+
+    def test_semantic_validator_rejects_rehashed_market_fixture_identity(self):
+        output_dir, manifest = self._bundle(
+            "market-identity", [_data_row(1, "08-01 20:00")]
+        )
+        self._tamper_csv_and_rehash(
+            output_dir,
+            manifest,
+            metadata_key="opening_market_research",
+            fields=history_importer.MARKET_FIELDS,
+            mutate=lambda rows: rows[0].update({"home_team": "伪造主队"}),
+        )
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "fixture identity has no matching score row",
+        ):
+            history_importer.validate_bundle(output_dir)
+
     def test_dash_opening_market_sentinels_export_as_incomplete_blank_cells(self):
         row = _data_row(1, "08-01 20:00")
         first_bookmaker_offset = 15
@@ -563,7 +1193,10 @@ class HistoryImporterTests(unittest.TestCase):
         output_dir = self.base / "bundle"
 
         manifest = history_importer.import_bundle(
-            [workbook], output_dir, source_timezone="Asia/Shanghai"
+            [workbook],
+            output_dir,
+            source_timezone="Asia/Shanghai",
+            as_of_date=AS_OF_DATE,
         )
         market_path = output_dir / "brazil-serie-a-opening-markets.csv"
         with market_path.open(encoding="utf-8", newline="") as handle:

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import copy
+import csv
 import importlib.util
 import json
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+
+from _corner_source_fixture import build_source_bound_dataset
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_store.py"
@@ -23,6 +27,45 @@ DEFAULT_SCORE_MATRIX = [
     [0.15, 0.0, 0.10, 0.0],
     [0.15, 0.0, 0.0, 0.0],
 ]
+
+HTFT_OBSERVATION_MATRIX = {
+    "HH": 0.30,
+    "HD": 0.05,
+    "HA": 0.02,
+    "DH": 0.20,
+    "DD": 0.15,
+    "DA": 0.08,
+    "AH": 0.03,
+    "AD": 0.05,
+    "AA": 0.12,
+}
+
+CORNER_TEAMS = ("A", "B", "C", "D")
+
+
+def write_corner_history(path: Path, *, days: int = 16) -> None:
+    schedules = (
+        (("A", "B"), ("C", "D")),
+        (("A", "C"), ("D", "B")),
+        (("A", "D"), ("B", "C")),
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(
+            ["date", "home_team", "away_team", "home_corners", "away_corners"]
+        )
+        for day in range(days):
+            match_date = date(2025, 1, 1) + timedelta(days=day)
+            for home, away in schedules[day % len(schedules)]:
+                writer.writerow(
+                    [
+                        match_date.isoformat(),
+                        home,
+                        away,
+                        3 + (2 * CORNER_TEAMS.index(home) + day) % 7,
+                        2 + (CORNER_TEAMS.index(away) + 2 * day) % 6,
+                    ]
+                )
 
 
 def write_score_prediction(
@@ -71,6 +114,80 @@ def write_score_prediction(
     path = Path(base_dir) / f"score-prediction-{match_id}.json"
     path.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
     return str(path)
+
+
+def write_htft_observation_files(
+    base_dir: str,
+    match_id: str,
+    *,
+    matrix=None,
+):
+    probabilities = dict(matrix or HTFT_OBSERVATION_MATRIX)
+    model = {
+        "artifact_type": "soccer_htft_prediction",
+        "schema_version": "1.0.0",
+        "model_version": "htft-dixon-coles-ipf/1.0.0",
+        "model_hash": "sha256:" + "3" * 64,
+        "generated_at": "2026-07-21T18:55:00+09:00",
+        "fixture": {
+            "home_team": "主队",
+            "away_team": "客队",
+            "kickoff": "2026-07-21T19:30:00+09:00",
+            "unknown_team_policy": "error",
+        },
+        "provenance": {
+            "generated_before_kickoff": True,
+            "strictly_before_kickoff_utc_date": True,
+            "training_cutoff_date": "2026-07-20",
+            "training": {
+                "competition_key": "test_league",
+                "source_data_hash": "sha256:" + "5" * 64,
+                "dataset_manifest_hash": "sha256:" + "6" * 64,
+                "start_date": "2020-01-01",
+                "end_date": "2026-07-20",
+            },
+        },
+        "htft": {"code_probabilities": probabilities},
+    }
+    model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
+    half = {
+        result: sum(probabilities[f"{result}{full}"] for full in "HDA")
+        for result in "HDA"
+    }
+    full = {
+        result: sum(probabilities[f"{half_result}{result}"] for half_result in "HDA")
+        for result in "HDA"
+    }
+    ranker = memory_store.htft_ranker.rank_htft(
+        probabilities,
+        half,
+        full,
+        league_key="test_league",
+        model_hash=model["model_hash"],
+    )
+    model_path = Path(base_dir) / f"htft-model-{match_id}.json"
+    ranker_path = Path(base_dir) / f"htft-ranker-{match_id}.json"
+    model_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+    ranker_path.write_text(json.dumps(ranker, ensure_ascii=False), encoding="utf-8")
+    return str(model_path), str(ranker_path)
+
+
+def write_corner_observation_files(
+    base_dir: str,
+    match_id: str,
+    model_dir: Path,
+    prediction: dict,
+    ranking: dict,
+) -> tuple[str, str, str]:
+    prediction_path = Path(base_dir) / f"corner-prediction-{match_id}.json"
+    ranking_path = Path(base_dir) / f"corner-ranking-{match_id}.json"
+    prediction_path.write_text(
+        json.dumps(prediction, ensure_ascii=False), encoding="utf-8"
+    )
+    ranking_path.write_text(
+        json.dumps(ranking, ensure_ascii=False), encoding="utf-8"
+    )
+    return str(model_dir), str(prediction_path), str(ranking_path)
 
 
 def synthesize_market_odds(values, prefix, outcomes, selected):
@@ -127,6 +244,11 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "notes": "",
         "model_version": "dixon-coles-time-decay/1.0.0",
         "score_model_file": None,
+        "htft_observation_model_file": None,
+        "htft_observation_ranker_file": None,
+        "corner_observation_model_dir": None,
+        "corner_observation_prediction_file": None,
+        "corner_observation_ranker_file": None,
         "data_quality": "medium",
         "lineup_confirmed": True,
         "fundamental_evidence": True,
@@ -492,6 +614,409 @@ def strict_metric_record(
 
 
 class MemoryStoreTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.corner_temporary = tempfile.TemporaryDirectory()
+        cls.corner_base = Path(cls.corner_temporary.name)
+        source_dir = cls.corner_base / "source"
+        source_dir.mkdir()
+        cls.corner_history, _manifest = build_source_bound_dataset(
+            source_dir,
+            target_league_key="korea_k_league_1",
+        )
+        cls.corner_model_dir = cls.corner_base / "models"
+        manager = memory_store.corner_ranker.corner_model_manager
+        manager.train_registered_model(
+            cls.corner_history,
+            cls.corner_model_dir,
+            league_key="korea_k_league_1",
+            generated_at="2026-07-20T00:00:00Z",
+            half_life_days=120.0,
+            iterations=20,
+            learning_rate=0.025,
+            regularization=0.03,
+            min_train_matches=8,
+            test_block_size=5,
+            hard_max_corners=70,
+        )
+        cls.corner_prediction = manager.predict_registered_model(
+            cls.corner_model_dir,
+            "korea_k_league_1",
+            "A",
+            "B",
+            kickoff="2026-07-21T10:30:00Z",
+            generated_at="2026-07-21T09:30:00Z",
+            total_markets=(("over", 8.5), ("under", 8.5)),
+            corner_handicaps=(("home", -0.5), ("away", 0.5)),
+        )
+        cls.corner_ranking = memory_store.corner_ranker.rank_corner_markets(
+            cls.corner_prediction,
+            [
+                {
+                    "market": "corner_total",
+                    "line": 8.5,
+                    "odds_format": "decimal",
+                    "complete_market_odds": {"over": 2.10, "under": 2.10},
+                    "firm_count": 3,
+                    "market_complete": True,
+                    "market_source": "Titan007 consensus",
+                    "market_collected_at": "2026-07-21T09:45:00Z",
+                    "price_basis": "consensus",
+                    "market_signal": "neutral",
+                },
+                {
+                    "market": "corner_handicap",
+                    "line": -0.5,
+                    "odds_format": "decimal",
+                    "complete_market_odds": {"home": 2.10, "away": 2.10},
+                    "firm_count": 3,
+                    "market_complete": True,
+                    "market_source": "Titan007 consensus",
+                    "market_collected_at": "2026-07-21T09:45:00Z",
+                    "price_basis": "median",
+                    "market_signal": "aligned",
+                },
+            ],
+            model_dir=cls.corner_model_dir,
+            generated_at="2026-07-21T09:55:00Z",
+            data_quality="high",
+            corner_profile_evidence={
+                "available": True,
+                "independent_from_goal_model": True,
+                "source": "audited corner profile feed",
+                "collected_at": "2026-07-21T09:40:00Z",
+                "summary": "home/away corner rates and width profile agree",
+                "components": [
+                    "home_away_corners_for_against",
+                    "width_crossing",
+                ],
+            },
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.corner_temporary.cleanup()
+
+    def corner_record_args(
+        self,
+        base: str,
+        match_id: str,
+        *,
+        prediction: dict | None = None,
+        ranking: dict | None = None,
+        **overrides,
+    ) -> SimpleNamespace:
+        model_dir, prediction_file, ranking_file = write_corner_observation_files(
+            base,
+            match_id,
+            self.corner_model_dir,
+            copy.deepcopy(prediction or self.corner_prediction),
+            copy.deepcopy(ranking or self.corner_ranking),
+        )
+        return record_args(
+            base,
+            match_id=match_id,
+            league="korea_k_league_1",
+            home_team="A",
+            away_team="B",
+            asian_side=None,
+            total_side=None,
+            primary_market="none",
+            model_version=None,
+            score_model_file="",
+            corner_observation_model_dir=model_dir,
+            corner_observation_prediction_file=prediction_file,
+            corner_observation_ranker_file=ranking_file,
+            **overrides,
+        )
+
+    def enable_corner_formal_for_settlement_unit_test(self) -> None:
+        """Exercise settlement mechanics without weakening the production policy."""
+        saved = dict(memory_store.STRICT_OOS_MARKET_STATUS)
+
+        def restore() -> None:
+            memory_store.STRICT_OOS_MARKET_STATUS.clear()
+            memory_store.STRICT_OOS_MARKET_STATUS.update(saved)
+
+        self.addCleanup(restore)
+        memory_store.STRICT_OOS_MARKET_STATUS.pop("corner_total", None)
+        memory_store.STRICT_OOS_MARKET_STATUS.pop("corner_handicap", None)
+
+    def test_corner_formal_is_fail_closed_without_forward_registry_evidence(self):
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(ValueError, "corner_total is observation_only"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="corner-model-gate",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="corner_total",
+                        corner_total_side="over",
+                        corner_total_line=9.5,
+                        corner_total_odds=1.0,
+                        corner_total_odds_format="hong_kong",
+                        corner_total_probability=0.56,
+                        corner_total_ev=0.12,
+                        corner_total_edge_pp=4.5,
+                        corner_total_firm_count=3,
+                        corner_total_market_signal="aligned",
+                        corner_total_market_complete=True,
+                    )
+                )
+
+    def test_corner_observation_archives_every_candidate_without_a_formal_pick(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                self.corner_record_args(base, "corner-observation")
+            )["record"]
+
+            self.assertIsNone(created["primary_market"])
+            self.assertIsNone(created["primary_pick"])
+            self.assertIsNone(created["corner_total_pick"])
+            self.assertIsNone(created["corner_handicap_pick"])
+            self.assertEqual(len(created["candidate_audits"]), 1)
+            audit = created["candidate_audits"][0]
+            self.assertEqual(audit["kind"], "corner_market_observation")
+            self.assertEqual(audit["status"], "observation_only")
+            self.assertFalse(audit["counts_toward_primary_record"])
+            self.assertEqual(audit["monetary_scope"], "none")
+            self.assertEqual(
+                audit["candidate_count"], len(self.corner_ranking["candidates"])
+            )
+            self.assertEqual(
+                audit["best_observation"]["candidate_id"],
+                audit["candidates"][0]["candidate_id"],
+            )
+            self.assertEqual(
+                audit["audit_hash"],
+                memory_store.calculate_corner_observation_audit_hash(audit),
+            )
+            for candidate in audit["candidates"]:
+                self.assertEqual(
+                    set(candidate["settlement_probabilities"]),
+                    set(memory_store.corner_ranker.SETTLEMENT_STATES),
+                )
+                self.assertIn(candidate["market"], {"corner_total", "corner_handicap"})
+                self.assertIn("ev", candidate)
+                self.assertIn("edge_pp", candidate)
+                self.assertEqual(
+                    [gate["gate"] for gate in candidate["gates"]],
+                    list(memory_store.CORNER_OBSERVATION_GATE_ORDER),
+                )
+                self.assertEqual(candidate["lineage"], audit["lineage"])
+                self.assertFalse(candidate["formal_eligible"])
+
+    def test_corner_observation_requires_the_complete_artifact_trio_and_files(self):
+        with tempfile.TemporaryDirectory() as base:
+            incomplete = record_args(
+                base,
+                match_id="corner-observation-incomplete",
+                asian_side=None,
+                total_side=None,
+                primary_market="none",
+                model_version=None,
+                score_model_file="",
+                corner_observation_model_dir=str(self.corner_model_dir),
+            )
+            with self.assertRaisesRegex(ValueError, "requires all three"):
+                memory_store.cmd_record(incomplete)
+
+            missing = record_args(
+                base,
+                match_id="corner-observation-missing",
+                asian_side=None,
+                total_side=None,
+                primary_market="none",
+                model_version=None,
+                score_model_file="",
+                corner_observation_model_dir=str(self.corner_model_dir),
+                corner_observation_prediction_file=str(
+                    Path(base) / "missing-prediction.json"
+                ),
+                corner_observation_ranker_file=str(
+                    Path(base) / "missing-ranking.json"
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                memory_store.cmd_record(missing)
+
+    def test_corner_observation_rejects_a_valid_artifact_for_another_fixture(self):
+        with tempfile.TemporaryDirectory() as base:
+            manager = memory_store.corner_ranker.corner_model_manager
+            other_prediction = manager.predict_registered_model(
+                self.corner_model_dir,
+                "korea_k_league_1",
+                "C",
+                "B",
+                kickoff="2026-07-21T10:30:00Z",
+                generated_at="2026-07-21T09:30:00Z",
+                total_markets=(("over", 8.5), ("under", 8.5)),
+                corner_handicaps=(("home", -0.5), ("away", 0.5)),
+            )
+            other_ranking = memory_store.corner_ranker.rank_corner_markets(
+                other_prediction,
+                copy.deepcopy(self.corner_ranking["input_audit"]["markets"]),
+                model_dir=self.corner_model_dir,
+                generated_at="2026-07-21T09:55:00Z",
+                data_quality=self.corner_ranking["input_audit"]["data_quality"],
+                corner_profile_evidence=copy.deepcopy(
+                    self.corner_ranking["input_audit"]["corner_profile_evidence"]
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "home_team must match"):
+                memory_store.cmd_record(
+                    self.corner_record_args(
+                        base,
+                        "corner-observation-fixture",
+                        prediction=other_prediction,
+                        ranking=other_ranking,
+                    )
+                )
+
+    def test_corner_observation_rejects_rehashed_prediction_tampering(self):
+        with tempfile.TemporaryDirectory() as base:
+            prediction = copy.deepcopy(self.corner_prediction)
+            prediction["formal_corner_total_eligible"] = True
+            prediction["prediction_hash"] = (
+                memory_store.corner_ranker.corner_model.calculate_prediction_hash(
+                    prediction
+                )
+            )
+            ranking = copy.deepcopy(self.corner_ranking)
+            ranking["prediction_binding"]["prediction_hash"] = prediction[
+                "prediction_hash"
+            ]
+            ranking["ranking_hash"] = (
+                memory_store.corner_ranker.calculate_ranking_hash(ranking)
+            )
+            with self.assertRaisesRegex(ValueError, "ranking is invalid"):
+                memory_store.cmd_record(
+                    self.corner_record_args(
+                        base,
+                        "corner-observation-prediction-tamper",
+                        prediction=prediction,
+                        ranking=ranking,
+                    )
+                )
+
+    def test_corner_observation_rejects_rehashed_ranker_tampering(self):
+        with tempfile.TemporaryDirectory() as base:
+            ranking = copy.deepcopy(self.corner_ranking)
+            ranking["candidates"][0]["ev"] += 0.01
+            ranking["ranking_hash"] = (
+                memory_store.corner_ranker.calculate_ranking_hash(ranking)
+            )
+            with self.assertRaisesRegex(ValueError, "does not reproduce"):
+                memory_store.cmd_record(
+                    self.corner_record_args(
+                        base,
+                        "corner-observation-ranker-tamper",
+                        ranking=ranking,
+                    )
+                )
+
+    def test_corner_observation_review_settles_diagnostics_but_not_primary_roi(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                self.corner_record_args(base, "corner-observation-review")
+            )["record"]
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id="corner-observation-review",
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=None,
+                    half_away_score=None,
+                    home_corners=6,
+                    away_corners=3,
+                    key_learning="角球观察只做赛后诊断，不计入主推收益",
+                )
+            )
+            record = reviewed["record"]
+            diagnostic = record["observation_diagnostics"][0]
+            self.assertEqual(diagnostic["status"], "graded_observation")
+            self.assertFalse(diagnostic["counts_toward_primary_record"])
+            self.assertEqual(diagnostic["monetary_scope"], "none")
+            self.assertEqual(len(diagnostic["candidate_results"]), 4)
+            result_by_id = {
+                item["candidate_id"]: item["settlement_result"]
+                for item in diagnostic["candidate_results"]
+            }
+            for candidate in created["candidate_audits"][0]["candidates"]:
+                if candidate["market"] == "corner_total":
+                    expected = memory_store.settle_corner_total(candidate, 6, 3)
+                else:
+                    expected = memory_store.settle_corner_handicap(candidate, 6, 3)
+                expected = "full_win" if expected == "win" else expected
+                self.assertEqual(result_by_id[candidate["candidate_id"]], expected)
+            best_id = created["candidate_audits"][0]["best_observation"][
+                "candidate_id"
+            ]
+            self.assertEqual(
+                diagnostic["best_observation_result"], result_by_id[best_id]
+            )
+            self.assertIsNone(record["primary_result"])
+            self.assertFalse(record["counts_toward_primary_record"])
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            self.assertEqual(reviewed["stats"]["primary"]["stake_units"], 0)
+            self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
+            funnel = reviewed["stats"]["observation_gate_funnel"]
+            self.assertEqual(funnel["reviewed_matches_with_observations"], 1)
+            for market in ("corner_total", "corner_handicap"):
+                market_funnel = funnel["markets"][market]
+                self.assertEqual(market_funnel["candidate_count"], 2)
+                self.assertEqual(
+                    market_funnel["diagnostics"]["graded_observations"], 1
+                )
+                self.assertEqual(
+                    market_funnel["diagnostics"]["graded_candidates"], 2
+                )
+                self.assertFalse(
+                    market_funnel["diagnostics"]["counts_toward_primary_record"]
+                )
+
+    def test_corner_observation_without_corner_score_remains_ungraded(self):
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                self.corner_record_args(base, "corner-observation-no-score")
+            )
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id="corner-observation-no-score",
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=None,
+                    half_away_score=None,
+                    key_learning="缺少角球数时仍完成比分复盘，角球观察不评级",
+                )
+            )
+            record = reviewed["record"]
+            self.assertIsNone(record["corner_score"])
+            self.assertEqual(
+                record["observation_diagnostics"][0]["status"],
+                "ungraded_missing_corner_score",
+            )
+            self.assertIsNone(
+                record["observation_diagnostics"][0]["best_observation_result"]
+            )
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            for market in ("corner_total", "corner_handicap"):
+                diagnostics = reviewed["stats"]["observation_gate_funnel"][
+                    "markets"
+                ][market]["diagnostics"]
+                self.assertEqual(diagnostics["ungraded_observations"], 1)
+                self.assertEqual(diagnostics["ungraded_candidates"], 2)
+                self.assertEqual(diagnostics["graded_candidates"], 0)
+
     def setUp(self):
         self._real_utc_now = memory_store.utc_now
         memory_store.utc_now = lambda: datetime(
@@ -1606,6 +2131,7 @@ class MemoryStoreTests(unittest.TestCase):
                 )
 
     def test_new_formal_market_guardrails_and_complete_odds(self):
+        self.enable_corner_formal_for_settlement_unit_test()
         goal = {
             "asian_side": None,
             "total_side": None,
@@ -1986,6 +2512,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertTrue(accepted["primary_pick"]["market_complete"])
 
     def test_new_market_settlement_stats_and_corner_score_requirement(self):
+        self.enable_corner_formal_for_settlement_unit_test()
         def review(base, match_id, home, away, **extra):
             values = {
                 "base_dir": base,
@@ -2215,6 +2742,7 @@ class MemoryStoreTests(unittest.TestCase):
         )
 
     def test_new_market_lineup_identity_worse_line_and_revisions(self):
+        self.enable_corner_formal_for_settlement_unit_test()
         initial = {
             "asian_side": None,
             "total_side": None,
@@ -2322,6 +2850,241 @@ class MemoryStoreTests(unittest.TestCase):
                                 **case,
                             )
                         )
+
+    def test_paused_htft_observation_has_audited_review_and_gate_funnel(self):
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base, "htft-observation"
+            )
+            created = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="htft-observation",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="none",
+                    model_version=None,
+                    score_model_file=None,
+                    htft_observation_model_file=model_file,
+                    htft_observation_ranker_file=ranker_file,
+                )
+            )["record"]
+
+            self.assertIsNone(created["primary_market"])
+            self.assertIsNone(created["primary_pick"])
+            self.assertEqual(created["htft_picks"], [])
+            self.assertEqual(len(created["candidate_audits"]), 1)
+            audit = created["candidate_audits"][0]
+            self.assertEqual(audit["market"], "htft")
+            self.assertFalse(audit["counts_toward_primary_record"])
+            self.assertEqual(audit["monetary_scope"], "none")
+            self.assertRegex(audit["model"]["matrix_hash"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(
+                [item["selection"] for item in audit["top_two"]],
+                ["HH", "DH"],
+            )
+            self.assertAlmostEqual(audit["pair_probability_mass"], 0.50)
+            policy_gate = next(
+                gate
+                for gate in audit["top_two"][0]["gates"]
+                if gate["gate"] == "market_policy_enabled"
+            )
+            self.assertFalse(policy_gate["passed"])
+
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id="htft-observation",
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=0,
+                    half_away_score=0,
+                    key_learning="半全场观察只进入概率诊断，不追认主推",
+                )
+            )
+            record = reviewed["record"]
+            diagnostic = record["observation_diagnostics"][0]
+            self.assertEqual(diagnostic["actual_selection"], "DH")
+            self.assertFalse(diagnostic["top1_hit"])
+            self.assertTrue(diagnostic["top2_hit"])
+            self.assertFalse(diagnostic["counts_toward_primary_record"])
+            self.assertEqual(diagnostic["monetary_scope"], "none")
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
+
+            funnel = reviewed["stats"]["observation_gate_funnel"]
+            self.assertEqual(funnel["reviewed_matches_with_observations"], 1)
+            htft = funnel["markets"]["htft"]
+            self.assertEqual(htft["candidate_count"], 2)
+            self.assertEqual(htft["diagnostics"]["graded_observations"], 1)
+            self.assertEqual(htft["diagnostics"]["top1_hits"], 0)
+            self.assertEqual(htft["diagnostics"]["top2_hits"], 1)
+            self.assertEqual(
+                htft["gate_funnel"]["market_policy_enabled"]["failed"], 2
+            )
+            self.assertEqual(
+                htft["gate_funnel"]["scenario_stability"]["passed"], 2
+            )
+            league_key = memory_store.normalize_league_name("测试联赛")
+            self.assertEqual(
+                reviewed["stats"]["leagues"][league_key][
+                    "observation_gate_funnel"
+                ]["markets"]["htft"]["candidate_count"],
+                2,
+            )
+
+            calibration = memory_store.cmd_calibrate(
+                SimpleNamespace(
+                    base_dir=base,
+                    guardrail=None,
+                    minimum_graded=20,
+                    write=False,
+                )
+            )["calibration"]
+            self.assertEqual(
+                calibration["observation_gate_funnel"]["markets"]["htft"][
+                    "diagnostics"
+                ]["top2_hits"],
+                1,
+            )
+            self.assertEqual(
+                calibration["league_profiles"][league_key][
+                    "observation_gate_funnel"
+                ]["markets"]["htft"]["candidate_count"],
+                2,
+            )
+            self.assertFalse(calibration["parameter_change_authorized"])
+
+    def test_htft_observation_rejects_ranker_that_does_not_match_model_top_two(self):
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base, "htft-tamper"
+            )
+            ranker = json.loads(Path(ranker_file).read_text(encoding="utf-8"))
+            ranker["scenarios"][0]["selection"] = "DD"
+            Path(ranker_file).write_text(
+                json.dumps(ranker, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "does not reproduce"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="htft-tamper",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def test_htft_observation_rejects_rehashed_self_reported_ev_and_gates(self):
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base, "htft-gate-tamper"
+            )
+            ranker = json.loads(Path(ranker_file).read_text(encoding="utf-8"))
+            scenario = ranker["scenarios"][0]
+            scenario["ev"] = 0.99
+            scenario["edge_pp"] = 99.0
+            scenario["diagnostic_failed_thresholds"] = []
+            scenario["failed_thresholds"] = []
+            Path(ranker_file).write_text(
+                json.dumps(ranker, ensure_ascii=False), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not reproduce"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="htft-gate-tamper",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def test_htft_observation_rejects_prediction_content_hash_tampering(self):
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base, "htft-hash-tamper"
+            )
+            model = json.loads(Path(model_file).read_text(encoding="utf-8"))
+            model["provenance"]["training_cutoff_date"] = "2026-07-19"
+            Path(model_file).write_text(
+                json.dumps(model, ensure_ascii=False), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "prediction_hash does not match prediction contents"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id="htft-hash-tamper",
+                        asian_side=None,
+                        total_side=None,
+                        primary_market="none",
+                        model_version=None,
+                        score_model_file=None,
+                        htft_observation_model_file=model_file,
+                        htft_observation_ranker_file=ranker_file,
+                    )
+                )
+
+    def test_htft_observation_without_half_score_stays_ungraded_and_never_blocks_review(self):
+        with tempfile.TemporaryDirectory() as base:
+            model_file, ranker_file = write_htft_observation_files(
+                base, "htft-no-half"
+            )
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id="htft-no-half",
+                    asian_side=None,
+                    total_side=None,
+                    primary_market="none",
+                    model_version=None,
+                    score_model_file=None,
+                    htft_observation_model_file=model_file,
+                    htft_observation_ranker_file=ranker_file,
+                )
+            )
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id="htft-no-half",
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=None,
+                    half_away_score=None,
+                    key_learning="缺少半场比分时观察样本不评级也不阻塞全场复盘",
+                )
+            )
+            diagnostic = reviewed["record"]["observation_diagnostics"][0]
+            self.assertEqual(
+                diagnostic["status"], "ungraded_missing_half_time_score"
+            )
+            self.assertIsNone(diagnostic["top2_hit"])
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            self.assertEqual(
+                reviewed["stats"]["observation_gate_funnel"]["markets"][
+                    "htft"
+                ]["diagnostics"]["ungraded_observations"],
+                1,
+            )
 
     def test_strict_selection_policy_and_one_x_two_proper_scores(self):
         selected = strict_metric_record(

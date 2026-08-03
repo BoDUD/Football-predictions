@@ -122,7 +122,7 @@ Run the versioned evaluator against the importer's hash-verified local bundle:
 
 ```text
 python scripts/htft_holdout_evaluator.py \
-  --dataset-dir .codex/soccer-predict/datasets/league-history \
+  --dataset-dir .codex/soccer-predict/datasets/league-history-expanded \
   --include-opening-market \
   --output .codex/soccer-predict/evaluations/htft-fixed-seasons.json
 ```
@@ -147,56 +147,77 @@ artifact, call `validate_evaluation(..., dataset_dir=...)` or provide its exact 
 the validator reopens the manifest-bound score and market files, verifies their hashes and
 fixture identities, and then recomputes the reported metrics from prediction-level evidence.
 
-Across Brazil Serie A, Japan J1, Norway Eliteserien, and MLS, the fixed 2025 component cohort
-contains 1,510 matches. The model produced multiclass log loss 1.92022, Brier 0.82267, Top-1 accuracy
-30.07%, and two-scenario coverage accuracy 48.48%. The training-only empirical-frequency
-baseline was worse (log loss 1.94199, Brier 0.83160, Top-1 28.54%, Top-2 43.05%). A
-fixed-seed, league-stratified paired bootstrap for the model versus that baseline gave mean
-log-loss change -0.02177 with 95% interval [-0.03260, -0.01049], and Brier change -0.00893
-with interval [-0.01277, -0.00524].
+The expanded source bundle targets fourteen competitions, including Finland Veikkausliiga.
+Do not quote a match count or model score from an older export. Read total and cohort row
+counts from the validated dataset manifest, and read log loss, Brier, Top-1/Top-2,
+calibration, uncertainty, fallback, and baseline deltas from the source-bound evaluation
+artifact generated for that exact manifest. Right-censored 2026 research/shadow cohorts stay
+visible but are excluded from `promotion_evidence`.
 
-That overall cohort includes two materially different production-availability groups. The
-known-team group has 1,370 matches (log loss 1.91190, Top-2 49.42%); the league-average
-fallback group has 140 matches (log loss 2.00162, Top-2 39.29%). The registered production
-manager defaults to an error for unknown teams. An explicitly requested
-`league_average` fallback must retain its warning and separate cohort label; do not present
-the 1,510-match aggregate as the manager's default production performance.
+The registered HT/FT manager labels a league `candidate` only when the fixed 2025 holdout
+contains at least 100 known-team fixtures and both log-loss and Brier deltas for that slice versus the
+training-window empirical-frequency baseline have a negative mean and a negative paired-
+bootstrap 95% confidence-interval upper bound. A mean-only improvement or a smaller sample
+remains `shadow`.
 
-The global 0.46 model-only Top-2 probability-mass threshold is descriptive development
-evidence, not a confirmed confidence gate. The 2025 league cohorts are:
+The aggregate still mixes known-team predictions with explicitly labelled league-average
+fallback predictions. The registered manager defaults to an error for unknown teams. An
+explicitly requested `league_average` fallback must retain its warning and separate cohort
+label; never present an aggregate containing fallback fixtures as the manager's default
+known-team performance.
 
-| League | Eligible | Covered | Hits | Hit rate | Wilson 95% lower bound |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Brazil Serie A | 380 | 125 | 72 | 57.60% | 48.84% |
-| Japan J1 | 380 | 66 | 32 | 48.48% | 36.85% |
-| Norway Eliteserien | 240 | 110 | 63 | 57.27% | 47.94% |
-| MLS | 510 | 208 | 114 | 54.81% | 48.02% |
+The model-only Top-2 probability-mass threshold and every league-specific covered/hit count
+are versioned registry evidence, not a source-code table and not a confirmed confidence gate.
+The ranker must accept them only when the evidence binds the exact dataset manifest,
+evaluation, model hash, and league key. Because the selector was developed after inspecting
+historical results and the workbooks contain no timestamped executable nine-way HT/FT
+prices, `production_confidence_eligible=false` and `formal_htft_eligible=false` remain
+mandatory.
 
-All four Wilson lower bounds are at or below 50%. The ranker therefore uses `league_key` to
-display the matching evidence but cannot issue a league-confirmed confidence label; missing
-or unsupported league context remains unconfirmed. A separate research experiment using
-workbook opening 1X2 as a full-time marginal anchor produced 2025 log loss 1.90470 and Brier
-0.81813; the 0.50 gate covered 320 matches (21.19%) with 61.56% two-scenario accuracy. Those
-full-time opening prices have no precise collection timestamps, so `0.50` and `61.56%` are
-research-only. They are neither a live half-time gate, live-forward ROI, nor authorization to
+A separate research experiment may use workbook opening 1X2 as a full-time marginal proxy.
+Its exact sample and metrics belong only to the current evaluation artifact. These full-time
+opening prices have no precise collection timestamps and are not HT/FT prices, so the cohort
+is research-only. It is neither a live half-time gate, live-forward ROI, nor authorization to
 make HT/FT a formal primary.
 
-`scenario_stability_v2` is not an accepted selector: it reduced 2025 Top-2 accuracy from
-48.48% to 45.70%. Its older partial-2026 comparison mixed the Japan special regime and is
-not a formal metric. Use
+`scenario_stability_v2` is not an accepted selector. Use
 `probability_top2_v3_post_selection`, with stability/coherence/score/price fields retained
-only as audits. The comparison itself helped develop the selector and is not a final untouched
-test. Every evaluation artifact must record season bounds, eligible and excluded rows,
+only as audits. Earlier selector comparisons helped develop the policy and are not a final
+untouched test; do not carry their old percentages into a newly expanded bundle. Every
+evaluation artifact must record season bounds, eligible and excluded rows,
 model and input hashes, configuration, prediction-level probabilities, and both overall and
 per-league metrics. Never retune a threshold from the match currently being reviewed.
 
-The production manager follows `regular-only-production-v1`: it trains only rows marked
-`competition_regime=regular`. All 180 supplied Japan J1 2026 fixtures are labelled
-`2026_vision_regional`, excluded from registered production fitting and formal fixed-season
-metrics, with only excluded-row counts retained as competition-regime-drift evidence. The complete 9,211-match bundle covers only
-Brazil Serie A, Japan J1, Norway Eliteserien, and MLS. It provides no validated transfer
-benefit for Korean K League, so Korean predictions stay on the generic observation path and
-must not cite these metrics.
+The importer preserves every collected Titan stage through `format_version`, `phase_group`,
+`season_status`, and `competition_regime` so those cohorts remain auditable. The registered
+manager follows `regular-only-production-v1`: it trains only rows marked
+`competition_regime=regular`; special regimes are not silently merged into regular team
+strengths, and only their excluded-row counts and drift warnings flow into the registry.
+This is not an independent production model for every phase. Deployment status is derived
+from the current fixed holdout and must be read from the hash-bound registry rather than
+hard-coded by league name. Every registered model is non-formal, and every unfinished 2026
+cohort remains research/shadow regardless of its interim metric.
+
+## Corner-model validation boundary
+
+Corner-count training is a separate lineage from the football score and HT/FT models. The
+corner manager must bind the exact verified 90-minute corner-history CSV, its fitted model,
+and a chronological walk-forward backtest. Read the actual sample counts and proper scores
+from those artifacts; do not infer corner quality from the football-goal manifest, a prose
+trend, or a workbook percentage.
+
+The current corner manager may assign only historical `candidate` or `shadow` status. Both
+`formal_corner_total_eligible` and `formal_corner_handicap_eligible` are deliberately false,
+because an historical backtest is not an independent strict live-forward test. A future
+manager version must bind prediction-time fixtures, executable current corner prices,
+abstentions, calibration, settlement, and model/market hashes before either formal flag may
+be enabled. Until then, corner output is a `◇` observation even when diagnostic EV is
+positive and the current two-way market is complete.
+
+When rebuilding all fourteen leagues, train them sequentially into one registry and run one
+final `inspect`; concurrent `train` commands must not write the same `registry.json`. The
+source-normalization, collection, dataset, and handoff commands are in
+[expanded-history-runbook.md](expanded-history-runbook.md).
 
 ## Ledger cohorts
 
