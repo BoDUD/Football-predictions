@@ -406,12 +406,59 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "status": "changed",
                 "decision": "cancelled_to_none",
             },
+            "candidate_audits": [
+                {
+                    "market": "htft",
+                    "pair_probability_mass": 0.50,
+                    "top_two": [
+                        {
+                            "selection": "HH",
+                            "probability": 0.30,
+                            "odds": None,
+                            "gates": [
+                                {
+                                    "gate": "market_policy_enabled",
+                                    "passed": False,
+                                    "reasons": ["paused"],
+                                },
+                                {
+                                    "gate": "complete_current_market",
+                                    "passed": False,
+                                    "reasons": ["missing odds"],
+                                },
+                            ],
+                        },
+                        {
+                            "selection": "DH",
+                            "probability": 0.20,
+                            "odds": None,
+                            "gates": [
+                                {
+                                    "gate": "market_policy_enabled",
+                                    "passed": False,
+                                    "reasons": ["paused"],
+                                },
+                                {
+                                    "gate": "complete_current_market",
+                                    "passed": False,
+                                    "reasons": ["missing odds"],
+                                },
+                            ],
+                        },
+                    ],
+                }
+            ],
         })
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             lineup_text = formatter.render(base, "42", "lineup-check")
             self.assertIn("主推取消：小2.5 @0.92 → 不下注", lineup_text)
             self.assertIn("当前主推：无正式推荐", lineup_text)
+            self.assertIn(
+                "半全场：观察 主/主（30.0%）、平/主（20.0%），合计50.0%；"
+                "未通过：当前政策放行、完整当前9路赔率",
+                lineup_text,
+            )
             self.assert_plain(lineup_text)
 
             record.update({
@@ -421,6 +468,15 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "primary_result": None,
                 "key_learning": "旧方向失效后没有强行寻找替代主推",
                 "reviewed_at": "2026-07-23T13:00:00+00:00",
+                "observation_diagnostics": [
+                    {
+                        "market": "htft",
+                        "status": "graded_observation",
+                        "actual_selection": "DH",
+                        "top1_hit": False,
+                        "top2_hit": True,
+                    }
+                ],
                 "settlement_basis": {
                     "policy": "latest_active_prematch_version",
                     "analysis_stage": "lineup-check",
@@ -439,6 +495,11 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertIn("主推：无正式推荐（不结算、不计战绩）", review_text)
             self.assertIn(
                 "学习归档：无主推观察样本（只用于规则与数据质量复核）",
+                review_text,
+            )
+            self.assertIn(
+                "半全场观察诊断：实际平/主，Top1未命中、Top2命中"
+                "（不结算、不计战绩）",
                 review_text,
             )
             self.assertNotIn("无正式推荐＝未结算", review_text)

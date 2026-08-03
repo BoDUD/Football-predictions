@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
-  short_description: "League-trained HT/FT and score predictions"
-  default_prompt: "Use $soccer-predict to generate an auditable league-trained HT/FT matrix and canonical full-time score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."
+  short_description: "Audited football posters, HT/FT and score models"
+  default_prompt: "Use $soccer-predict to generate a deterministic prediction poster plus concise analysis text, mark only a gate-qualified formal primary with a star, build an auditable league-trained HT/FT matrix and canonical full-time score distribution, compare complete current markets, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."

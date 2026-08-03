@@ -71,7 +71,7 @@ class HTFTModelTests(unittest.TestCase):
             )
             writer.writerows(rows)
 
-    def _fit(self):
+    def _fit(self, *, ipf_tolerance: float = 1e-12):
         return htft_model.fit_model(
             self.csv_path,
             iterations=30,
@@ -82,6 +82,7 @@ class HTFTModelTests(unittest.TestCase):
             full_time_half_life_days=180.0,
             competition_key="test_league",
             dataset_manifest_hash=MANIFEST_HASH,
+            ipf_tolerance=ipf_tolerance,
         )
 
     @staticmethod
@@ -283,6 +284,61 @@ class HTFTModelTests(unittest.TestCase):
             htft_model.HTFTModelError, "IPF reconstruction"
         ):
             htft_model.validate_prediction(tampered)
+
+    def test_prediction_ipf_audit_rebuild_uses_precise_provenance_targets(self):
+        model = self._fit(ipf_tolerance=1e-11)
+        prediction = htft_model.predict_model(
+            model,
+            "Alpha",
+            "Bravo",
+            kickoff=PREDICTION_KICKOFF,
+            generated_at=PREDICTION_GENERATED_AT,
+            seed_method="experimental_score_convolution",
+        )
+        serialized = json.loads(json.dumps(prediction, allow_nan=False))
+        construction = serialized["joint_construction"]
+        recorded_joint = serialized["htft"]["joint_matrix"]
+        precise_targets = serialized["provenance"]["marginal_targets"]
+
+        precise_joint, precise_audit = htft_model.iterative_proportional_fit(
+            construction["raw_joint"],
+            precise_targets["half_time"]["probabilities"],
+            precise_targets["full_time"]["probabilities"],
+            tolerance=construction["ipf"]["tolerance"],
+            max_iterations=construction["ipf"]["max_iterations"],
+        )
+        approximate_half, approximate_full = htft_model._matrix_marginals(
+            recorded_joint
+        )
+        approximate_joint, _ = htft_model.iterative_proportional_fit(
+            construction["raw_joint"],
+            approximate_half,
+            approximate_full,
+            tolerance=construction["ipf"]["tolerance"],
+            max_iterations=construction["ipf"]["max_iterations"],
+        )
+
+        precise_difference = max(
+            abs(precise_joint[row][column] - recorded_joint[row][column])
+            for row in range(3)
+            for column in range(3)
+        )
+        approximate_difference = max(
+            abs(approximate_joint[row][column] - recorded_joint[row][column])
+            for row in range(3)
+            for column in range(3)
+        )
+        self.assertLessEqual(precise_difference, 1e-15)
+        self.assertGreater(approximate_difference, 1e-12)
+        self.assertEqual(
+            precise_audit["iterations"], construction["ipf"]["iterations"]
+        )
+        self.assertAlmostEqual(
+            precise_audit["maximum_marginal_error"],
+            construction["ipf"]["maximum_marginal_error"],
+            delta=1e-15,
+        )
+        htft_model.validate_prediction(serialized, model=model)
 
     def test_prediction_model_binding_rejects_rehashed_association_seed(self):
         model = self._fit()

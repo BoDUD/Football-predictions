@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime
 import json
 import math
+import re
 from typing import Any, Mapping
 
 
@@ -23,36 +24,7 @@ RESEARCH_ONLY_FULL_TIME_OPENING_PAIR_MASS_THRESHOLD = 0.50
 PAIR_MASS_THRESHOLDS = {
     "model_only": MODEL_ONLY_PAIR_MASS_THRESHOLD,
 }
-LEAGUE_PAIR_GATE_EVIDENCE_VERSION = "fixed-2025-post-selection-cohorts-v1"
-LEAGUE_PAIR_GATE_EVIDENCE = {
-    "brazil_serie_a": {
-        "eligible_sample_count": 380,
-        "covered_count": 125,
-        "hit_count": 72,
-        "regime_warning": None,
-    },
-    "japan_j1": {
-        "eligible_sample_count": 380,
-        "covered_count": 66,
-        "hit_count": 32,
-        "regime_warning": (
-            "2026 training tail is the regional J1 special-season regime; "
-            "ordinary 2026/27 J1 is a distribution shift"
-        ),
-    },
-    "norway_eliteserien": {
-        "eligible_sample_count": 240,
-        "covered_count": 110,
-        "hit_count": 63,
-        "regime_warning": None,
-    },
-    "usa_mls": {
-        "eligible_sample_count": 510,
-        "covered_count": 208,
-        "hit_count": 114,
-        "regime_warning": None,
-    },
-}
+LEAGUE_PAIR_GATE_EVIDENCE_VERSION = "registry-bound-htft-evidence/1.0.0"
 MIN_LEAGUE_GATE_SAMPLE = 100
 
 STABILITY_WEIGHTS = {
@@ -87,7 +59,12 @@ def _wilson_lower_bound(hits: int, sample_count: int) -> float | None:
     return (center - radius) / denominator
 
 
-def _league_pair_gate_evidence(league_key: str | None) -> dict[str, Any]:
+def _league_pair_gate_evidence(
+    league_key: str | None,
+    evidence: Mapping[str, Any] | None = None,
+    *,
+    model_hash: str | None = None,
+) -> dict[str, Any]:
     if league_key is None or not league_key.strip():
         return {
             "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
@@ -96,51 +73,121 @@ def _league_pair_gate_evidence(league_key: str | None) -> dict[str, Any]:
             "production_confidence_eligible": False,
         }
     normalized = league_key.strip().casefold()
-    raw = LEAGUE_PAIR_GATE_EVIDENCE.get(normalized)
-    if raw is None:
+    if evidence is None:
         return {
             "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
             "league_key": normalized,
-            "status": "unsupported_league_no_training_evidence",
+            "status": "registry_evidence_required",
             "production_confidence_eligible": False,
         }
-    covered = raw["covered_count"]
-    hits = raw["hit_count"]
-    hit_rate = hits / covered
+    if not isinstance(evidence, Mapping):
+        raise ValueError("league_evidence must be an object")
+    required = {
+        "version",
+        "dataset_manifest_hash",
+        "evaluation_hash",
+        "model_hash",
+        "league_key",
+        "source_role",
+        "threshold",
+        "eligible_sample_count",
+        "covered_count",
+        "hit_count",
+        "deployment_status",
+        "regime_warning",
+        "formal_htft_eligible",
+        "production_confidence_eligible",
+    }
+    if set(evidence) != required:
+        raise ValueError("league_evidence fields do not match the registry contract")
+    if evidence.get("version") != LEAGUE_PAIR_GATE_EVIDENCE_VERSION:
+        raise ValueError("league_evidence version is unsupported")
+    if evidence.get("league_key") != normalized:
+        raise ValueError("league_evidence league_key does not match league context")
+    hash_pattern = r"sha256:[0-9a-f]{64}"
+    for name in ("dataset_manifest_hash", "evaluation_hash", "model_hash"):
+        value = evidence.get(name)
+        if not isinstance(value, str) or not re.fullmatch(hash_pattern, value):
+            raise ValueError(f"league_evidence.{name} must be a SHA-256 hash")
+    if model_hash is None or evidence.get("model_hash") != model_hash:
+        raise ValueError("league_evidence model_hash does not match the prediction model")
+    if evidence.get("source_role") != "historical_post_selection_development_evidence":
+        raise ValueError("league_evidence source_role is invalid")
+    threshold = evidence.get("threshold")
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(float(threshold))
+        or abs(float(threshold) - MODEL_ONLY_PAIR_MASS_THRESHOLD) > 1e-12
+    ):
+        raise ValueError("league_evidence threshold is not the registered threshold")
+    counts: dict[str, int] = {}
+    for name in ("eligible_sample_count", "covered_count", "hit_count"):
+        value = evidence.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"league_evidence.{name} must be a non-negative integer")
+        counts[name] = value
+    eligible = counts["eligible_sample_count"]
+    covered = counts["covered_count"]
+    hits = counts["hit_count"]
+    if covered > eligible or hits > covered:
+        raise ValueError("league_evidence cohort counts are inconsistent")
+    deployment_status = evidence.get("deployment_status")
+    if deployment_status not in {"candidate", "shadow"}:
+        raise ValueError("league_evidence deployment_status must be candidate or shadow")
+    regime_warning = evidence.get("regime_warning")
+    if regime_warning is not None and (
+        not isinstance(regime_warning, str) or not regime_warning.strip()
+    ):
+        raise ValueError("league_evidence regime_warning must be null or non-empty text")
+    if (
+        evidence.get("formal_htft_eligible") is not False
+        or evidence.get("production_confidence_eligible") is not False
+    ):
+        raise ValueError("historical league_evidence cannot authorize formal HT/FT")
+    hit_rate = hits / covered if covered else None
     lower_bound = _wilson_lower_bound(hits, covered)
-    regime_warning = raw["regime_warning"]
     sample_sufficient = covered >= MIN_LEAGUE_GATE_SAMPLE
     lower_bound_above_chance = lower_bound is not None and lower_bound > 0.5
-    eligible = (
-        sample_sufficient
+    historical_component_signal = (
+        deployment_status == "candidate"
+        and sample_sufficient
         and lower_bound_above_chance
         and regime_warning is None
     )
-    if regime_warning is not None:
+    if deployment_status == "shadow":
+        status = "shadow_model_live_forward_unconfirmed"
+    elif regime_warning is not None:
         status = "competition_regime_shift_unconfirmed"
     elif not sample_sufficient:
         status = "league_gate_sample_too_small"
     elif not lower_bound_above_chance:
         status = "league_gate_lower_bound_not_above_chance"
     else:
-        status = "league_gate_forward_confirmed"
+        status = "historical_component_signal_live_forward_unconfirmed"
     return {
         "version": LEAGUE_PAIR_GATE_EVIDENCE_VERSION,
+        "dataset_manifest_hash": evidence["dataset_manifest_hash"],
+        "evaluation_hash": evidence["evaluation_hash"],
+        "model_hash": evidence["model_hash"],
         "league_key": normalized,
         "status": status,
-        "source_role": "post_selection_development_evidence_not_untouched",
+        "source_role": evidence["source_role"],
         "threshold": MODEL_ONLY_PAIR_MASS_THRESHOLD,
-        "eligible_sample_count": raw["eligible_sample_count"],
+        "eligible_sample_count": eligible,
         "covered_count": covered,
         "hit_count": hits,
-        "coverage": covered / raw["eligible_sample_count"],
+        "coverage": covered / eligible if eligible else None,
         "hit_rate_when_covered": hit_rate,
         "wilson_95_lower_bound": lower_bound,
         "minimum_sample": MIN_LEAGUE_GATE_SAMPLE,
         "sample_sufficient": sample_sufficient,
         "lower_bound_above_chance": lower_bound_above_chance,
+        "historical_component_signal": historical_component_signal,
+        "deployment_status": deployment_status,
         "regime_warning": regime_warning,
-        "production_confidence_eligible": eligible,
+        "formal_htft_eligible": False,
+        "production_confidence_eligible": False,
     }
 
 
@@ -331,6 +378,8 @@ def rank_htft(
     odds_context: Mapping[str, Any] | None = None,
     market_anchored: bool | None = None,
     league_key: str | None = None,
+    league_evidence: Mapping[str, Any] | None = None,
+    model_hash: str | None = None,
 ) -> dict[str, Any]:
     _require_keys(matrix, OUTCOMES, "matrix")
     _require_keys(half_probabilities, HALF_RESULTS, "half probabilities")
@@ -355,7 +404,11 @@ def rank_htft(
         odds_context,
         firm_count=firm_count,
     )
-    league_gate_evidence = _league_pair_gate_evidence(league_key)
+    league_gate_evidence = _league_pair_gate_evidence(
+        league_key,
+        league_evidence,
+        model_hash=model_hash,
+    )
     normalized_exact_results = _normalize_exact_score_results(
         exact_score_results
     )
@@ -619,10 +672,12 @@ def rank_htft(
         pair_confidence_status = "low_pair_probability_mass"
     elif league_gate_evidence["status"] == "missing_league_context":
         pair_confidence_status = "league_context_required"
-    elif league_gate_evidence["status"] == "unsupported_league_no_training_evidence":
-        pair_confidence_status = "unsupported_league_no_training_evidence"
+    elif league_gate_evidence["status"] == "registry_evidence_required":
+        pair_confidence_status = "registry_evidence_required"
     elif league_gate_evidence["status"] == "competition_regime_shift_unconfirmed":
         pair_confidence_status = "competition_regime_shift_unconfirmed"
+    elif league_gate_evidence["status"] == "shadow_model_live_forward_unconfirmed":
+        pair_confidence_status = "shadow_model_live_forward_unconfirmed"
     elif not league_gate_evidence["production_confidence_eligible"]:
         pair_confidence_status = "league_cohort_not_forward_confirmed"
     else:
@@ -739,6 +794,35 @@ def rank_htft(
     ]
 
     return {
+        "input_audit": {
+            "odds": dict(sorted(supplied_odds.items())),
+            "market_probabilities": (
+                dict(sorted(market_probabilities.items()))
+                if market_probabilities is not None
+                else None
+            ),
+            "firm_count": firm_count,
+            "data_quality": data_quality,
+            "tolerance_pp": tolerance_pp,
+            "edge_threshold_pp": edge_threshold_pp,
+            "minimum_firms": minimum_firms,
+            "exact_score_results": (
+                list(normalized_exact_results)
+                if exact_score_results is not None
+                else None
+            ),
+            "anchor_context": normalized_anchor_context,
+            "odds_context": normalized_odds_context,
+            "league_key": (
+                league_key.strip().casefold()
+                if isinstance(league_key, str) and league_key.strip()
+                else None
+            ),
+            "league_evidence": (
+                dict(league_evidence) if league_evidence is not None else None
+            ),
+            "model_hash": model_hash,
+        },
         "selection_basis": SELECTION_BASIS,
         "ranking_basis": SELECTION_BASIS,
         "selection_policy": {
@@ -861,6 +945,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--league-evidence-file",
+        help="Registry-exported league_pair_gate_evidence JSON object",
+    )
+    parser.add_argument(
+        "--model-hash",
+        help="Prediction model hash; required when league evidence is supplied",
+    )
+    parser.add_argument(
         "--data-quality",
         choices=("high", "medium", "low", "unknown"),
         default="unknown",
@@ -880,6 +972,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    league_evidence = None
+    if args.league_evidence_file:
+        try:
+            with open(args.league_evidence_file, "r", encoding="utf-8") as handle:
+                league_evidence = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot read --league-evidence-file: {exc}") from exc
+        if not isinstance(league_evidence, dict):
+            raise SystemExit("--league-evidence-file must contain a JSON object")
     odds_context_values = (
         args.odds_source,
         args.odds_captured_at,
@@ -924,6 +1025,8 @@ def main() -> int:
         odds_context=odds_context,
         market_anchored=args.market_anchored,
         league_key=args.league_key,
+        league_evidence=league_evidence,
+        model_hash=args.model_hash,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0

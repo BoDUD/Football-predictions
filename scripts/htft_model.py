@@ -1575,6 +1575,7 @@ def validate_prediction(
     if not isinstance(targets, Mapping) or set(targets) != {"half_time", "full_time"}:
         raise HTFTModelError("prediction marginal target provenance is incomplete")
     external_origins = 0
+    validated_targets: dict[str, dict[str, float]] = {}
     for name, declared in (("half_time", declared_half), ("full_time", declared_full)):
         target = targets.get(name)
         if not isinstance(target, Mapping):
@@ -1582,6 +1583,7 @@ def validate_prediction(
         target_probabilities = _validated_marginal(
             target.get("probabilities"), f"provenance.marginal_targets.{name}"
         )
+        validated_targets[name] = target_probabilities
         if any(
             abs(target_probabilities[result] - declared[result]) > 1e-10
             for result in RESULTS
@@ -1673,8 +1675,8 @@ def validate_prediction(
 
     reconstructed_joint, reconstructed_audit = iterative_proportional_fit(
         raw_joint,
-        declared_half,
-        declared_full,
+        validated_targets["half_time"],
+        validated_targets["full_time"],
         tolerance=tolerance,
         max_iterations=max_iterations,
     )

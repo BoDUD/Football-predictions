@@ -18,6 +18,15 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+try:
+    from scripts import corner_ranker, htft_ranker
+except ImportError:  # Direct execution from scripts/.
+    script_directory = str(Path(__file__).resolve().parent)
+    if script_directory not in sys.path:
+        sys.path.insert(0, script_directory)
+    import corner_ranker  # type: ignore[no-redef]
+    import htft_ranker  # type: ignore[no-redef]
+
 
 PRIMARY_MARKETS = (
     "asian",
@@ -68,6 +77,7 @@ PROBABILITY_AUDIT_TOLERANCE = 1e-4
 EDGE_AUDIT_TOLERANCE_PP = 0.1
 ODDS_AUDIT_TOLERANCE = 0.0005
 ONE_X_TWO_LOG_LOSS_FLOOR = 1e-15
+HTFT_LOG_LOSS_FLOOR = 1e-15
 DEEP_FAVORITE_LINE = -0.75
 CONFIDENCE_RANKING_VERSION = "stability-v2"
 CONFIDENCE_POLICY_VERSION = "independent-settlement-risk-v2"
@@ -85,9 +95,47 @@ STRICT_OOS_MARKET_STATUS = {
         "status": "observation_only",
         "paused_reason": "strict-forward sample is insufficient and historical results are unstable",
     },
+    "corner_total": {
+        "status": "observation_only",
+        "paused_reason": "the corner model has historical training evidence only; registry-bound live-forward validation is not yet available",
+    },
+    "corner_handicap": {
+        "status": "observation_only",
+        "paused_reason": "the corner model has historical training evidence only; registry-bound live-forward validation is not yet available",
+    },
 }
 PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
+HTFT_OUTCOMES = tuple(f"{half}{full}" for half in "HDA" for full in "HDA")
+OBSERVATION_SCHEMA_VERSION = "candidate-observation/1.0.0"
+CORNER_OBSERVATION_KIND = "corner_market_observation"
+CORNER_OBSERVATION_GATE_ORDER = (
+    "complete_current_market",
+    "odds_provenance",
+    "positive_ev",
+    "positive_edge",
+    "bookmaker_depth",
+    "data_quality",
+    "corner_profile_evidence",
+    "market_signal_classified",
+    "adverse_signal_gate",
+    "registered_model_input",
+    "deployment_candidate",
+    "upstream_formal_policy",
+)
+OBSERVATION_GATE_ORDER = (
+    "complete_current_market",
+    "odds_provenance",
+    "positive_ev",
+    "positive_edge",
+    "bookmaker_depth",
+    "data_quality",
+    "scenario_stability",
+    "scenario_coherence",
+    "descriptive_pair_mass_threshold",
+    "league_forward_evidence",
+    "market_policy_enabled",
+)
 OBSOLETE_GUARDRAILS = {
     "小样本保护期内，所有正式方向（主推和正式次推）都必须满足EV>=8%、模型相对市场边际>=4pp且数据质量至少为medium。EV在5%-8%的方向只作观察，不得归档为正式方向。",
     "小样本保护期内，亚洲盘和大小球正式方向必须满足EV>=8%、模型相对市场边际>=4pp且数据质量至少为medium；EV在5%-8%的方向只作观察，不得归档为正式方向。",
@@ -731,6 +779,977 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
         "generated_at": generated_at.isoformat(),
         "fixture": deepcopy(fixture),
     }
+
+
+def resolve_observation_input_path(
+    args: argparse.Namespace,
+    supplied: str,
+    label: str,
+) -> Path:
+    path = Path(supplied).expanduser()
+    if not path.is_absolute():
+        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        path = (base / path).resolve()
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist: {path}")
+    return path
+
+
+def load_observation_json(
+    args: argparse.Namespace,
+    supplied: str,
+    label: str,
+) -> tuple[Path, bytes, dict[str, Any]]:
+    path = resolve_observation_input_path(args, supplied, label)
+    raw = path.read_bytes()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must be UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return path, raw, payload
+
+
+def require_sha256(value: Any, label: str) -> str:
+    normalized = str(value or "").lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+        raise ValueError(f"{label} must be a sha256: hash")
+    return normalized
+
+
+def canonical_prediction_hash(payload: dict[str, Any]) -> str:
+    value = deepcopy(payload)
+    value.pop("prediction_hash", None)
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HT/FT observation model contains non-canonical values") from exc
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def validate_htft_matrix(value: Any, label: str) -> dict[str, float]:
+    if not isinstance(value, dict) or set(value) != set(HTFT_OUTCOMES):
+        raise ValueError(f"{label} must contain exactly HH through AA")
+    matrix: dict[str, float] = {}
+    for outcome in HTFT_OUTCOMES:
+        probability = value.get(outcome)
+        if (
+            isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not math.isfinite(float(probability))
+            or not 0.0 <= float(probability) <= 1.0
+        ):
+            raise ValueError(f"{label}.{outcome} must be finite and between 0 and 1")
+        matrix[outcome] = float(probability)
+    if abs(math.fsum(matrix.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError(f"{label} probabilities must sum to 1")
+    return matrix
+
+
+def observation_gate(
+    name: str,
+    passed: bool,
+    reasons: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    normalized_reasons = [str(item).strip() for item in reasons or [] if str(item).strip()]
+    return {
+        "gate": name,
+        "passed": bool(passed),
+        "reasons": [] if passed else normalized_reasons,
+    }
+
+
+def build_htft_scenario_gates(
+    scenario: dict[str, Any],
+    ranker: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_failures = scenario.get("failed_thresholds", [])
+    if not isinstance(raw_failures, list):
+        raise ValueError("HT/FT observation failed_thresholds must be a list")
+    failures = [str(item) for item in raw_failures]
+
+    def matching(*needles: str) -> list[str]:
+        return [
+            failure
+            for failure in failures
+            if any(needle.casefold() in failure.casefold() for needle in needles)
+        ]
+
+    ev = scenario.get("ev")
+    edge = scenario.get("edge_pp")
+    league_evidence = ranker.get("league_gate_evidence")
+    market_policy = ranker.get("market_policy")
+    complete_reasons = matching("complete current 9-way")
+    provenance_reasons = matching("odds provenance")
+    depth_reasons = matching("firm count")
+    quality_reasons = matching("data quality")
+    stability_reasons = matching("scenario stability")
+    coherence_reasons = matching("scenario coherence")
+    policy_reasons = matching("market policy")
+    ev_reasons = [
+        failure
+        for failure in failures
+        if failure.casefold().startswith("ev ")
+        or "current odds unavailable" in failure.casefold()
+    ]
+    edge_reasons = [
+        failure
+        for failure in failures
+        if failure.casefold().startswith("edge ")
+        or "no-vig market probability" in failure.casefold()
+    ]
+    gates = {
+        "complete_current_market": observation_gate(
+            "complete_current_market",
+            not complete_reasons,
+            complete_reasons or ["complete current 9-way HT/FT odds unavailable"],
+        ),
+        "odds_provenance": observation_gate(
+            "odds_provenance",
+            isinstance(ranker.get("odds_context"), dict) and not provenance_reasons,
+            provenance_reasons or ["audited pre-kickoff HT/FT odds provenance unavailable"],
+        ),
+        "positive_ev": observation_gate(
+            "positive_ev",
+            isinstance(ev, (int, float)) and not isinstance(ev, bool) and float(ev) > 0.0,
+            ev_reasons or ["positive current EV unavailable"],
+        ),
+        "positive_edge": observation_gate(
+            "positive_edge",
+            isinstance(edge, (int, float))
+            and not isinstance(edge, bool)
+            and float(edge) > 0.0,
+            edge_reasons or ["positive model-versus-market edge unavailable"],
+        ),
+        "bookmaker_depth": observation_gate(
+            "bookmaker_depth",
+            not depth_reasons,
+            depth_reasons or ["minimum bookmaker depth not demonstrated"],
+        ),
+        "data_quality": observation_gate(
+            "data_quality",
+            not quality_reasons,
+            quality_reasons or ["medium/high data quality not demonstrated"],
+        ),
+        "scenario_stability": observation_gate(
+            "scenario_stability",
+            scenario.get("stability_gate_passed") is True,
+            stability_reasons or list(scenario.get("stability_gate_failures", [])),
+        ),
+        "scenario_coherence": observation_gate(
+            "scenario_coherence",
+            scenario.get("coherence_gate_passed") is True,
+            coherence_reasons or list(scenario.get("coherence_gate_failures", [])),
+        ),
+        "descriptive_pair_mass_threshold": observation_gate(
+            "descriptive_pair_mass_threshold",
+            ranker.get("pair_mass_threshold_crossed") is True,
+            [
+                "descriptive Top-2 pair-mass threshold not crossed; this is not a production release gate"
+            ],
+        ),
+        "league_forward_evidence": observation_gate(
+            "league_forward_evidence",
+            isinstance(league_evidence, dict)
+            and league_evidence.get("production_confidence_eligible") is True,
+            [
+                "league gate evidence is not forward-confirmed: "
+                + str(
+                    league_evidence.get("status", "missing")
+                    if isinstance(league_evidence, dict)
+                    else "missing"
+                )
+            ],
+        ),
+        "market_policy_enabled": observation_gate(
+            "market_policy_enabled",
+            isinstance(market_policy, dict)
+            and market_policy.get("htft_formal_enabled") is True,
+            policy_reasons or ["active market policy keeps HT/FT observation-only"],
+        ),
+    }
+    return [gates[name] for name in OBSERVATION_GATE_ORDER]
+
+
+def load_htft_observation_audit(
+    args: argparse.Namespace,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    model_file = str(
+        getattr(args, "htft_observation_model_file", "") or ""
+    ).strip()
+    ranker_file = str(
+        getattr(args, "htft_observation_ranker_file", "") or ""
+    ).strip()
+    if bool(model_file) != bool(ranker_file):
+        raise ValueError(
+            "HT/FT observation archival requires both --htft-observation-model-file "
+            "and --htft-observation-ranker-file"
+        )
+    if not model_file:
+        return None
+
+    model_path, model_raw, model = load_observation_json(
+        args, model_file, "HT/FT observation model file"
+    )
+    ranker_path, ranker_raw, ranker = load_observation_json(
+        args, ranker_file, "HT/FT observation ranker file"
+    )
+    if model.get("artifact_type") != "soccer_htft_prediction":
+        raise ValueError(
+            "HT/FT observation model file must have artifact_type=soccer_htft_prediction"
+        )
+    if not str(model.get("model_version") or "").strip():
+        raise ValueError("HT/FT observation model requires model_version")
+    model_hash = require_sha256(model.get("model_hash"), "HT/FT model_hash")
+    prediction_hash = require_sha256(
+        model.get("prediction_hash"), "HT/FT prediction_hash"
+    )
+    if prediction_hash != canonical_prediction_hash(model):
+        raise ValueError("HT/FT prediction_hash does not match prediction contents")
+    htft = model.get("htft")
+    if not isinstance(htft, dict):
+        raise ValueError("HT/FT observation model file requires htft metadata")
+    matrix = validate_htft_matrix(
+        htft.get("code_probabilities"), "HT/FT code_probabilities"
+    )
+    matrix_bytes = json.dumps(
+        matrix,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    matrix_hash = f"sha256:{hashlib.sha256(matrix_bytes).hexdigest()}"
+
+    fixture = model.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("HT/FT observation model requires fixture metadata")
+    if str(fixture.get("home_team") or "") != str(record.get("home_team") or ""):
+        raise ValueError("HT/FT observation fixture home_team must match the record")
+    if str(fixture.get("away_team") or "") != str(record.get("away_team") or ""):
+        raise ValueError("HT/FT observation fixture away_team must match the record")
+    if fixture.get("unknown_team_policy") != "error":
+        raise ValueError("HT/FT observation fixture requires unknown_team_policy=error")
+    fixture_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "HT/FT observation fixture.kickoff"
+    )
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "record kickoff"
+    )
+    if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("HT/FT observation fixture kickoff must match the record")
+    generated_at = parse_aware_datetime(
+        str(model.get("generated_at") or ""), "HT/FT observation generated_at"
+    )
+    if generated_at >= record_kickoff:
+        raise ValueError("HT/FT observation must be generated before kickoff")
+    if generated_at > parse_aware_datetime(
+        str(record.get("updated_at") or ""), "record updated_at"
+    ):
+        raise ValueError("HT/FT observation cannot be generated after it is archived")
+    provenance = model.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("HT/FT observation model requires provenance metadata")
+    if provenance.get("generated_before_kickoff") is not True:
+        raise ValueError("HT/FT observation provenance must prove generation before kickoff")
+    if provenance.get("strictly_before_kickoff_utc_date") is not True:
+        raise ValueError("HT/FT observation provenance must prove a strict training cutoff")
+    cutoff_text = str(provenance.get("training_cutoff_date") or "")
+    try:
+        training_cutoff = date.fromisoformat(cutoff_text)
+    except ValueError as exc:
+        raise ValueError(
+            "HT/FT observation training_cutoff_date must be an ISO date"
+        ) from exc
+    if training_cutoff >= record_kickoff.astimezone(timezone.utc).date():
+        raise ValueError("HT/FT observation training cutoff must predate kickoff")
+
+    training = provenance.get("training")
+    if not isinstance(training, dict):
+        raise ValueError("HT/FT observation provenance requires training metadata")
+    training_competition = str(training.get("competition_key") or "").strip().casefold()
+    if not training_competition:
+        raise ValueError("HT/FT observation training competition_key is required")
+    require_sha256(
+        training.get("source_data_hash"),
+        "HT/FT observation training source_data_hash",
+    )
+    require_sha256(
+        training.get("dataset_manifest_hash"),
+        "HT/FT observation training dataset_manifest_hash",
+    )
+    if str(training.get("end_date") or "") != cutoff_text:
+        raise ValueError(
+            "HT/FT observation training end_date must equal training_cutoff_date"
+        )
+
+    input_audit = ranker.get("input_audit")
+    expected_input_fields = {
+        "odds",
+        "market_probabilities",
+        "firm_count",
+        "data_quality",
+        "tolerance_pp",
+        "edge_threshold_pp",
+        "minimum_firms",
+        "exact_score_results",
+        "anchor_context",
+        "odds_context",
+        "league_key",
+        "league_evidence",
+        "model_hash",
+    }
+    if not isinstance(input_audit, dict) or set(input_audit) != expected_input_fields:
+        raise ValueError("HT/FT observation ranker requires a complete input_audit")
+    if input_audit.get("league_key") != training_competition:
+        raise ValueError(
+            "HT/FT observation ranker league evidence does not match model training"
+        )
+    if input_audit.get("model_hash") != model_hash:
+        raise ValueError("HT/FT observation ranker model_hash does not match prediction")
+    half_probabilities = {
+        half: math.fsum(
+            matrix[f"{half}{full}"] for full in ("H", "D", "A")
+        )
+        for half in ("H", "D", "A")
+    }
+    full_probabilities = {
+        full: math.fsum(
+            matrix[f"{half}{full}"] for half in ("H", "D", "A")
+        )
+        for full in ("H", "D", "A")
+    }
+    try:
+        reproduced_ranker = htft_ranker.rank_htft(
+            matrix,
+            half_probabilities,
+            full_probabilities,
+            odds=input_audit["odds"] or None,
+            market_probabilities=input_audit["market_probabilities"],
+            firm_count=input_audit["firm_count"],
+            data_quality=input_audit["data_quality"],
+            tolerance_pp=input_audit["tolerance_pp"],
+            edge_threshold_pp=input_audit["edge_threshold_pp"],
+            minimum_firms=input_audit["minimum_firms"],
+            exact_score_results=input_audit["exact_score_results"],
+            anchor_context=input_audit["anchor_context"],
+            odds_context=input_audit["odds_context"],
+            league_key=input_audit["league_key"],
+            league_evidence=input_audit["league_evidence"],
+            model_hash=input_audit["model_hash"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"HT/FT observation ranker inputs are invalid: {exc}") from exc
+    canonical_ranker = json.dumps(
+        ranker,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    canonical_reproduced = json.dumps(
+        reproduced_ranker,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if canonical_ranker != canonical_reproduced:
+        raise ValueError(
+            "HT/FT observation ranker does not reproduce from its audited inputs"
+        )
+
+    marginal_validation = ranker.get("marginal_validation")
+    if not isinstance(marginal_validation, dict) or marginal_validation.get("passed") is not True:
+        raise ValueError("HT/FT observation ranker must pass marginal validation")
+    scenarios = ranker.get("scenarios")
+    if not isinstance(scenarios, list) or len(scenarios) != 2:
+        raise ValueError("HT/FT observation ranker must contain exactly two scenarios")
+    expected_top_two = sorted(
+        HTFT_OUTCOMES,
+        key=lambda outcome: (-matrix[outcome], HTFT_OUTCOMES.index(outcome)),
+    )[:2]
+    if [str(item.get("selection") or "").upper() for item in scenarios] != expected_top_two:
+        raise ValueError("HT/FT observation scenarios must equal the matrix probability Top 2")
+    pair_mass = math.fsum(matrix[outcome] for outcome in expected_top_two)
+    supplied_pair_mass = ranker.get("pair_probability_mass", ranker.get("pair_mass"))
+    if (
+        supplied_pair_mass is None
+        or not math.isfinite(float(supplied_pair_mass))
+        or abs(float(supplied_pair_mass) - pair_mass) > PROBABILITY_AUDIT_TOLERANCE
+    ):
+        raise ValueError("HT/FT observation pair mass must equal the matrix Top-2 sum")
+    market_policy = ranker.get("market_policy")
+    formal_count = ranker.get("formal_count")
+    if (
+        not isinstance(market_policy, dict)
+        or market_policy.get("status") != "observation_only"
+        or market_policy.get("htft_formal_enabled") is not False
+        or isinstance(formal_count, bool)
+        or not isinstance(formal_count, (int, float))
+        or int(formal_count) != 0
+    ):
+        raise ValueError("HT/FT observation ranker must preserve the paused market policy")
+
+    top_two: list[dict[str, Any]] = []
+    for index, scenario in enumerate(scenarios, start=1):
+        if not isinstance(scenario, dict) or scenario.get("status") != "observation":
+            raise ValueError("HT/FT observation scenarios must have status=observation")
+        selection = expected_top_two[index - 1]
+        probability = scenario.get("probability")
+        if (
+            probability is None
+            or not math.isfinite(float(probability))
+            or abs(float(probability) - matrix[selection])
+            > PROBABILITY_AUDIT_TOLERANCE
+        ):
+            raise ValueError(
+                f"HT/FT observation scenario {selection} must match the model matrix"
+            )
+        gates = build_htft_scenario_gates(scenario, ranker)
+        top_two.append(
+            {
+                "slot": index,
+                "selection": selection,
+                "probability": matrix[selection],
+                "odds": scenario.get("odds"),
+                "market_probability": scenario.get("market_probability"),
+                "edge_pp": scenario.get("edge_pp"),
+                "ev": scenario.get("ev"),
+                "conditional_stability": scenario.get("conditional_stability"),
+                "state_continuity": scenario.get("state_continuity"),
+                "gates": gates,
+                "diagnostic_qualification_status": scenario.get(
+                    "diagnostic_qualification_status"
+                ),
+                "diagnostic_failed_thresholds": deepcopy(
+                    scenario.get("diagnostic_failed_thresholds", [])
+                ),
+                "failed_thresholds": deepcopy(scenario.get("failed_thresholds", [])),
+            }
+        )
+
+    model_artifact_sha256 = f"sha256:{hashlib.sha256(model_raw).hexdigest()}"
+    ranker_artifact_sha256 = f"sha256:{hashlib.sha256(ranker_raw).hexdigest()}"
+    observation_id_payload = (
+        model_artifact_sha256 + ":" + ranker_artifact_sha256
+    ).encode("ascii")
+    observation_id = f"sha256:{hashlib.sha256(observation_id_payload).hexdigest()}"
+    return {
+        "schema_version": OBSERVATION_SCHEMA_VERSION,
+        "observation_id": observation_id,
+        "market": "htft",
+        "status": "observation_only",
+        "archived_at": record.get("updated_at"),
+        "counts_toward_primary_record": False,
+        "monetary_scope": "none",
+        "model": {
+            "artifact_type": model.get("artifact_type"),
+            "schema_version": model.get("schema_version"),
+            "model_version": model.get("model_version"),
+            "model_hash": model_hash,
+            "prediction_hash": prediction_hash,
+            "artifact_sha256": model_artifact_sha256,
+            "artifact_filename": model_path.name,
+            "matrix_hash": matrix_hash,
+            "generated_at": generated_at.isoformat(),
+            "training_cutoff_date": cutoff_text,
+        },
+        "ranker": {
+            "artifact_sha256": ranker_artifact_sha256,
+            "artifact_filename": ranker_path.name,
+            "selection_basis": ranker.get("selection_basis"),
+            "matrix_mode": ranker.get("matrix_mode"),
+            "marginal_validation": deepcopy(marginal_validation),
+        },
+        "matrix": matrix,
+        "top_two": top_two,
+        "pair_probability_mass": pair_mass,
+        "pair_mass_threshold": ranker.get("pair_mass_threshold"),
+        "pair_mass_threshold_crossed": ranker.get(
+            "pair_mass_threshold_crossed"
+        ),
+        "pair_mass_gate_passed": ranker.get("pair_mass_gate_passed"),
+        "confidence_status": ranker.get("confidence_status"),
+        "league_gate_evidence": deepcopy(ranker.get("league_gate_evidence")),
+        "market_policy": deepcopy(market_policy),
+        "provenance": {
+            "strict_forward_oos": True,
+            "fixture_validated": True,
+            "generated_before_kickoff": True,
+            "training_cutoff_before_kickoff": True,
+        },
+    }
+
+
+def resolve_observation_model_dir(
+    args: argparse.Namespace, supplied: str
+) -> Path:
+    path = Path(supplied).expanduser()
+    if not path.is_absolute():
+        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        path = (base / path).resolve()
+    if not path.is_dir():
+        raise ValueError(f"Corner observation model directory does not exist: {path}")
+    return path
+
+
+def build_corner_candidate_gates(
+    candidate: dict[str, Any], ranking: dict[str, Any]
+) -> list[dict[str, Any]]:
+    raw_failures = candidate.get("failed_thresholds", [])
+    if not isinstance(raw_failures, list):
+        raise ValueError("Corner observation failed_thresholds must be a list")
+    failures = [str(item) for item in raw_failures]
+
+    def matching(*needles: str) -> list[str]:
+        return [
+            failure
+            for failure in failures
+            if any(needle.casefold() in failure.casefold() for needle in needles)
+        ]
+
+    ev = candidate.get("ev")
+    edge = candidate.get("edge_pp")
+    firm_count = candidate.get("firm_count")
+    data_quality = candidate.get("data_quality")
+    signal = candidate.get("market_signal")
+    corroboration = candidate.get("adverse_signal_corroboration")
+    upstream_policy = ranking.get("upstream_policy")
+    deployment_status = (
+        upstream_policy.get("deployment_status")
+        if isinstance(upstream_policy, dict)
+        else None
+    )
+    adverse = signal in {"against", "conflicting"}
+    adverse_passed = not adverse or (
+        isinstance(ev, (int, float))
+        and not isinstance(ev, bool)
+        and float(ev) >= corner_ranker.ADVERSE_MINIMUM_EV
+        and isinstance(edge, (int, float))
+        and not isinstance(edge, bool)
+        and float(edge) >= corner_ranker.ADVERSE_MINIMUM_EDGE_PP
+        and isinstance(firm_count, int)
+        and not isinstance(firm_count, bool)
+        and firm_count >= corner_ranker.ADVERSE_MINIMUM_FIRMS
+        and isinstance(corroboration, dict)
+        and corroboration.get("qualified") is True
+    )
+    gates = {
+        "complete_current_market": observation_gate(
+            "complete_current_market",
+            candidate.get("market_complete") is True
+            and candidate.get("odds") is not None,
+            matching("complete current", "executable odds")
+            or ["complete executable two-way corner market unavailable"],
+        ),
+        "odds_provenance": observation_gate(
+            "odds_provenance",
+            bool(str(candidate.get("market_source") or "").strip())
+            and bool(str(candidate.get("market_collected_at") or "").strip()),
+            ["audited pre-kickoff corner odds provenance unavailable"],
+        ),
+        "positive_ev": observation_gate(
+            "positive_ev",
+            isinstance(ev, (int, float))
+            and not isinstance(ev, bool)
+            and float(ev) > 0.0,
+            matching("EV ", "EV unavailable") or ["positive current EV unavailable"],
+        ),
+        "positive_edge": observation_gate(
+            "positive_edge",
+            isinstance(edge, (int, float))
+            and not isinstance(edge, bool)
+            and float(edge) > 0.0,
+            matching("edge ", "edge unavailable")
+            or ["positive model-versus-market edge unavailable"],
+        ),
+        "bookmaker_depth": observation_gate(
+            "bookmaker_depth",
+            isinstance(firm_count, int)
+            and not isinstance(firm_count, bool)
+            and firm_count >= corner_ranker.MINIMUM_FIRMS,
+            matching("firm count") or ["minimum bookmaker depth not demonstrated"],
+        ),
+        "data_quality": observation_gate(
+            "data_quality",
+            data_quality in {"medium", "high"},
+            matching("data quality") or ["medium/high data quality not demonstrated"],
+        ),
+        "corner_profile_evidence": observation_gate(
+            "corner_profile_evidence",
+            candidate.get("corner_profile_evidence_qualified") is True,
+            matching("corner-profile", "corner rates", "components")
+            or ["independent corner-profile evidence is not qualified"],
+        ),
+        "market_signal_classified": observation_gate(
+            "market_signal_classified",
+            signal in {"aligned", "neutral", "against", "conflicting"},
+            matching("market signal") or ["current market signal is unknown"],
+        ),
+        "adverse_signal_gate": observation_gate(
+            "adverse_signal_gate",
+            adverse_passed,
+            matching("adverse-signal", "adverse market signal")
+            or ["adverse-signal corroboration gate was not cleared"],
+        ),
+        "registered_model_input": observation_gate(
+            "registered_model_input",
+            not matching("registered model input is observation-only"),
+            matching("registered model input is observation-only")
+            or ["registered model input is not production eligible"],
+        ),
+        "deployment_candidate": observation_gate(
+            "deployment_candidate",
+            deployment_status == "candidate",
+            matching("deployment status is shadow")
+            or [f"registered corner deployment status is {deployment_status or 'missing'}"],
+        ),
+        "upstream_formal_policy": observation_gate(
+            "upstream_formal_policy",
+            candidate.get("upstream_formal_eligible") is True,
+            matching("registered prediction formal_corner")
+            or ["registered corner policy remains observation-only"],
+        ),
+    }
+    return [gates[name] for name in CORNER_OBSERVATION_GATE_ORDER]
+
+
+def corner_observation_probabilities(
+    value: Any, *, label: str
+) -> dict[str, float]:
+    states = tuple(corner_ranker.SETTLEMENT_STATES)
+    if not isinstance(value, dict) or set(value) != set(states):
+        raise ValueError(f"{label} must contain exactly the five settlement states")
+    probabilities: dict[str, float] = {}
+    for state in states:
+        probability = value.get(state)
+        if (
+            isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not math.isfinite(float(probability))
+            or not 0.0 <= float(probability) <= 1.0
+        ):
+            raise ValueError(f"{label}.{state} must be finite and within [0,1]")
+        probabilities[state] = float(probability)
+    if abs(math.fsum(probabilities.values()) - 1.0) > 1e-9:
+        raise ValueError(f"{label} must sum to one")
+    return probabilities
+
+
+def calculate_corner_observation_audit_hash(audit: dict[str, Any]) -> str:
+    payload = deepcopy(audit)
+    payload.pop("audit_hash", None)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def load_corner_observation_audit(
+    args: argparse.Namespace,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    model_dir_text = str(
+        getattr(args, "corner_observation_model_dir", "") or ""
+    ).strip()
+    prediction_file = str(
+        getattr(args, "corner_observation_prediction_file", "") or ""
+    ).strip()
+    ranker_file = str(
+        getattr(args, "corner_observation_ranker_file", "") or ""
+    ).strip()
+    supplied_count = sum(bool(value) for value in (model_dir_text, prediction_file, ranker_file))
+    if supplied_count not in {0, 3}:
+        raise ValueError(
+            "Corner observation archival requires all three of "
+            "--corner-observation-model-dir, --corner-observation-prediction-file, "
+            "and --corner-observation-ranker-file"
+        )
+    if supplied_count == 0:
+        return None
+
+    model_dir = resolve_observation_model_dir(args, model_dir_text)
+    prediction_path, prediction_raw, prediction = load_observation_json(
+        args, prediction_file, "Corner observation prediction file"
+    )
+    ranker_path, ranker_raw, ranking = load_observation_json(
+        args, ranker_file, "Corner observation ranker file"
+    )
+    try:
+        corner_ranker.validate_ranking(
+            ranking,
+            prediction,
+            model_dir=model_dir,
+        )
+    except corner_ranker.CornerRankerError as exc:
+        raise ValueError(f"Corner observation ranking is invalid: {exc}") from exc
+
+    prediction_hash = require_sha256(
+        prediction.get("prediction_hash"), "Corner observation prediction_hash"
+    )
+    ranking_hash = require_sha256(
+        ranking.get("ranking_hash"), "Corner observation ranking_hash"
+    )
+    binding = prediction.get("registry_binding")
+    ranking_binding = ranking.get("prediction_binding")
+    if not isinstance(binding, dict) or not isinstance(ranking_binding, dict):
+        raise ValueError("Corner observation registry lineage is missing")
+    if ranking_binding.get("prediction_hash") != prediction_hash:
+        raise ValueError("Corner observation ranking does not bind the prediction hash")
+    for field in (
+        "registry_hash",
+        "league_key",
+        "dataset_hash",
+        "model_hash",
+        "evaluation_hash",
+        "backtest_hash",
+        "lineage_hash",
+        "training_cutoff",
+    ):
+        if ranking_binding.get(field) != binding.get(field):
+            raise ValueError(
+                f"Corner observation ranking {field} does not match the prediction"
+            )
+    league_key = str(binding.get("league_key") or "").strip().casefold()
+    if league_key != str(record.get("league_key") or "").strip().casefold():
+        raise ValueError("Corner observation fixture league_key must match the record")
+    for field in (
+        "registry_hash",
+        "dataset_hash",
+        "model_hash",
+        "evaluation_hash",
+        "backtest_hash",
+        "lineage_hash",
+    ):
+        require_sha256(binding.get(field), f"Corner observation {field}")
+
+    prediction_fixture = prediction.get("fixture")
+    ranking_fixture = ranking.get("fixture")
+    if not isinstance(prediction_fixture, dict) or ranking_fixture != prediction_fixture:
+        raise ValueError("Corner observation prediction and ranking fixtures must match")
+    for field in ("home_team", "away_team"):
+        if str(prediction_fixture.get(field) or "") != str(record.get(field) or ""):
+            raise ValueError(f"Corner observation fixture {field} must match the record")
+    prediction_kickoff = parse_aware_datetime(
+        str(prediction_fixture.get("kickoff") or ""),
+        "Corner observation fixture.kickoff",
+    )
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "record kickoff"
+    )
+    if prediction_kickoff != record_kickoff:
+        raise ValueError("Corner observation fixture kickoff must match the record")
+    prediction_time = parse_aware_datetime(
+        str(prediction.get("generated_at") or ""),
+        "Corner observation prediction.generated_at",
+    )
+    ranking_time = parse_aware_datetime(
+        str(ranking.get("generated_at") or ""),
+        "Corner observation ranking.generated_at",
+    )
+    archived_at = parse_aware_datetime(
+        str(record.get("updated_at") or ""), "record updated_at"
+    )
+    if prediction_time >= record_kickoff or ranking_time >= record_kickoff:
+        raise ValueError("Corner observation artifacts must be generated before kickoff")
+    if prediction_time > ranking_time:
+        raise ValueError("Corner observation ranking cannot predate its prediction")
+    if prediction_time > archived_at or ranking_time > archived_at:
+        raise ValueError("Corner observation artifacts cannot postdate the archive")
+    try:
+        training_cutoff = date.fromisoformat(str(binding.get("training_cutoff") or ""))
+    except ValueError as exc:
+        raise ValueError("Corner observation training_cutoff must be an ISO date") from exc
+    if training_cutoff >= record_kickoff.date():
+        raise ValueError("Corner observation training cutoff must predate kickoff")
+
+    if (
+        ranking.get("formal_count") != 0
+        or ranking.get("primary") is not None
+        or ranking.get("market_policy", {}).get("status") != "observation_only"
+    ):
+        raise ValueError("Corner observation ranking must contain no formal picks")
+    raw_candidates = ranking.get("candidates")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        raise ValueError("Corner observation ranking contains no candidates")
+    lineage = {
+        field: deepcopy(ranking_binding[field])
+        for field in (
+            "prediction_hash",
+            "registry_hash",
+            "league_key",
+            "dataset_hash",
+            "model_hash",
+            "evaluation_hash",
+            "backtest_hash",
+            "lineage_hash",
+            "training_cutoff",
+        )
+    }
+    candidates: list[dict[str, Any]] = []
+    for index, candidate in enumerate(raw_candidates, start=1):
+        if not isinstance(candidate, dict):
+            raise ValueError("Corner observation candidate must be an object")
+        market = candidate.get("market")
+        side = candidate.get("side")
+        if market not in corner_ranker.MARKETS or side not in corner_ranker.MARKET_SIDES[market]:
+            raise ValueError("Corner observation candidate market or side is invalid")
+        line = candidate.get("line")
+        if (
+            isinstance(line, bool)
+            or not isinstance(line, (int, float))
+            or not math.isfinite(float(line))
+        ):
+            raise ValueError("Corner observation candidate line is invalid")
+        if (
+            candidate.get("status") != "observation"
+            or candidate.get("formal_eligible") is not False
+            or candidate.get("role") != "observation"
+        ):
+            raise ValueError("Corner observation candidates must remain observation-only")
+        probabilities = corner_observation_probabilities(
+            candidate.get("settlement_probabilities"),
+            label=f"Corner observation candidate {index} probabilities",
+        )
+        for field in ("ev", "edge_pp"):
+            value = candidate.get(field)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"Corner observation candidate {field} is invalid")
+        candidate_id_payload = (
+            f"{ranking_hash}:{index}:{market}:{side}:{float(line):.12g}"
+        ).encode("utf-8")
+        candidates.append(
+            {
+                "candidate_id": "sha256:"
+                + hashlib.sha256(candidate_id_payload).hexdigest(),
+                "rank": int(candidate.get("rank", index)),
+                "market": market,
+                "side": side,
+                "line": float(line),
+                "snapshot_line": candidate.get("snapshot_line"),
+                "settlement_probabilities": probabilities,
+                "probability": candidate.get("probability"),
+                "odds": candidate.get("odds"),
+                "odds_format": candidate.get("odds_format"),
+                "decimal_odds": candidate.get("decimal_odds"),
+                "market_probability": candidate.get("market_probability"),
+                "ev": candidate.get("ev"),
+                "edge_pp": candidate.get("edge_pp"),
+                "settlement_return_variance": candidate.get(
+                    "settlement_return_variance"
+                ),
+                "firm_count": candidate.get("firm_count"),
+                "market_complete": candidate.get("market_complete"),
+                "market_source": candidate.get("market_source"),
+                "market_collected_at": candidate.get("market_collected_at"),
+                "price_basis": candidate.get("price_basis"),
+                "market_signal": candidate.get("market_signal"),
+                "data_quality": candidate.get("data_quality"),
+                "gates": build_corner_candidate_gates(candidate, ranking),
+                "diagnostic_qualification_status": candidate.get(
+                    "diagnostic_qualification_status"
+                ),
+                "diagnostic_failed_thresholds": deepcopy(
+                    candidate.get("diagnostic_failed_thresholds", [])
+                ),
+                "policy_failed_thresholds": deepcopy(
+                    candidate.get("policy_failed_thresholds", [])
+                ),
+                "failed_thresholds": deepcopy(candidate.get("failed_thresholds", [])),
+                "upstream_formal_flag": candidate.get("upstream_formal_flag"),
+                "upstream_formal_eligible": False,
+                "formal_eligible": False,
+                "status": "observation",
+                "lineage": deepcopy(lineage),
+            }
+        )
+
+    best_raw = ranking.get("best_observation")
+    if not isinstance(best_raw, dict):
+        raise ValueError("Corner observation ranking requires best_observation")
+    best_rank = best_raw.get("rank")
+    best_matches = [item for item in candidates if item.get("rank") == best_rank]
+    if len(best_matches) != 1:
+        raise ValueError("Corner observation best_observation is not a ranked candidate")
+    best_observation = deepcopy(best_matches[0])
+    prediction_artifact_sha256 = f"sha256:{hashlib.sha256(prediction_raw).hexdigest()}"
+    ranker_artifact_sha256 = f"sha256:{hashlib.sha256(ranker_raw).hexdigest()}"
+    observation_id = "sha256:" + hashlib.sha256(
+        (prediction_artifact_sha256 + ":" + ranker_artifact_sha256).encode("ascii")
+    ).hexdigest()
+    audit = {
+        "schema_version": OBSERVATION_SCHEMA_VERSION,
+        "kind": CORNER_OBSERVATION_KIND,
+        "observation_id": observation_id,
+        "market": "corner_markets",
+        "status": "observation_only",
+        "archived_at": record.get("updated_at"),
+        "counts_toward_primary_record": False,
+        "monetary_scope": "none",
+        "fixture": {
+            "league_key": league_key,
+            "home_team": prediction_fixture["home_team"],
+            "away_team": prediction_fixture["away_team"],
+            "kickoff": prediction_kickoff.isoformat(),
+        },
+        "model": {
+            "artifact_type": prediction.get("artifact_type"),
+            "schema_version": prediction.get("schema_version"),
+            "model_version": prediction.get("model_version"),
+            "model_hash": require_sha256(
+                prediction.get("model_hash"), "Corner observation model_hash"
+            ),
+            "prediction_hash": prediction_hash,
+            "artifact_sha256": prediction_artifact_sha256,
+            "artifact_filename": prediction_path.name,
+            "generated_at": prediction_time.isoformat(),
+            "training_cutoff_date": training_cutoff.isoformat(),
+        },
+        "ranker": {
+            "artifact_type": ranking.get("artifact_type"),
+            "schema_version": ranking.get("schema_version"),
+            "ranker_version": ranking.get("ranker_version"),
+            "ranking_hash": ranking_hash,
+            "artifact_sha256": ranker_artifact_sha256,
+            "artifact_filename": ranker_path.name,
+            "generated_at": ranking_time.isoformat(),
+            "selection_policy": deepcopy(ranking.get("selection_policy")),
+        },
+        "lineage": lineage,
+        "best_observation": best_observation,
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "market_policy": deepcopy(ranking.get("market_policy")),
+        "upstream_policy": deepcopy(ranking.get("upstream_policy")),
+        "provenance": {
+            "strict_forward_oos": True,
+            "fixture_validated": True,
+            "generated_before_kickoff": True,
+            "training_cutoff_before_kickoff": True,
+            "registry_and_model_reopened": True,
+            "ranking_reproduced": True,
+        },
+    }
+    audit["audit_hash"] = calculate_corner_observation_audit_hash(audit)
+    return audit
 
 
 def validate_score_model_consistency(
@@ -2520,6 +3539,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "btts_pick": record.get("btts_pick"),
         "corner_total_pick": record.get("corner_total_pick"),
         "corner_handicap_pick": record.get("corner_handicap_pick"),
+        "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
@@ -2564,6 +3584,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
             "corner_total": deepcopy(record.get("corner_total_pick")),
             "corner_handicap": deepcopy(record.get("corner_handicap_pick")),
         },
+        "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
         "display_predicted_score": record.get("display_predicted_score"),
@@ -2691,9 +3712,16 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "btts_pick": None,
         "corner_total_pick": None,
         "corner_handicap_pick": None,
+        "candidate_audits": [],
         "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
     }
+    htft_observation = load_htft_observation_audit(args, record)
+    if htft_observation is not None:
+        record["candidate_audits"].append(htft_observation)
+    corner_observation = load_corner_observation_audit(args, record)
+    if corner_observation is not None:
+        record["candidate_audits"].append(corner_observation)
     validate_probability_triplet(record["probabilities"])
     if args.asian_side:
         record["asian_pick"] = {
@@ -3191,6 +4219,169 @@ def cmd_due_lineup_check(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def settle_candidate_observations(
+    candidate_audits: list[dict[str, Any]],
+    *,
+    half_home: int | None,
+    half_away: int | None,
+    home: int,
+    away: int,
+    home_corners: int | None = None,
+    away_corners: int | None = None,
+) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    for audit in candidate_audits:
+        if not isinstance(audit, dict):
+            continue
+        if audit.get("kind") == CORNER_OBSERVATION_KIND:
+            candidates = [
+                item
+                for item in audit.get("candidates", [])
+                if isinstance(item, dict)
+            ]
+            best = audit.get("best_observation")
+            best_candidate_id = (
+                best.get("candidate_id") if isinstance(best, dict) else None
+            )
+            corner_base = {
+                "observation_id": audit.get("observation_id"),
+                "kind": CORNER_OBSERVATION_KIND,
+                "market": "corner_markets",
+                "counts_toward_primary_record": False,
+                "monetary_scope": "none",
+            }
+            if home_corners is None or away_corners is None:
+                diagnostics.append(
+                    {
+                        **corner_base,
+                        "status": "ungraded_missing_corner_score",
+                        "reason": "verified_90_minute_corner_counts_unavailable",
+                        "home_corners": None,
+                        "away_corners": None,
+                        "best_observation_result": None,
+                        "candidate_results": [
+                            {
+                                "candidate_id": item.get("candidate_id"),
+                                "market": item.get("market"),
+                                "side": item.get("side"),
+                                "line": item.get("line"),
+                                "settlement_result": None,
+                                "is_best_observation": (
+                                    item.get("candidate_id") == best_candidate_id
+                                ),
+                            }
+                            for item in candidates
+                        ],
+                    }
+                )
+                continue
+
+            candidate_results: list[dict[str, Any]] = []
+            best_result = None
+            for candidate in candidates:
+                market = candidate.get("market")
+                if market == "corner_total":
+                    raw_result = settle_corner_total(
+                        candidate, home_corners, away_corners
+                    )
+                elif market == "corner_handicap":
+                    raw_result = settle_corner_handicap(
+                        candidate, home_corners, away_corners
+                    )
+                else:
+                    continue
+                settlement_result = (
+                    "full_win" if raw_result == "win" else raw_result
+                )
+                is_best = candidate.get("candidate_id") == best_candidate_id
+                if is_best:
+                    best_result = settlement_result
+                candidate_results.append(
+                    {
+                        "candidate_id": candidate.get("candidate_id"),
+                        "market": market,
+                        "side": candidate.get("side"),
+                        "line": candidate.get("line"),
+                        "settlement_result": settlement_result,
+                        "is_best_observation": is_best,
+                    }
+                )
+            diagnostics.append(
+                {
+                    **corner_base,
+                    "status": "graded_observation",
+                    "reason": None,
+                    "home_corners": home_corners,
+                    "away_corners": away_corners,
+                    "best_observation_result": best_result,
+                    "candidate_results": candidate_results,
+                }
+            )
+            continue
+        if audit.get("market") != "htft":
+            continue
+        base = {
+            "observation_id": audit.get("observation_id"),
+            "market": "htft",
+            "counts_toward_primary_record": False,
+            "monetary_scope": "none",
+        }
+        if half_home is None or half_away is None:
+            diagnostics.append(
+                {
+                    **base,
+                    "status": "ungraded_missing_half_time_score",
+                    "actual_selection": None,
+                    "top1_hit": None,
+                    "top2_hit": None,
+                    "nine_class_brier": None,
+                    "nine_class_log_loss": None,
+                }
+            )
+            continue
+        matrix = validate_htft_matrix(audit.get("matrix"), "archived HT/FT matrix")
+        actual = result_code(half_home, half_away) + result_code(home, away)
+        top_two = [
+            item
+            for item in audit.get("top_two", [])
+            if isinstance(item, dict)
+        ]
+        selections = [str(item.get("selection") or "").upper() for item in top_two]
+        actual_probability = matrix[actual]
+        diagnostics.append(
+            {
+                **base,
+                "status": "graded_observation",
+                "actual_selection": actual,
+                "actual_probability": actual_probability,
+                "top1_selection": selections[0] if selections else None,
+                "top2_selections": selections[:2],
+                "top1_hit": bool(selections and selections[0] == actual),
+                "top2_hit": actual in selections[:2],
+                "nine_class_brier": math.fsum(
+                    (
+                        matrix[outcome] - (1.0 if outcome == actual else 0.0)
+                    )
+                    ** 2
+                    for outcome in HTFT_OUTCOMES
+                ),
+                "nine_class_log_loss": -math.log(
+                    max(actual_probability, HTFT_LOG_LOSS_FLOOR)
+                ),
+                "candidate_results": [
+                    {
+                        "slot": item.get("slot"),
+                        "selection": str(item.get("selection") or "").upper(),
+                        "observed_hit": str(item.get("selection") or "").upper()
+                        == actual,
+                    }
+                    for item in top_two[:2]
+                ],
+            }
+        )
+    return diagnostics
+
+
 @locked_history_transaction
 def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     if not args.verified_finished:
@@ -3341,8 +4532,25 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             primary_result = settle_corner_handicap(
                 primary_pick, home_corners, away_corners
             )
+    candidate_audits = [
+        audit
+        for audit in settlement_basis.get("candidate_audits", [])
+        if isinstance(audit, dict)
+    ]
+    observation_diagnostics = settle_candidate_observations(
+        candidate_audits,
+        half_home=half_home,
+        half_away=half_away,
+        home=home,
+        away=away,
+        home_corners=home_corners,
+        away_corners=away_corners,
+    )
     settlement_basis["primary_result"] = primary_result
     settlement_basis["counts_toward_primary_record"] = counts_toward_primary_record
+    settlement_basis["observation_diagnostics"] = deepcopy(
+        observation_diagnostics
+    )
     record.update({
         "status": "reviewed",
         "reviewed_at": now_iso(),
@@ -3377,6 +4585,7 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         "home_corners": home_corners,
         "away_corners": away_corners,
         "primary_result": primary_result,
+        "observation_diagnostics": observation_diagnostics,
         "key_learning": args.key_learning,
         "learning_scope": learning_scope,
         "counts_toward_primary_record": counts_toward_primary_record,
@@ -3956,6 +5165,457 @@ def one_x_two_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def frozen_candidate_audits(record: dict[str, Any]) -> list[dict[str, Any]]:
+    basis = record.get("settlement_basis")
+    raw = (
+        basis.get("candidate_audits", [])
+        if isinstance(basis, dict) and "candidate_audits" in basis
+        else record.get("candidate_audits", [])
+    )
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def frozen_observation_diagnostics(
+    record: dict[str, Any],
+) -> list[dict[str, Any]]:
+    basis = record.get("settlement_basis")
+    raw = (
+        basis.get("observation_diagnostics", [])
+        if isinstance(basis, dict) and "observation_diagnostics" in basis
+        else record.get("observation_diagnostics", [])
+    )
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def validated_observation_audit(audit: dict[str, Any]) -> bool:
+    if (
+        audit.get("schema_version") != OBSERVATION_SCHEMA_VERSION
+        or audit.get("status") != "observation_only"
+        or audit.get("counts_toward_primary_record") is not False
+        or audit.get("monetary_scope") != "none"
+    ):
+        return False
+    provenance = audit.get("provenance")
+    model = audit.get("model")
+    if not isinstance(provenance, dict) or not isinstance(model, dict):
+        return False
+    if not all(
+        provenance.get(key) is True
+        for key in (
+            "strict_forward_oos",
+            "fixture_validated",
+            "generated_before_kickoff",
+            "training_cutoff_before_kickoff",
+        )
+    ):
+        return False
+
+    if audit.get("kind") == CORNER_OBSERVATION_KIND:
+        ranker = audit.get("ranker")
+        fixture = audit.get("fixture")
+        lineage = audit.get("lineage")
+        candidates = audit.get("candidates")
+        best = audit.get("best_observation")
+        if (
+            audit.get("market") != "corner_markets"
+            or not isinstance(ranker, dict)
+            or not isinstance(fixture, dict)
+            or not isinstance(lineage, dict)
+            or not isinstance(candidates, list)
+            or not candidates
+            or audit.get("candidate_count") != len(candidates)
+            or not isinstance(best, dict)
+            or not isinstance(audit.get("market_policy"), dict)
+            or audit["market_policy"].get("status") != "observation_only"
+            or provenance.get("registry_and_model_reopened") is not True
+            or provenance.get("ranking_reproduced") is not True
+        ):
+            return False
+        hashes = (
+            (model, "model_hash"),
+            (model, "prediction_hash"),
+            (model, "artifact_sha256"),
+            (ranker, "ranking_hash"),
+            (ranker, "artifact_sha256"),
+            (audit, "observation_id"),
+            (audit, "audit_hash"),
+        )
+        if any(
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get(key) or ""))
+            for value, key in hashes
+        ):
+            return False
+        try:
+            calculated_audit_hash = calculate_corner_observation_audit_hash(audit)
+        except (TypeError, ValueError):
+            return False
+        if audit.get("audit_hash") != calculated_audit_hash:
+            return False
+        expected_observation_id = "sha256:" + hashlib.sha256(
+            (
+                str(model["artifact_sha256"])
+                + ":"
+                + str(ranker["artifact_sha256"])
+            ).encode("ascii")
+        ).hexdigest()
+        if audit.get("observation_id") != expected_observation_id:
+            return False
+        lineage_fields = {
+            "prediction_hash",
+            "registry_hash",
+            "league_key",
+            "dataset_hash",
+            "model_hash",
+            "evaluation_hash",
+            "backtest_hash",
+            "lineage_hash",
+            "training_cutoff",
+        }
+        if set(lineage) != lineage_fields:
+            return False
+        for key in (
+            "prediction_hash",
+            "registry_hash",
+            "dataset_hash",
+            "model_hash",
+            "evaluation_hash",
+            "backtest_hash",
+            "lineage_hash",
+        ):
+            if not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(lineage.get(key) or "")
+            ):
+                return False
+        if (
+            model.get("prediction_hash") != lineage.get("prediction_hash")
+            or model.get("model_hash") != lineage.get("model_hash")
+            or fixture.get("league_key") != lineage.get("league_key")
+            or model.get("training_cutoff_date") != lineage.get("training_cutoff")
+        ):
+            return False
+        try:
+            kickoff = parse_aware_datetime(
+                str(fixture.get("kickoff") or ""),
+                "archived corner observation kickoff",
+            )
+            prediction_time = parse_aware_datetime(
+                str(model.get("generated_at") or ""),
+                "archived corner observation prediction time",
+            )
+            ranking_time = parse_aware_datetime(
+                str(ranker.get("generated_at") or ""),
+                "archived corner observation ranking time",
+            )
+            cutoff = date.fromisoformat(str(lineage.get("training_cutoff") or ""))
+        except ValueError:
+            return False
+        if (
+            not str(fixture.get("home_team") or "").strip()
+            or not str(fixture.get("away_team") or "").strip()
+            or prediction_time >= kickoff
+            or ranking_time >= kickoff
+            or prediction_time > ranking_time
+            or cutoff >= kickoff.date()
+        ):
+            return False
+
+        candidate_ids: set[str] = set()
+        ranks: list[int] = []
+        ranking_hash = str(ranker["ranking_hash"])
+        for index, candidate in enumerate(candidates, start=1):
+            if not isinstance(candidate, dict):
+                return False
+            market = candidate.get("market")
+            side = candidate.get("side")
+            line = candidate.get("line")
+            if (
+                market not in corner_ranker.MARKETS
+                or side not in corner_ranker.MARKET_SIDES[market]
+                or isinstance(line, bool)
+                or not isinstance(line, (int, float))
+                or not math.isfinite(float(line))
+                or isinstance(candidate.get("rank"), bool)
+                or not isinstance(candidate.get("rank"), int)
+                or candidate.get("status") != "observation"
+                or candidate.get("formal_eligible") is not False
+                or candidate.get("upstream_formal_eligible") is not False
+                or candidate.get("lineage") != lineage
+            ):
+                return False
+            try:
+                rank = int(candidate.get("rank"))
+                corner_observation_probabilities(
+                    candidate.get("settlement_probabilities"),
+                    label="archived corner observation probabilities",
+                )
+            except (TypeError, ValueError):
+                return False
+            ranks.append(rank)
+            candidate_id = str(candidate.get("candidate_id") or "")
+            expected_candidate_id = "sha256:" + hashlib.sha256(
+                (
+                    f"{ranking_hash}:{index}:{market}:{side}:"
+                    f"{float(line):.12g}"
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                candidate_id != expected_candidate_id
+                or candidate_id in candidate_ids
+            ):
+                return False
+            candidate_ids.add(candidate_id)
+            gates = candidate.get("gates")
+            if (
+                not isinstance(gates, list)
+                or [gate.get("gate") for gate in gates if isinstance(gate, dict)]
+                != list(CORNER_OBSERVATION_GATE_ORDER)
+                or any(
+                    not isinstance(gate, dict)
+                    or not isinstance(gate.get("passed"), bool)
+                    or not isinstance(gate.get("reasons"), list)
+                    for gate in gates
+                )
+            ):
+                return False
+        if ranks != list(range(1, len(candidates) + 1)):
+            return False
+        matching_best = [
+            candidate
+            for candidate in candidates
+            if candidate.get("candidate_id") == best.get("candidate_id")
+        ]
+        return len(matching_best) == 1 and best == matching_best[0]
+
+    if audit.get("market") != "htft":
+        return False
+    for key in ("model_hash", "prediction_hash", "artifact_sha256", "matrix_hash"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(model.get(key) or "")):
+            return False
+    try:
+        matrix = validate_htft_matrix(audit.get("matrix"), "archived observation matrix")
+    except ValueError:
+        return False
+    matrix_bytes = json.dumps(
+        matrix,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    if model.get("matrix_hash") != f"sha256:{hashlib.sha256(matrix_bytes).hexdigest()}":
+        return False
+    top_two = audit.get("top_two")
+    if (
+        not isinstance(top_two, list)
+        or len(top_two) != 2
+        or not all(isinstance(item, dict) for item in top_two)
+    ):
+        return False
+    expected = sorted(
+        HTFT_OUTCOMES,
+        key=lambda outcome: (-matrix[outcome], HTFT_OUTCOMES.index(outcome)),
+    )[:2]
+    if [str(item.get("selection") or "").upper() for item in top_two] != expected:
+        return False
+    return True
+
+
+def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
+    reviewed = [
+        record
+        for record in records
+        if record.get("mode") == "prematch" and record.get("status") == "reviewed"
+    ]
+    markets: dict[str, dict[str, Any]] = {}
+    reviewed_match_ids: set[str] = set()
+
+    def market_block(market: str) -> dict[str, Any]:
+        return markets.setdefault(
+            market,
+            {
+                "market": market,
+                "observation_records": 0,
+                "candidate_count": 0,
+                "excluded_observations": 0,
+                "excluded_reasons": {},
+                "gate_funnel": {},
+                "_top1_hits": [],
+                "_top2_hits": [],
+                "_brier": [],
+                "_log_loss": [],
+                "_ungraded": 0,
+                "_corner_graded_observations": 0,
+                "_corner_ungraded_observations": 0,
+                "_corner_graded_candidates": 0,
+                "_corner_ungraded_candidates": 0,
+                "_corner_results": {
+                    state: 0 for state in corner_ranker.SETTLEMENT_STATES
+                },
+            },
+        )
+
+    def add_candidate_gates(
+        block: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> None:
+        for candidate in candidates:
+            for gate in candidate.get("gates", []):
+                if not isinstance(gate, dict) or not str(gate.get("gate") or ""):
+                    continue
+                name = str(gate["gate"])
+                gate_block = block["gate_funnel"].setdefault(
+                    name,
+                    {
+                        "evaluated": 0,
+                        "passed": 0,
+                        "failed": 0,
+                        "failure_reasons": {},
+                    },
+                )
+                gate_block["evaluated"] += 1
+                if gate.get("passed") is True:
+                    gate_block["passed"] += 1
+                else:
+                    gate_block["failed"] += 1
+                    for reason in gate.get("reasons", []):
+                        normalized = str(reason).strip()
+                        if normalized:
+                            failure_reasons = gate_block["failure_reasons"]
+                            failure_reasons[normalized] = (
+                                failure_reasons.get(normalized, 0) + 1
+                            )
+
+    for record in reviewed:
+        diagnostics_by_id = {
+            str(item.get("observation_id")): item
+            for item in frozen_observation_diagnostics(record)
+            if item.get("observation_id")
+        }
+        for audit in frozen_candidate_audits(record):
+            if not validated_observation_audit(audit):
+                block = market_block(str(audit.get("market") or "unknown"))
+                block["excluded_observations"] += 1
+                reasons = block["excluded_reasons"]
+                reasons["invalid_observation_provenance"] = (
+                    reasons.get("invalid_observation_provenance", 0) + 1
+                )
+                continue
+            reviewed_match_ids.add(str(record.get("match_id")))
+
+            diagnostic = diagnostics_by_id.get(str(audit.get("observation_id")))
+            if audit.get("kind") == CORNER_OBSERVATION_KIND:
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for candidate in audit.get("candidates", []):
+                    if isinstance(candidate, dict):
+                        grouped.setdefault(str(candidate.get("market")), []).append(
+                            candidate
+                        )
+                for market, candidates in grouped.items():
+                    block = market_block(market)
+                    block["observation_records"] += 1
+                    block["candidate_count"] += len(candidates)
+                    add_candidate_gates(block, candidates)
+                    if (
+                        not isinstance(diagnostic, dict)
+                        or diagnostic.get("status") != "graded_observation"
+                    ):
+                        block["_corner_ungraded_observations"] += 1
+                        block["_corner_ungraded_candidates"] += len(candidates)
+                        continue
+                    results_by_id = {
+                        str(item.get("candidate_id")): item.get(
+                            "settlement_result"
+                        )
+                        for item in diagnostic.get("candidate_results", [])
+                        if isinstance(item, dict) and item.get("candidate_id")
+                    }
+                    block["_corner_graded_observations"] += 1
+                    for candidate in candidates:
+                        result = results_by_id.get(str(candidate.get("candidate_id")))
+                        if result in corner_ranker.SETTLEMENT_STATES:
+                            block["_corner_results"][result] += 1
+                            block["_corner_graded_candidates"] += 1
+                        else:
+                            block["_corner_ungraded_candidates"] += 1
+                continue
+
+            market = str(audit.get("market") or "unknown")
+            block = market_block(market)
+            block["observation_records"] += 1
+            candidates = [
+                item
+                for item in audit.get("top_two", [])
+                if isinstance(item, dict)
+            ]
+            block["candidate_count"] += len(candidates)
+            add_candidate_gates(block, candidates)
+            if not isinstance(diagnostic, dict) or diagnostic.get("status") != "graded_observation":
+                block["_ungraded"] += 1
+                continue
+            block["_top1_hits"].append(bool(diagnostic.get("top1_hit")))
+            block["_top2_hits"].append(bool(diagnostic.get("top2_hit")))
+            block["_brier"].append(float(diagnostic["nine_class_brier"]))
+            block["_log_loss"].append(float(diagnostic["nine_class_log_loss"]))
+
+    output_markets: dict[str, Any] = {}
+    for market, block in sorted(markets.items()):
+        top1 = block.pop("_top1_hits")
+        top2 = block.pop("_top2_hits")
+        brier = block.pop("_brier")
+        log_loss = block.pop("_log_loss")
+        ungraded = block.pop("_ungraded")
+        corner_graded_observations = block.pop("_corner_graded_observations")
+        corner_ungraded_observations = block.pop("_corner_ungraded_observations")
+        corner_graded_candidates = block.pop("_corner_graded_candidates")
+        corner_ungraded_candidates = block.pop("_corner_ungraded_candidates")
+        corner_results = block.pop("_corner_results")
+        graded = len(top1)
+        block["gate_funnel"] = {
+            name: {
+                **values,
+                "failure_reasons": dict(
+                    sorted(values["failure_reasons"].items())
+                ),
+            }
+            for name, values in sorted(block["gate_funnel"].items())
+        }
+        if market in CORNER_MARKETS:
+            block["diagnostics"] = {
+                "graded_observations": corner_graded_observations,
+                "ungraded_observations": corner_ungraded_observations,
+                "graded_candidates": corner_graded_candidates,
+                "ungraded_candidates": corner_ungraded_candidates,
+                "settlement_results": corner_results,
+                "positive_settlements": (
+                    corner_results["full_win"] + corner_results["half_win"]
+                ),
+                "negative_settlements": (
+                    corner_results["half_loss"] + corner_results["loss"]
+                ),
+                "counts_toward_primary_record": False,
+                "monetary_scope": "none",
+            }
+        else:
+            block["diagnostics"] = {
+                "graded_observations": graded,
+                "ungraded_observations": ungraded,
+                "top1_hits": sum(top1),
+                "top1_rate": round(sum(top1) / graded, 4) if graded else None,
+                "top2_hits": sum(top2),
+                "top2_rate": round(sum(top2) / graded, 4) if graded else None,
+                "nine_class_brier": math.fsum(brier) / graded if graded else None,
+                "nine_class_log_loss": (
+                    math.fsum(log_loss) / graded if graded else None
+                ),
+                "counts_toward_primary_record": False,
+                "monetary_scope": "none",
+            }
+        output_markets[market] = block
+    return {
+        "evaluation_scope": "strict_live_forward_reviewed_observations",
+        "reviewed_matches_with_observations": len(reviewed_match_ids),
+        "markets": output_markets,
+    }
+
+
 def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[str, Any]:
     strict_records = strict_forward_reviewed_records(records)
     primary_by_market = primary_market_performance(strict_records)
@@ -3992,6 +5652,7 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         "learning_samples": learning_samples,
         "selection_policy": selection_policy_block(records),
         "one_x_two_metrics": one_x_two_metrics(records),
+        "observation_gate_funnel": observation_gate_funnel(records),
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -4058,6 +5719,7 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "learning_samples": learning_samples,
         "selection_policy": selection_policy_block(reviewed),
         "one_x_two_metrics": one_x_two_metrics(reviewed),
+        "observation_gate_funnel": observation_gate_funnel(reviewed),
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -4194,6 +5856,9 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "all_formal": league_stats["all_formal"],
             "secondary_tracking": "disabled",
             "one_x_two_metrics": league_stats["one_x_two_metrics"],
+            "observation_gate_funnel": league_stats[
+                "observation_gate_funnel"
+            ],
             "exact_scores": league_stats["exact_scores"],
             "recent_learnings": league_stats["recent_learnings"],
         }
@@ -4239,6 +5904,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "learning_samples": stats["learning_samples"],
         "selection_policy": stats["selection_policy"],
         "one_x_two_metrics": stats["one_x_two_metrics"],
+        "observation_gate_funnel": stats["observation_gate_funnel"],
         "minimum_graded_per_market_for_manual_review": minimum,
         "sample_review_trigger_met_by_market": eligibility,
         "weight_change_eligible": {market: False for market in eligibility},
@@ -4337,6 +6003,41 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--score-model-file",
         help="UTF-8 JSON score-model snapshot; its exact bytes are SHA-256 archived",
+    )
+    record.add_argument(
+        "--htft-observation-model-file",
+        help=(
+            "Registered soccer_htft_prediction JSON used only for a structured "
+            "observation audit; requires --htft-observation-ranker-file"
+        ),
+    )
+    record.add_argument(
+        "--htft-observation-ranker-file",
+        help=(
+            "JSON output from htft_ranker.py for the same pre-kickoff model; "
+            "archived as observation-only and never as a formal pick"
+        ),
+    )
+    record.add_argument(
+        "--corner-observation-model-dir",
+        help=(
+            "Directory containing the registered corner model lineage; requires "
+            "both corner observation JSON files"
+        ),
+    )
+    record.add_argument(
+        "--corner-observation-prediction-file",
+        help=(
+            "Registered pre-kickoff corner prediction JSON, archived only as "
+            "diagnostic observation evidence"
+        ),
+    )
+    record.add_argument(
+        "--corner-observation-ranker-file",
+        help=(
+            "Validated corner_ranker JSON for the same prediction; never creates "
+            "a formal pick or stake"
+        ),
     )
     record.add_argument("--data-quality", choices=("high", "medium", "low", "unknown"), default="unknown")
     record.add_argument("--lineup-confirmed", action="store_true")

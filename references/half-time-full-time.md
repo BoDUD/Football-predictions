@@ -41,7 +41,7 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
 5. A complete, de-vigged, source-labelled, timestamped current first-half 1X2 market may
    replace the half-time marginal before IPF. Never use an incomplete market, an untimestamped
    workbook snapshot, or a post-kickoff price as a live anchor. The low-level model can run a
-   full-time anchor experiment, but the registered production manager rejects it until the
+   full-time anchor experiment, but the registered manager rejects it until the
    same anchor can be written back into the canonical full-score matrix; do not publish two
    conflicting full-time probability views.
 6. Require the HT/FT full-time marginal to match the canonical full-score artifact. The HT/FT
@@ -65,32 +65,25 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
   market probabilities internally from that complete set; a caller-supplied probability
   vector plus only some outcome prices remains incomplete and cannot qualify either scenario.
 - Use `scripts/htft_ranker.py` and `probability_top2_v3_post_selection`. Select the two largest
-  joint-probability cells with canonical outcome order as the deterministic tie-break. This
-  replaced `scenario_stability_v2`, which reduced two-scenario hit rate from 48.48% to 45.70%
-  on the fixed 2025 component cohort. Its older partial-2026 comparison mixed the Japan
-  special regime and is not a formal metric. The 2025 cohort was inspected during selector
-  development, so this comparison is post-selection development evidence, not an untouched
-  end-to-end confirmation.
+  joint-probability cells with canonical outcome order as the deterministic tie-break.
+  `scenario_stability_v2` is not an accepted selector. Earlier selector comparisons were
+  inspected during development, so do not carry their percentages into the expanded bundle
+  or describe them as untouched end-to-end confirmation.
 - Conditional follow-through, state continuity, full-time coherence, and exact-score result
   agreement remain visible audits but cannot replace a probability Top-2 cell. EV and price
   also cannot choose either slot.
-- For a model-only matrix, treat combined Top-2 probability 0.46 only as a descriptive
-  development threshold. Pass `league_key` so the ranker exposes the applicable evidence:
-
-  | League | 2025 eligible | Covered | Hits | Hit rate | Wilson 95% lower bound |
-  | --- | ---: | ---: | ---: | ---: | ---: |
-  | Brazil Serie A | 380 | 125 | 72 | 57.60% | 48.84% |
-  | Japan J1 | 380 | 66 | 32 | 48.48% | 36.85% |
-  | Norway Eliteserien | 240 | 110 | 63 | 57.27% | 47.94% |
-  | MLS | 510 | 208 | 114 | 54.81% | 48.02% |
-
-  No league's lower bound exceeds 50%, so the ranker must not label the pair as confirmed
-  confidence. Missing or unsupported `league_key` has no transferable evidence. A verified
-  current half-time-market anchor likewise has no promoted pair-mass threshold; mark it
-  `anchor_gate_unvalidated`. The 0.50 gate and 61.56% accuracy at 21.19% coverage apply only
-  to the evaluator's untimestamped full-time-opening research proxy. Never transfer that gate
-  or hit rate to a live half-time anchor. These are two-scenario coverage rates, not single-bet
-  win rates or ROI.
+- For a model-only matrix, load `league_pair_gate_evidence` from the current model registry
+  and pass the normalized `league_key` plus the current model hash. The ranker must verify the
+  evidence's dataset-manifest hash, evaluation hash, model hash, league key, threshold,
+  eligible/covered/hit counts, deployment status, regime warning, and formal/production
+  flags. Never use a hard-coded league table or transfer another league's result. Even a
+  favorable historical slice is post-selection component evidence without live-forward
+  confirmation or executable nine-way HT/FT price history, so
+  `production_confidence_eligible=false` and `formal_htft_eligible=false` remain mandatory.
+  A verified current half-time-market anchor likewise has no promoted pair-mass threshold;
+  mark it `anchor_gate_unvalidated`. Metrics from an untimestamped full-time-opening research
+  proxy must never be transferred to a live half-time anchor. Historical two-scenario
+  classification rates are not single-bet win rates or ROI.
 - Positive EV and edge are diagnostic qualification gates only after the two probability scenarios are selected. While the market is paused they do not make a scenario formal; under a future enabled policy every model, market, evidence, and calibration check must also pass. Treat a high-EV outcome outside the selected pair as a market anomaly to recheck, not as an automatic recommendation.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a probability match shape, not an actionable positive-EV bet.
 - If current HT/FT odds are missing, keep the same two probability-selected scenarios as `赔率缺失，不可执行`; do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
@@ -109,16 +102,24 @@ Concise mode includes the best first-half direction plus both probability-select
 
 ## Supported-competition boundary
 
-The audited 9,211-match history supports only Brazil Serie A, Japan J1, Norway
-Eliteserien, and MLS. It supplies no Korean K League training or validation cohort, so never
-quote these four leagues' Top-2 or gate rates for a Korean match. Use the generic analysis
-path and keep Korean HT/FT output as observation until league-specific live-forward evidence
-exists.
+The expanded history targets separate component models for fourteen competitions: Brazil
+Serie A, Japan J1, Norway Eliteserien, MLS, the five major European leagues, Korean K League
+1, Allsvenskan, Finland Veikkausliiga, UEFA Champions League, and AFC Champions League. Read
+the exact match counts from the current validated manifest and deployment status from the
+current hash-bound registry. Do not hard-code a `candidate`/`shadow` list. These are
+historical classification cohorts, not transferable proof of executable HT/FT value, and
+every registered model remains `formal_htft_eligible=false`.
 
-Japan J1's 180 supplied 2026 fixtures belong to a regional special format and are labelled
-`competition_regime=2026_vision_regional`. The production manager trains only on
-`competition_regime=regular`; it excludes those 180 rows from registered fitting and formal
-evaluation metrics, retaining only their exclusion count to surface competition-regime drift.
+The importer retains all collected Titan formats and phases for audit and evaluation slices.
+The registered manager nevertheless trains only on `competition_regime=regular`; special
+formats are excluded from registered fitting and fixed-season metrics, with their counts and
+regime warning retained to surface drift. This is not a separate production model per phase.
+
+Rows marked `season_status=partial_as_of_*`, including unfinished 2026 seasons, are
+right-censored snapshots. They may be shown
+in research/shadow slices but must not make any promotion result pass. Format and phase
+cohorts must remain visible for Korean split rounds, UEFA/AFC qualifying and main phases,
+and other material competition changes.
 
 ## Calibration note from the supplied betting log
 

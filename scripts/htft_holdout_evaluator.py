@@ -48,9 +48,14 @@ except ImportError:  # Direct invocation as scripts/htft_holdout_evaluator.py.
 
 
 ARTIFACT_TYPE = "soccer_htft_fixed_season_evaluation"
-SCHEMA_VERSION = "1.1.0"
-EVALUATOR_VERSION = "htft-fixed-season-holdout/1.1.0"
+SCHEMA_VERSION = "1.3.0"
+EVALUATOR_VERSION = "htft-fixed-season-holdout/1.3.0"
 RESEARCH_MARKET_POLICY = "research_only_untimestamped_opening_snapshot"
+OPTIONAL_CONTEXT_COLUMNS = ("season_status", "format_version", "phase_group")
+LEGACY_SEASON_STATUS = "unlabeled_legacy"
+LEGACY_FORMAT_VERSION = "competition_regime_legacy"
+LEGACY_PHASE_GROUP = "unspecified"
+PARTIAL_SEASON_STATUS_PREFIX = "partial_as_of_"
 COMPETITION_REGIME_POLICY = {
     "version": "regular-only-production-v1",
     "source_column": "competition_regime",
@@ -216,10 +221,18 @@ def _promotion_metadata(
         "model_component_evidence_only": True,
         "final_selector_untouched": False,
         "end_to_end_promotion_eligible": False,
+        "promotion_ready": False,
+        "formal_htft_eligible": False,
+        "evaluation_scope": "nine_class_probability_accuracy_only",
+        "complete_prekickoff_nine_way_htft_odds_available": False,
+        "ev_roi_evaluation_available": False,
+        "partial_test_seasons_excluded_from_promotion_evidence": True,
         "end_to_end_status": "future_live_forward_confirmation_required",
         "reason": (
             "2025 and 2026 were inspected during final Top-2 selector "
-            "development; they cannot confirm the final end-to-end selector"
+            "development, and the dataset has no complete timestamped pre-kickoff "
+            "nine-way HT/FT prices; it can assess classification probabilities but "
+            "cannot confirm executable EV, ROI, or the final end-to-end selector"
         ),
     }
 
@@ -272,6 +285,72 @@ def _canonical_utc(raw: Any, name: str) -> str:
     normalized = parsed.astimezone(timezone.utc)
     timespec = "microseconds" if normalized.microsecond else "seconds"
     return normalized.isoformat(timespec=timespec).replace("+00:00", "Z")
+
+
+def _optional_context_value(raw: Any, *, default: str, name: str) -> str:
+    """Normalize an optional pre-match context label without inventing detail."""
+
+    if raw is None:
+        return default
+    if not isinstance(raw, str):
+        raise HoldoutEvaluationError(f"{name} must be a string when present")
+    value = raw.strip()
+    return value or default
+
+
+def _is_partial_season_status(value: str) -> bool:
+    return value.startswith(PARTIAL_SEASON_STATUS_PREFIX)
+
+
+def _status_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row.get("season_status")
+        if not isinstance(status, str) or not status:
+            raise HoldoutEvaluationError("season_status is missing after normalization")
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _split_evaluation_scope(
+    rows: Sequence[Mapping[str, Any]], split: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Describe which evidence a split may contribute to promotion summaries."""
+
+    statuses = _status_counts(rows)
+    partial = any(_is_partial_season_status(status) for status in statuses)
+    has_rows = bool(rows)
+    complete_status_verified = has_rows and set(statuses) == {"complete"}
+    if not has_rows:
+        evidence_role = "not_available"
+    elif partial:
+        evidence_role = "research_shadow_partial_season"
+    elif not complete_status_verified:
+        evidence_role = "research_shadow_unverified_season_status"
+    else:
+        evidence_role = str(split["role"])
+    blockers = [
+        "complete timestamped pre-kickoff nine-way HT/FT odds unavailable",
+        "final selector lacks untouched live-forward confirmation",
+    ]
+    if partial:
+        blockers.insert(0, "partial test season is research/shadow only")
+    elif has_rows and not complete_status_verified:
+        blockers.insert(0, "test-season completeness is not explicitly verified")
+    if not has_rows:
+        blockers.insert(0, "no production-regime test fixtures available")
+    return {
+        "season_status_counts": statuses,
+        "partial_test_season": partial,
+        "complete_test_season_status_verified": complete_status_verified,
+        "evidence_role": evidence_role,
+        "component_promotion_evidence_included": complete_status_verified,
+        "promotion_ready": False,
+        "formal_htft_eligible": False,
+        "classification_accuracy_only": True,
+        "ev_roi_evaluation_available": False,
+        "promotion_blockers": blockers,
+    }
 
 
 def _safe_bundle_file(root: Path, raw_name: Any, name: str) -> Path:
@@ -433,6 +512,21 @@ def _load_score_rows(
                         (row.get("competition_regime") or "").strip()
                         or "unlabeled_legacy_source"
                     ),
+                    "season_status": _optional_context_value(
+                        row.get("season_status"),
+                        default=LEGACY_SEASON_STATUS,
+                        name=f"{path.name} row {row_number} season_status",
+                    ),
+                    "format_version": _optional_context_value(
+                        row.get("format_version"),
+                        default=LEGACY_FORMAT_VERSION,
+                        name=f"{path.name} row {row_number} format_version",
+                    ),
+                    "phase_group": _optional_context_value(
+                        row.get("phase_group"),
+                        default=LEGACY_PHASE_GROUP,
+                        name=f"{path.name} row {row_number} phase_group",
+                    ),
                     "competition_key": league_key,
                     "actual_class": actual_class,
                     **goals,
@@ -571,6 +665,47 @@ def _new_accumulator(threshold: float) -> dict[str, Any]:
 
 def _new_paired_accumulator() -> dict[str, Any]:
     return {"observations": []}
+
+
+def _new_paired_cohorts() -> dict[str, dict[str, Any]]:
+    return {
+        name: _new_paired_accumulator()
+        for name in ("overall", "known_teams", "league_average_fallback")
+    }
+
+
+def _add_paired_cohort_score(
+    cohorts: dict[str, dict[str, Any]],
+    candidate: Mapping[str, float],
+    baseline: Mapping[str, float],
+    actual_class: str,
+    *,
+    used_fallback: bool,
+    group: str,
+) -> None:
+    _add_paired_score(
+        cohorts["overall"], candidate, baseline, actual_class, group=group
+    )
+    cohort = "league_average_fallback" if used_fallback else "known_teams"
+    _add_paired_score(
+        cohorts[cohort], candidate, baseline, actual_class, group=group
+    )
+
+
+def _finalize_paired_cohorts(
+    cohorts: Mapping[str, Mapping[str, Any]],
+    *,
+    bootstrap_repetitions: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    return {
+        name: _finalize_paired_accumulator(
+            cohorts[name],
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        )
+        for name in ("overall", "known_teams", "league_average_fallback")
+    }
 
 
 def _validate_probability_vector(probabilities: Mapping[str, float]) -> dict[str, float]:
@@ -867,6 +1002,132 @@ def _finalize_cohorts(cohorts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any
     return {name: _finalize_accumulator(value) for name, value in cohorts.items()}
 
 
+def _new_context_slice_accumulators() -> dict[str, dict[str, dict[str, Any]]]:
+    return {name: {} for name in ("format_version", "phase_group")}
+
+
+def _new_context_slice_accumulator() -> dict[str, Any]:
+    return {
+        "model": _cohort_accumulators(MODEL_PAIR_MASS_THRESHOLD),
+        "baseline": _new_accumulator(MODEL_PAIR_MASS_THRESHOLD),
+        "paired": _new_paired_accumulator(),
+    }
+
+
+def _add_context_slice_score(
+    slices: dict[str, dict[str, dict[str, Any]]],
+    *,
+    format_version: str,
+    phase_group: str,
+    model_probabilities: Mapping[str, float],
+    baseline_probabilities: Mapping[str, float],
+    actual_class: str,
+    used_fallback: bool,
+    group: str,
+) -> None:
+    for dimension, value in (
+        ("format_version", format_version),
+        ("phase_group", phase_group),
+    ):
+        accumulator = slices[dimension].setdefault(
+            value, _new_context_slice_accumulator()
+        )
+        _add_cohort_score(
+            accumulator["model"],
+            model_probabilities,
+            actual_class,
+            used_fallback=used_fallback,
+        )
+        _add_score(
+            accumulator["baseline"], baseline_probabilities, actual_class
+        )
+        _add_paired_score(
+            accumulator["paired"],
+            model_probabilities,
+            baseline_probabilities,
+            actual_class,
+            group=group,
+        )
+
+
+def _finalize_context_slice_accumulator(
+    accumulator: Mapping[str, Any],
+    *,
+    bootstrap_repetitions: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    model = _finalize_cohorts(accumulator["model"])
+    return {
+        "sample_count": model["overall"]["metrics"]["sample_count"],
+        "model_only": model,
+        "league_empirical_frequency_baseline": {
+            "method": "dirichlet_smoothed_training_htft_frequency",
+            "metrics": _finalize_accumulator(accumulator["baseline"])["metrics"],
+        },
+        "model_minus_empirical_baseline": _finalize_paired_accumulator(
+            accumulator["paired"],
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
+    }
+
+
+def _finalize_context_slices(
+    slices: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    *,
+    bootstrap_repetitions: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    return {
+        dimension: {
+            value: _finalize_context_slice_accumulator(
+                accumulator,
+                bootstrap_repetitions=bootstrap_repetitions,
+                bootstrap_seed=bootstrap_seed,
+            )
+            for value, accumulator in sorted(values.items())
+        }
+        for dimension, values in (
+            (name, slices.get(name, {}))
+            for name in ("format_version", "phase_group")
+        )
+    }
+
+
+def _merge_context_slices(
+    split_accumulators: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    merged = _new_context_slice_accumulators()
+    for dimension in merged:
+        values = sorted(
+            {
+                value
+                for item in split_accumulators
+                for value in item.get("context_slices", {}).get(dimension, {})
+            }
+        )
+        for value in values:
+            sources = [
+                item["context_slices"][dimension][value]
+                for item in split_accumulators
+                if value in item.get("context_slices", {}).get(dimension, {})
+            ]
+            merged[dimension][value] = {
+                "model": _merge_cohorts(
+                    [source["model"] for source in sources],
+                    threshold=MODEL_PAIR_MASS_THRESHOLD,
+                ),
+                "baseline": _merge_accumulators(
+                    [source["baseline"] for source in sources],
+                    threshold=MODEL_PAIR_MASS_THRESHOLD,
+                ),
+                "paired": _merge_paired_accumulators(
+                    [source["paired"] for source in sources]
+                ),
+            }
+    return merged
+
+
 def _write_training_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     fields = (
         "date",
@@ -1012,12 +1273,16 @@ def _fit_and_score_split(
     model_cohorts = _cohort_accumulators(MODEL_PAIR_MASS_THRESHOLD)
     market_cohorts = _cohort_accumulators(MARKET_PAIR_MASS_THRESHOLD)
     baseline_accumulator = _new_accumulator(MODEL_PAIR_MASS_THRESHOLD)
-    paired_accumulator = _new_paired_accumulator()
+    paired_cohorts = _new_paired_cohorts()
+    paired_accumulator = paired_cohorts["overall"]
+    context_slices = _new_context_slice_accumulators()
+    evaluation_scope = _split_evaluation_scope(test_rows, split)
     if not test_rows:
         return (
             {
                 **split,
                 "status": "not_available",
+                "evaluation_scope": evaluation_scope,
                 "training_match_count": len(training_rows),
                 "test_match_count": 0,
                 "training_competition_regime_counts": (
@@ -1046,6 +1311,18 @@ def _fit_and_score_split(
                     bootstrap_repetitions=bootstrap_repetitions,
                     bootstrap_seed=bootstrap_seed,
                 ),
+                "model_minus_empirical_baseline_by_team_availability": (
+                    _finalize_paired_cohorts(
+                        paired_cohorts,
+                        bootstrap_repetitions=bootstrap_repetitions,
+                        bootstrap_seed=bootstrap_seed,
+                    )
+                ),
+                "context_slices": _finalize_context_slices(
+                    context_slices,
+                    bootstrap_repetitions=bootstrap_repetitions,
+                    bootstrap_seed=bootstrap_seed,
+                ),
                 "research_opening_market": {
                     "policy": RESEARCH_MARKET_POLICY,
                     "research_only": True,
@@ -1062,6 +1339,7 @@ def _fit_and_score_split(
                 "market": market_cohorts,
                 "baseline": baseline_accumulator,
                 "paired": paired_accumulator,
+                "context_slices": context_slices,
             },
         )
     if len(training_rows) < 2:
@@ -1158,6 +1436,24 @@ def _fit_and_score_split(
             row["actual_class"],
             group=league_key,
         )
+        cohort = "league_average_fallback" if used_fallback else "known_teams"
+        _add_paired_score(
+            paired_cohorts[cohort],
+            prediction["htft"]["probabilities"],
+            baseline_probabilities,
+            row["actual_class"],
+            group=league_key,
+        )
+        _add_context_slice_score(
+            context_slices,
+            format_version=row["format_version"],
+            phase_group=row["phase_group"],
+            model_probabilities=prediction["htft"]["probabilities"],
+            baseline_probabilities=baseline_probabilities,
+            actual_class=row["actual_class"],
+            used_fallback=used_fallback,
+            group=league_key,
+        )
         research_forecast: dict[str, Any] | None = None
         if opening_consensus is not None:
             anchor = opening_consensus.get(_fixture_key(row))
@@ -1200,6 +1496,9 @@ def _fit_and_score_split(
                 "away_team": row["away_team"],
                 "actual_class": row["actual_class"],
                 "competition_regime": row["competition_regime"],
+                "season_status": row["season_status"],
+                "format_version": row["format_version"],
+                "phase_group": row["phase_group"],
                 "used_league_average_fallback": used_fallback,
                 "training_cutoff_date": training_end.isoformat(),
                 "model_hash": model["model_hash"],
@@ -1224,6 +1523,7 @@ def _fit_and_score_split(
     split_result = {
         **split,
         "status": "evaluated",
+        "evaluation_scope": evaluation_scope,
         "training_match_count": len(training_rows),
         "test_match_count": len(test_rows),
         "training_competition_regime_counts": (
@@ -1261,6 +1561,18 @@ def _fit_and_score_split(
             bootstrap_repetitions=bootstrap_repetitions,
             bootstrap_seed=bootstrap_seed,
         ),
+        "model_minus_empirical_baseline_by_team_availability": (
+            _finalize_paired_cohorts(
+                paired_cohorts,
+                bootstrap_repetitions=bootstrap_repetitions,
+                bootstrap_seed=bootstrap_seed,
+            )
+        ),
+        "context_slices": _finalize_context_slices(
+            context_slices,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
         "research_opening_market": {
             "policy": RESEARCH_MARKET_POLICY,
             "research_only": True,
@@ -1292,6 +1604,7 @@ def _fit_and_score_split(
         "market": market_cohorts,
         "baseline": baseline_accumulator,
         "paired": paired_accumulator,
+        "context_slices": context_slices,
     }
 
 
@@ -1316,6 +1629,7 @@ def _aggregate_split_cohorts(
     paired = _merge_paired_accumulators(
         [item["paired"] for item in split_accumulators]
     )
+    context_slices = _merge_context_slices(split_accumulators)
     return {
         "model_only": _finalize_cohorts(model),
         "league_empirical_frequency_baseline": {
@@ -1327,6 +1641,11 @@ def _aggregate_split_cohorts(
             bootstrap_repetitions=bootstrap_repetitions,
             bootstrap_seed=bootstrap_seed,
         ),
+        "context_slices": _finalize_context_slices(
+            context_slices,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
         "research_opening_market": {
             "policy": RESEARCH_MARKET_POLICY,
             "research_only": True,
@@ -1334,6 +1653,33 @@ def _aggregate_split_cohorts(
             "official_anchor_interface_used": False,
             "cohorts": _finalize_cohorts(market),
         },
+    }
+
+
+def _promotion_evidence_summary(
+    *,
+    eligible_cohorts: Sequence[Mapping[str, str]],
+    research_shadow_cohorts: Sequence[Mapping[str, str]],
+    eligible_accumulators: Sequence[Mapping[str, Any]],
+    bootstrap_repetitions: int,
+    bootstrap_seed: int,
+) -> dict[str, Any]:
+    """Keep partial-season rows visible while excluding them from promotion evidence."""
+
+    return {
+        "policy": "complete-test-seasons-only-component-evidence-v1",
+        "eligible_cohorts": [dict(item) for item in eligible_cohorts],
+        "research_shadow_cohorts": [dict(item) for item in research_shadow_cohorts],
+        "partial_test_seasons_excluded": True,
+        "promotion_ready": False,
+        "formal_htft_eligible": False,
+        "classification_accuracy_only": True,
+        "ev_roi_evaluation_available": False,
+        "eligible_classification_summary": _aggregate_split_cohorts(
+            eligible_accumulators,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
     }
 
 
@@ -1406,6 +1752,9 @@ def evaluate_bundle(
     league_keys: set[str] = set()
     league_results: list[dict[str, Any]] = []
     all_accumulators: list[dict[str, Any]] = []
+    promotion_eligible_accumulators: list[dict[str, Any]] = []
+    promotion_eligible_cohorts: list[dict[str, str]] = []
+    research_shadow_cohorts: list[dict[str, str]] = []
     by_split: dict[str, list[dict[str, Any]]] = {
         split["split_id"]: [] for split in run_splits
     }
@@ -1466,6 +1815,9 @@ def evaluate_bundle(
 
         split_results: list[dict[str, Any]] = []
         league_accumulators: list[dict[str, Any]] = []
+        league_promotion_accumulators: list[dict[str, Any]] = []
+        league_promotion_cohorts: list[dict[str, str]] = []
+        league_research_shadow_cohorts: list[dict[str, str]] = []
         for split in run_splits:
             split_result, accumulators = _fit_and_score_split(
                 score_rows,
@@ -1481,6 +1833,17 @@ def evaluate_bundle(
             league_accumulators.append(accumulators)
             all_accumulators.append(accumulators)
             by_split[split["split_id"]].append(accumulators)
+            cohort = {"league_key": league_key, "split_id": split["split_id"]}
+            if split_result["evaluation_scope"][
+                "component_promotion_evidence_included"
+            ]:
+                league_promotion_accumulators.append(accumulators)
+                league_promotion_cohorts.append(cohort)
+                promotion_eligible_accumulators.append(accumulators)
+                promotion_eligible_cohorts.append(cohort)
+            else:
+                league_research_shadow_cohorts.append(cohort)
+                research_shadow_cohorts.append(cohort)
         league_results.append(
             {
                 "league_key": league_key,
@@ -1502,6 +1865,13 @@ def evaluate_bundle(
                     bootstrap_repetitions=bootstrap_repetitions,
                     bootstrap_seed=bootstrap_seed,
                 ),
+                "promotion_evidence": _promotion_evidence_summary(
+                    eligible_cohorts=league_promotion_cohorts,
+                    research_shadow_cohorts=league_research_shadow_cohorts,
+                    eligible_accumulators=league_promotion_accumulators,
+                    bootstrap_repetitions=bootstrap_repetitions,
+                    bootstrap_seed=bootstrap_seed,
+                ),
             }
         )
 
@@ -1509,6 +1879,10 @@ def evaluate_bundle(
         "artifact_type": ARTIFACT_TYPE,
         "schema_version": SCHEMA_VERSION,
         "evaluator_version": EVALUATOR_VERSION,
+        "formal_htft_eligible": False,
+        "complete_prekickoff_nine_way_htft_odds_available": False,
+        "ev_roi_evaluation_available": False,
+        "evaluation_scope": "nine_class_probability_accuracy_only",
         "dataset": {
             "manifest_file": manifest_file.name,
             "manifest_bundle_hash": manifest_hash,
@@ -1550,6 +1924,8 @@ def evaluate_bundle(
             "consensus": "arithmetic mean across complete bookmakers",
             "joint_update": "prediction raw joint seed plus evaluator-local IPF",
             "production_eligibility": False,
+            "complete_prekickoff_nine_way_htft_odds_available": False,
+            "ev_roi_evaluation_available": False,
         },
         "metric_definitions": {
             "nine_class_log_loss": "mean negative log probability of observed HT/FT class",
@@ -1559,6 +1935,10 @@ def evaluate_bundle(
             "weighted_summary": "all means and rates use match-count denominators",
             "model_pair_gate": MODEL_PAIR_MASS_THRESHOLD,
             "research_market_pair_gate": MARKET_PAIR_MASS_THRESHOLD,
+            "evaluation_scope": (
+                "classification probability accuracy only; no executable HT/FT "
+                "EV or ROI without complete timestamped pre-kickoff nine-way odds"
+            ),
         },
         "leagues": league_results,
         "summary": {
@@ -1576,6 +1956,13 @@ def evaluate_bundle(
                 bootstrap_seed=bootstrap_seed,
             ),
         },
+        "promotion_evidence": _promotion_evidence_summary(
+            eligible_cohorts=promotion_eligible_cohorts,
+            research_shadow_cohorts=research_shadow_cohorts,
+            eligible_accumulators=promotion_eligible_accumulators,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
     }
     artifact["evaluation_hash"] = calculate_evaluation_hash(artifact)
     validate_evaluation(artifact, manifest_path=manifest_file)
@@ -1614,7 +2001,9 @@ def _rebuild_split_evidence(
     model_cohorts = _cohort_accumulators(MODEL_PAIR_MASS_THRESHOLD)
     market_cohorts = _cohort_accumulators(MARKET_PAIR_MASS_THRESHOLD)
     baseline_accumulator = _new_accumulator(MODEL_PAIR_MASS_THRESHOLD)
-    paired_accumulator = _new_paired_accumulator()
+    paired_cohorts = _new_paired_cohorts()
+    paired_accumulator = paired_cohorts["overall"]
+    context_slices = _new_context_slice_accumulators()
     expected_split = next(
         (
             item
@@ -1714,11 +2103,35 @@ def _rebuild_split_evidence(
             ),
             f"{league_key} empty paired metrics",
         )
+        _require_same(
+            split.get("model_minus_empirical_baseline_by_team_availability"),
+            _finalize_paired_cohorts(
+                paired_cohorts,
+                bootstrap_repetitions=bootstrap_repetitions,
+                bootstrap_seed=bootstrap_seed,
+            ),
+            f"{league_key} empty paired cohort metrics",
+        )
+        _require_same(
+            split.get("evaluation_scope"),
+            _split_evaluation_scope([], expected_split),
+            f"{league_key} empty evaluation scope",
+        )
+        _require_same(
+            split.get("context_slices"),
+            _finalize_context_slices(
+                context_slices,
+                bootstrap_repetitions=bootstrap_repetitions,
+                bootstrap_seed=bootstrap_seed,
+            ),
+            f"{league_key} empty context slices",
+        )
         return {
             "model": model_cohorts,
             "market": market_cohorts,
             "baseline": baseline_accumulator,
             "paired": paired_accumulator,
+            "context_slices": context_slices,
         }
 
     if split.get("status") != "evaluated":
@@ -1789,6 +2202,21 @@ def _rebuild_split_evidence(
         observed_test_regimes[competition_regime] = (
             observed_test_regimes.get(competition_regime, 0) + 1
         )
+        season_status = _optional_context_value(
+            forecast.get("season_status"),
+            default=LEGACY_SEASON_STATUS,
+            name="forecast.season_status",
+        )
+        format_version = _optional_context_value(
+            forecast.get("format_version"),
+            default=LEGACY_FORMAT_VERSION,
+            name="forecast.format_version",
+        )
+        phase_group = _optional_context_value(
+            forecast.get("phase_group"),
+            default=LEGACY_PHASE_GROUP,
+            name="forecast.phase_group",
+        )
         model_probabilities = _validate_probability_vector(
             forecast.get("model_probabilities")
         )
@@ -1831,6 +2259,24 @@ def _rebuild_split_evidence(
             model_probabilities,
             baseline_probabilities,
             actual_class,
+            group=league_key,
+        )
+        cohort = "league_average_fallback" if fallback else "known_teams"
+        _add_paired_score(
+            paired_cohorts[cohort],
+            model_probabilities,
+            baseline_probabilities,
+            actual_class,
+            group=league_key,
+        )
+        _add_context_slice_score(
+            context_slices,
+            format_version=format_version,
+            phase_group=phase_group,
+            model_probabilities=model_probabilities,
+            baseline_probabilities=baseline_probabilities,
+            actual_class=actual_class,
+            used_fallback=fallback,
             group=league_key,
         )
         research = forecast.get("research_opening_market")
@@ -1889,6 +2335,11 @@ def _rebuild_split_evidence(
     if split.get("strict_cutoff_verified") is not True:
         raise HoldoutEvaluationError("split strict_cutoff_verified must be true")
     _require_same(
+        split.get("evaluation_scope"),
+        _split_evaluation_scope(forecasts, expected_split),
+        f"{league_key} {expected_split['split_id']} evaluation scope",
+    )
+    _require_same(
         split.get("model_only"),
         _finalize_cohorts(model_cohorts),
         f"{league_key} {expected_split['split_id']} model metrics",
@@ -1907,6 +2358,24 @@ def _rebuild_split_evidence(
             bootstrap_seed=bootstrap_seed,
         ),
         f"{league_key} {expected_split['split_id']} paired deltas",
+    )
+    _require_same(
+        split.get("model_minus_empirical_baseline_by_team_availability"),
+        _finalize_paired_cohorts(
+            paired_cohorts,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        f"{league_key} {expected_split['split_id']} paired cohort deltas",
+    )
+    _require_same(
+        split.get("context_slices"),
+        _finalize_context_slices(
+            context_slices,
+            bootstrap_repetitions=bootstrap_repetitions,
+            bootstrap_seed=bootstrap_seed,
+        ),
+        f"{league_key} {expected_split['split_id']} context slices",
     )
     research_summary = split.get("research_opening_market")
     if not isinstance(research_summary, Mapping):
@@ -1949,6 +2418,7 @@ def _rebuild_split_evidence(
         "market": market_cohorts,
         "baseline": baseline_accumulator,
         "paired": paired_accumulator,
+        "context_slices": context_slices,
     }
 
 
@@ -2103,6 +2573,9 @@ def _verify_source_binding(
                     "away_team": row["away_team"],
                     "actual_class": row["actual_class"],
                     "competition_regime": row["competition_regime"],
+                    "season_status": row["season_status"],
+                    "format_version": row["format_version"],
+                    "phase_group": row["phase_group"],
                     "used_league_average_fallback": (
                         row["home_team"] not in known_teams
                         or row["away_team"] not in known_teams
@@ -2119,6 +2592,9 @@ def _verify_source_binding(
                     "away_team": forecast.get("away_team"),
                     "actual_class": forecast.get("actual_class"),
                     "competition_regime": forecast.get("competition_regime"),
+                    "season_status": forecast.get("season_status"),
+                    "format_version": forecast.get("format_version"),
+                    "phase_group": forecast.get("phase_group"),
                     "used_league_average_fallback": forecast.get(
                         "used_league_average_fallback"
                     ),
@@ -2130,6 +2606,97 @@ def _verify_source_binding(
                 source_evidence,
                 f"{league_key} {expected_split['split_id']} source outcomes",
             )
+
+            # A self-consistent evaluation JSON is not sufficient evidence: an
+            # attacker could replace every probability and then recalculate all
+            # derived metrics and the outer hash.  Refit the deterministic model
+            # from the hash-bound source rows and reproduce every holdout
+            # probability before accepting source-bound validation.
+            if test_rows:
+                if len(training_rows) < 2:
+                    raise HoldoutEvaluationError(
+                        f"{league_key} source-bound split has too little training data"
+                    )
+                training_end = max(row["date"] for row in training_rows)
+                generated_at = training_end.isoformat() + "T23:59:59Z"
+                fit_config = evaluation["fit_config"]
+                with tempfile.TemporaryDirectory(
+                    prefix=f"soccer-htft-source-verify-{league_key}-"
+                ) as temporary:
+                    training_path = Path(temporary) / "training.csv"
+                    _write_training_csv(training_path, training_rows)
+                    try:
+                        reproduced_model = htft_model.fit_model(
+                            training_path,
+                            half_time_half_life_days=fit_config[
+                                "half_time_half_life_days"
+                            ],
+                            second_half_half_life_days=fit_config[
+                                "second_half_half_life_days"
+                            ],
+                            full_time_half_life_days=fit_config[
+                                "full_time_half_life_days"
+                            ],
+                            iterations=fit_config["iterations"],
+                            learning_rate=fit_config["learning_rate"],
+                            regularization=fit_config["regularization"],
+                            rho_min=fit_config["rho_min"],
+                            rho_max=fit_config["rho_max"],
+                            rho_step=fit_config["rho_step"],
+                            association_smoothing_alpha=fit_config[
+                                "association_smoothing_alpha"
+                            ],
+                            association_power=fit_config["association_power"],
+                            competition_key=str(league_key),
+                            dataset_manifest_hash=evaluation["dataset"][
+                                "manifest_bundle_hash"
+                            ],
+                        )
+                    except htft_model.HTFTModelError as exc:
+                        raise HoldoutEvaluationError(
+                            f"{league_key} source-bound model cannot be reproduced: {exc}"
+                        ) from exc
+                reproduced_model = _historical_model_timestamp(
+                    reproduced_model, generated_at
+                )
+                if split.get("model_hash") != reproduced_model.get("model_hash"):
+                    raise HoldoutEvaluationError(
+                        f"{league_key} source-bound model hash does not reproduce"
+                    )
+                if split.get("model_training_data_hash") != reproduced_model[
+                    "training"
+                ]["source_data_hash"]:
+                    raise HoldoutEvaluationError(
+                        f"{league_key} source-bound training data hash does not reproduce"
+                    )
+                forecasts = split.get("forecasts")
+                if not isinstance(forecasts, list) or len(forecasts) != len(test_rows):
+                    raise HoldoutEvaluationError(
+                        f"{league_key} source-bound forecast count changed"
+                    )
+                for row, forecast in zip(test_rows, forecasts, strict=True):
+                    try:
+                        reproduced_prediction = htft_model.predict_model(
+                            reproduced_model,
+                            row["home_team"],
+                            row["away_team"],
+                            kickoff=row["kickoff_utc"],
+                            generated_at=generated_at,
+                            unknown_team_policy="league_average",
+                            seed_method="empirical_association",
+                        )
+                    except htft_model.HTFTModelError as exc:
+                        raise HoldoutEvaluationError(
+                            f"{league_key} source-bound prediction cannot be reproduced: {exc}"
+                        ) from exc
+                    _require_same(
+                        forecast.get("model_probabilities"),
+                        reproduced_prediction["htft"]["probabilities"],
+                        (
+                            f"{league_key} {expected_split['split_id']} "
+                            f"{row['home_team']} vs {row['away_team']} model probabilities"
+                        ),
+                    )
 
         if evaluation["market_research_policy"].get("enabled") is True:
             manifest_market = manifest_league.get("opening_market_research")
@@ -2168,6 +2735,15 @@ def validate_evaluation(
         raise HoldoutEvaluationError("unexpected evaluation artifact_type")
     if evaluation.get("schema_version") != SCHEMA_VERSION:
         raise HoldoutEvaluationError("unsupported evaluation schema_version")
+    if (
+        evaluation.get("formal_htft_eligible") is not False
+        or evaluation.get("complete_prekickoff_nine_way_htft_odds_available")
+        is not False
+        or evaluation.get("ev_roi_evaluation_available") is not False
+        or evaluation.get("evaluation_scope")
+        != "nine_class_probability_accuracy_only"
+    ):
+        raise HoldoutEvaluationError("formal HT/FT eligibility scope is invalid")
     if evaluation.get("evaluator_version") != EVALUATOR_VERSION:
         raise HoldoutEvaluationError("unsupported evaluator_version")
     dataset = evaluation.get("dataset")
@@ -2253,6 +2829,9 @@ def validate_evaluation(
         or policy.get("collection_time_status") != "unavailable_in_source"
         or policy.get("official_anchor_interface_used") is not False
         or policy.get("production_eligibility") is not False
+        or policy.get("complete_prekickoff_nine_way_htft_odds_available")
+        is not False
+        or policy.get("ev_roi_evaluation_available") is not False
     ):
         raise HoldoutEvaluationError("research market policy was weakened")
     if _contains_key(evaluation, {"captured_at", "anchor_timestamp"}):
@@ -2270,6 +2849,9 @@ def validate_evaluation(
     if not isinstance(leagues, list) or not leagues:
         raise HoldoutEvaluationError("evaluation contains no leagues")
     all_accumulators: list[dict[str, Any]] = []
+    promotion_eligible_accumulators: list[dict[str, Any]] = []
+    promotion_eligible_cohorts: list[dict[str, str]] = []
+    research_shadow_cohorts: list[dict[str, str]] = []
     by_split: dict[str, list[dict[str, Any]]] = {
         split["split_id"]: [] for split in expected_splits
     }
@@ -2291,6 +2873,9 @@ def validate_evaluation(
         ]:
             raise HoldoutEvaluationError("league fixed splits are missing or reordered")
         league_accumulators: list[dict[str, Any]] = []
+        league_promotion_accumulators: list[dict[str, Any]] = []
+        league_promotion_cohorts: list[dict[str, str]] = []
+        league_research_shadow_cohorts: list[dict[str, str]] = []
         for split in splits:
             accumulators = _rebuild_split_evidence(
                 split,
@@ -2302,6 +2887,18 @@ def validate_evaluation(
             league_accumulators.append(accumulators)
             all_accumulators.append(accumulators)
             by_split[split["split_id"]].append(accumulators)
+            cohort = {"league_key": league_key, "split_id": split["split_id"]}
+            scope = split.get("evaluation_scope")
+            if not isinstance(scope, Mapping):
+                raise HoldoutEvaluationError("split evaluation_scope is missing")
+            if scope.get("component_promotion_evidence_included") is True:
+                league_promotion_accumulators.append(accumulators)
+                league_promotion_cohorts.append(cohort)
+                promotion_eligible_accumulators.append(accumulators)
+                promotion_eligible_cohorts.append(cohort)
+            else:
+                league_research_shadow_cohorts.append(cohort)
+                research_shadow_cohorts.append(cohort)
         _require_same(
             league.get("summary"),
             _aggregate_split_cohorts(
@@ -2310,6 +2907,17 @@ def validate_evaluation(
                 bootstrap_seed=seed,
             ),
             f"{league_key} weighted summary",
+        )
+        _require_same(
+            league.get("promotion_evidence"),
+            _promotion_evidence_summary(
+                eligible_cohorts=league_promotion_cohorts,
+                research_shadow_cohorts=league_research_shadow_cohorts,
+                eligible_accumulators=league_promotion_accumulators,
+                bootstrap_repetitions=repetitions,
+                bootstrap_seed=seed,
+            ),
+            f"{league_key} promotion evidence",
         )
     expected_summary = {
         "by_split": {
@@ -2327,6 +2935,17 @@ def validate_evaluation(
         ),
     }
     _require_same(evaluation.get("summary"), expected_summary, "global weighted summary")
+    _require_same(
+        evaluation.get("promotion_evidence"),
+        _promotion_evidence_summary(
+            eligible_cohorts=promotion_eligible_cohorts,
+            research_shadow_cohorts=research_shadow_cohorts,
+            eligible_accumulators=promotion_eligible_accumulators,
+            bootstrap_repetitions=repetitions,
+            bootstrap_seed=seed,
+        ),
+        "global promotion evidence",
+    )
     if dataset_dir is not None or manifest_path is not None:
         _verify_source_binding(
             evaluation,

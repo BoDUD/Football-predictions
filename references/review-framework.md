@@ -18,7 +18,7 @@ If no archived pre-match record exists, provide an informational review but do n
 7. Compare both ranked exact-score candidates with the result, then compare Asian settlement, totals settlement, first-half settlement, HT/FT settlement, and the main causal assumptions.
 8. Run `memory_store.py stats`; lead with `strict_oos` primary performance and its per-market breakdown. Report legacy/backfill/invalid-timing cohorts separately, then the current match's normalized league profile. If the final active version had no primary, report it only as a no-primary learning sample and verify the primary record did not change. Do not grade or report secondary-pick outcomes.
 9. Run `memory_store.py calibrate --write` so the workspace calibration snapshot stays synchronized.
-10. Run `plain_text_formatter.py --base-dir <workspace> --match-id <id> --kind review` and append the exact result as `可复制纯文本版`. Preserve the primary or explicit no-primary line, score references, causal learning, league record, and cumulative record. The project has no external-message sender.
+10. Run `plain_text_formatter.py --base-dir <workspace> --match-id <id> --kind review` and preserve its required information once in the normal review text. Append the exact result under `可复制纯文本版` only when the user explicitly requests a copyable block or text-only mode. Preserve the primary or explicit no-primary line, score references, causal learning, league record, and cumulative record. The project has no external-message sender.
 
 When the review has its own Codex task, use `复盘｜<league_key>｜<match_id>｜<home_team> vs <away_team>` as the title. Keep one match per task; the normalized league prefix provides the grouping.
 

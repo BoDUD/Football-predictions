@@ -54,11 +54,41 @@ Accept either format from user:
 ### Corner Total and Corner Handicap
 
 - Open `https://m.titan007.com/corner/{match_id}.htm`.
-- Collect corner totals from `https://m.titan007.com/HandicapDataInterface.ashx?scheid={match_id}&type=1&oddskind=3&isHalf=0`.
-- Collect corner handicaps from the same endpoint with `oddskind=2`.
+- For historical pre-kickoff snapshots, use Titan's `HandicapDataInterface.ashx` with
+  `type=4`, `isHalf=0`, `oddskind=2` for full-match corner totals and `oddskind=1` for
+  full-match corner handicaps. Let `scripts/titan_corner_odds_collector.py` validate event
+  ordering and retain only snapshots strictly before kickoff; do not hand-select a later row.
 - Extract both sides of each selected line, opening and current prices when available, bookmaker name, timezone-aware source time, consensus/median price basis, selected no-vig probability, and market status.
 - Build and archive the selected side's full-win, half-win, push, half-loss, and loss probability distribution so quarter-line EV is auditable.
-- Use at least three bookmakers for a formal corner direction. Do not treat ordinary football totals or handicap prices as corner prices.
+- Use at least three bookmakers for diagnostic corner qualification. The current corner
+  manager is historical-only and its formal flags are false, so even a complete market stays
+  a `◇` observation until separately bound strict live-forward evidence enables a later
+  policy. Do not treat ordinary football totals or handicap prices as corner prices.
+
+For an already-frozen historical `schedules.json`, do not revisit Titan merely to add
+machine-readable kickoff fields. First run the offline checker, then use the same command
+with `--in-place` after collection has stopped:
+
+```bash
+python scripts/titan_schedule_snapshot_normalizer.py \
+  --schedule path/to/schedules.json \
+  --check
+
+python scripts/titan_schedule_snapshot_normalizer.py \
+  --schedule path/to/schedules.json \
+  --in-place
+```
+
+The normalizer requires the bundle-level `source_timezone=Asia/Shanghai`, converts every
+preserved local kickoff to canonical UTC plus epoch, maps legacy `standard` regimes to
+`regular`, and hard-normalizes J1 2026 to `2026_vision_regional`. Existing UTC/epoch fields
+must agree; conflicts abort before replacement. Each changed file is written atomically,
+the command performs no network requests, and a second run is a byte-preserving no-op.
+
+For the multi-snapshot result collector, strict legacy-checkpoint migration, company 8
+research-only price collection, source-bound dataset build, sequential fourteen-league
+registry training, and final workbook-to-HTFT order, follow
+[expanded-history-runbook.md](expanded-history-runbook.md).
 
 ### 3. European Odds (欧赔胜平负)
 - Extract only rows labeled "即" (instant/live) and "早" (early/opening)
