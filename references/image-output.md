@@ -1,14 +1,14 @@
 # Prediction image and text output
 
 Use this contract for every user-requested daily slate and, by default, for a single-match
-prediction. The user-facing result contains one deterministic image plus concise analytical
-text. Do not repeat the same content a second time under a `可复制纯文本版` heading unless the
-user explicitly asks for a copyable block.
+initial prediction, lineup check, or completed post-match review. The user-facing result
+contains one deterministic image plus concise analytical text. Do not repeat the same content
+under a `可复制纯文本版` heading unless the user explicitly requests a copyable block.
 
 ## Image renderer
 
-Build a UTF-8 JSON payload from the final archived pre-match version and bind it to the
-workspace prediction archive:
+Build a UTF-8 JSON payload from the exact archived version and bind it to the workspace
+prediction archive:
 
 ```bash
 python scripts/prediction_card_renderer.py \
@@ -19,52 +19,123 @@ python scripts/prediction_card_renderer.py \
 
 SVG is the dependency-free output. PNG/JPEG output uses Pillow and a real Chinese font; if a
 raster dependency or Chinese font is unavailable, render SVG instead of substituting broken
-glyphs. Save generated files under the workspace's ignored
-`.codex/soccer-predict/rendered/` directory and display the absolute output path as an image.
+glyphs. Save generated files under the ignored `.codex/soccer-predict/rendered/` directory and
+display the image from its absolute local path.
 
-Each row contains `archive_match_id`, match time, competition, teams, recommendation status,
-the strongest direction, goal range, exactly two HT/FT probability shapes, and exactly two
-score references. Supply the HT/FT and score fields as two-element JSON arrays, not as
-slash-packed free text. Use only pre-kickoff values from the same active version. Never put a
-later result, closing price, or reviewed learning into a pre-match image.
+## Initial and lineup-check card
 
-The renderer loads the active pending prematch record, verifies the fixture, and derives both
-the formal-primary label and its star from `primary_pick`. Callers cannot supply `star` and
-cannot turn an unarchived observation into a formal row. A no-primary or observation row must
-bind to an archive whose active `primary_pick` is null.
+Initial and lineup-check results use the same compact eight-column table, in this exact order:
 
-## Marker semantics
+1. `编号`
+2. `时间`
+3. `赛事`
+4. `主队 vs 客队`
+5. `主推`
+6. `总进球`
+7. `半全场`
+8. `波胆`
 
-- `★` means the row has one unique, archived, policy-enabled formal primary that passed every
-  active model, market, data-quality, evidence, and timing gate. The renderer must derive and
-  append it immediately after that primary direction. A daily slate may have multiple starred
-  rows, but never more than one starred direction per match.
-- `◇` means the displayed direction is the strongest structured observation. It may be useful
-  for learning or monitoring, but it is not a bet and must never be called a primary.
-- `无正式推荐` means no executable direction qualified. Do not attach a star.
-- Reject every caller-supplied `star` field, every formal row without an archived active
-  primary, and every observation/no-bet row whose archive contains one. The image must not
-  provide a visual bypass around the recommendation policy.
+The stage is identified in the title/subtitle, not by changing the table structure. Each row
+must bind `archive_match_id`, `archive_stage`, and `archive_version_hash`. The renderer selects
+that exact initial or lineup-check version, recomputes its hash, and verifies kickoff time,
+league, and teams. It must not silently read whichever revision is active today or reuse a
+lineup artifact in an initial card.
 
-The image legend must explain both markers. Do not use a red star merely because a model has
-high probability, a historical cohort looks strong, or the user prefers more picks.
+The compact cells follow these display rules:
 
-## Accompanying text
+- `主推` shows the single archived formal primary that ranked highest after all active gates,
+  with the archive-derived `★`. If no direction qualified, show `无正式推荐`; do not promote a
+  model observation merely to fill the cell.
+- `总进球` shows only the highest-probability goal range from the validated path posterior,
+  together with its probability and lead over the second-ranked range. Do not show a second
+  goal-range choice in the image.
+- `半全场` and `波胆` are two views of the same ranked joint path events. Items at the same
+  position are one inseparable `(HT/FT × full-time score)` event and share its genuine joint
+  probability. Never display independently ranked HT/FT and score lists next to each other.
+- Normally display the top two paired joint events. Display three only when the versioned
+  distribution-complexity rule identifies a genuinely divided top cluster. The system makes
+  this choice from probabilities; callers and prose cannot request, suppress, reorder, or
+  hand-pick the third event.
 
-After the image, provide compact normal text that adds information rather than transcribing
-the table. For each starred primary, state probability, current odds, recalculated EV/edge,
-market provenance, data quality, and the independent evidence that cleared the gate. For a
-diamond observation, state the most important failed gate. Include material lineup, tail-risk,
-and data limitations.
+The image is intentionally concise, but the analysis is not. Half-time marginals, full-time
+1X2, complete goal-range distribution, BTTS, market movement, EV/edge, evidence coverage, and
+other supported markets remain fully calculated and available in accompanying text or the
+machine-readable audit. Omitting them from the eight-column image must not omit them from the
+model or archive.
 
-Preserve critical settlement wording inside the normal review text. In particular, a reviewed
-match with no primary must still contain exactly:
+## Joint-path integrity
+
+The payload references the archived joint-posterior artifact, not caller-supplied HT/FT or
+score arrays. A displayed pair must be aggregated from actual match paths. Never multiply an
+HT/FT marginal by a score marginal, replace a score to match a desired full-time direction,
+or fill a missing event from notes, an older revision, or user preference.
+
+The artifact must prove fixture and version identity, generation before kickoff, training
+cutoff, normalization, tail quality, and agreement between its score, HT/FT, 1X2, totals,
+goal-range, and BTTS marginals. Market prices may condition the posterior only under a
+versioned method supported by strict forward calibration. A price used for conditioning
+cannot also be claimed as independent EV evidence against that posterior. If the artifact or
+any required validation fails, render `数据不足` for the affected cells and no fabricated
+fallback pairs.
+
+Corners remain outputs of a separate corner model. Keep them in accompanying text or a clearly
+separate audit panel; do not attach a corner direction to a goal/HTFT path without a separately
+versioned and strictly validated cross-market joint model.
+
+## No-truncation layout rule
+
+User-visible images must contain no ellipsis character or three-dot truncation. Do not crop a
+cell and append a placeholder. Preserve the full selected content by wrapping at semantic
+boundaries, reducing font size down to the documented readable minimum, increasing row height,
+or expanding the canvas. Apply the same rule to titles, subtitles, footers, team names, market
+labels, probabilities, and all review wording. Rendered-image tests must check both the absence
+of truncation markers and the final bounding boxes.
+
+## Post-match review card
+
+Every completed review also generates a deterministic image in the same visual family. It
+must bind the final active pre-match settlement basis, show the verified half-time and final
+scores, the official primary settlement state, the archived paired joint-event references,
+and the learning/statistics context required by the review contract. It may adapt the column
+labels for review facts, but it must retain the compact table style, full-text layout, and the
+same no-truncation rule. It must never rewrite the pre-match recommendation after seeing the
+result.
+
+For a reviewed match whose final active version had no primary, keep this exact wording in the
+image and accompanying text:
 
 ```text
 主推：无正式推荐（不结算、不计战绩）
 ```
 
-The poster changes presentation only. It does not change primary counting, settlement,
-profit/ROI, market eligibility, or the requirement for a complete pre-kickoff archive.
+Render a completed review directly from the immutable history record; do not accept a
+caller-authored review payload:
+
+```bash
+python scripts/review_card_renderer.py \
+  --history .codex/soccer-predict/history.json \
+  --match-id 2913681 \
+  --output .codex/soccer-predict/rendered/2913681-review.png
+```
+
+## Marker semantics
+
+- `★` means one unique archived, policy-enabled formal primary passed every active model,
+  market, data-quality, evidence, and timing gate. A slate may have multiple starred matches,
+  but never more than one starred direction per match.
+- `◇` means a structured observation passed its diagnostic qualification audit. It remains a
+  non-primary reference and must not be described as a bet.
+- `无正式推荐` means no executable direction qualified. It never receives a star.
+- Reject caller-supplied markers, formal rows without an archived primary, and observations
+  that failed their diagnostic qualification.
+
+## Accompanying text
+
+After the image, provide compact normal text that adds the analysis hidden by the compact card:
+complete distributions, current market provenance, recalculated EV/edge, evidence quality,
+failed gates, lineup effects, and tail risks. Do not claim a high win rate, guaranteed return,
+or profit from a prediction. The image changes presentation only; it does not change primary
+counting, settlement, profit/ROI, market eligibility, or archive requirements.
+
 The renderer writes a local file only. It has no WeChat sender, chat-client automation,
 account configuration, clipboard delivery, or external-message side effect.

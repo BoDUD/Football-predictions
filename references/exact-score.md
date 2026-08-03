@@ -1,34 +1,35 @@
-# Exact-Score Candidates
+# Exact-Score Internal Audit and Joint Scenarios
 
-Use this guide for every valid pre-match prediction and lineup-time reanalysis.
+Use this guide for every valid pre-match prediction, lineup-time reanalysis, and post-match diagnostic.
 
-## Model and ranking
+## Internal score audit
 
 1. Load the versioned prediction artifact produced by `scripts/score_model.py predict`. Do not estimate a second pair of scoring rates for exact scores.
-2. Use its full regulation-time score grid, including `(0, 0)`, after validating non-negative finite cells, normalization, and the reported tail mass. Never discard 0-0 from the underlying distribution or silently renormalize a large omitted tail.
-3. Preserve the unconditional Top 2 as the machine-readable distribution audit. Keep its rank 1 equal to `--predicted-score`.
-4. When the unique formal primary is a full-time total, build a separate user-facing pair from the primary's net-profit branch: total goals strictly above the line for `over`, or strictly below the line for `under`. Rank those cells by their original unconditional probabilities. Integer-line pushes are not supporting scenarios.
-5. For a primary-conditioned pair, show both the unconditional full-match probability and the conditional share within the primary event. Label it `主推成立时的波胆情境（高方差参考）`; never describe the conditional share as the unconditional probability or claim that the pair is the global Top 2.
-6. Without a formal total primary, display the unconditional Top 2. Do not create a second score merely for variety.
-7. Use the `exact_scores` and `score_matrix` fields from the same `prediction.json` used for 1X2, totals, Asian handicap, goal ranges, and BTTS. `scripts/exact_score_ranker.py` remains a legacy diagnostic only; do not use a separately generated grid in a strict forward record.
+2. Use its full regulation-time score grid, including `(0, 0)`, after validating non-negative finite cells, normalization, and reported tail mass. Never discard 0-0 from the distribution or silently renormalize a large omitted tail.
+3. Preserve the unconditional exact-score Top 2 as a machine-readable distribution audit. Keep its rank 1 equal to `--predicted-score`.
+4. Do not show that independent Top 2 in a pre-match image, normal analytical text, concise output, or copyable initial/lineup block. It may be graded only as a post-match diagnostic and never counts as a primary result or ROI.
+5. Do not create or display a total-primary-conditioned score pair. A full-time total may be evaluated from the posterior, but it cannot choose, filter, or reorder user-facing scenarios.
+6. Use the `exact_scores` and `score_matrix` fields from the same canonical `prediction.json`. `scripts/exact_score_ranker.py` remains a legacy diagnostic only; it must not create a second strict-forward distribution or a user-facing scenario list.
+
+## User-facing joint scenarios
+
+1. Load the archived, validated match-path posterior that jointly represents half-time and second-half goals and reproduces the canonical full-time score and HT/FT marginals.
+2. Aggregate the path cells into genuine `(HT/FT × full-time score)` events and select exactly the two largest joint probabilities. Each displayed row contains the HT/FT outcome, full-time score, and joint probability.
+3. Derive displayed 1X2, totals, goal range, and BTTS from the same posterior. Never multiply an HT/FT marginal by an exact-score marginal, put independent Top 2 lists side by side, or replace a score to force terminal-result agreement.
+4. The joint artifact must bind the active fixture/version and pass pre-kickoff timing, input-hash, normalization, tail, convergence, and marginal-consistency checks. If it is missing or invalid, show `数据不足` and no scenario rows. Old records, prose, legacy display fields, and manual mappings are not fallbacks.
+5. Label both joint events `高方差参考（不计主推）`. Their hit or miss never enters primary accuracy, profit, or ROI.
 
 ## Mandatory internal 0-0 calculation
 
-- Calculate the 0-0 probability and its one-based rank for every pre-match and lineup-check analysis.
-- Preserve 0-0's probability and unconditional one-based rank before any display conditioning.
-- In an unconditional display, let 0-0 appear naturally when it ranks first or second.
-- In a primary-conditioned total display, show 0-0 only when it belongs to that net-profit branch and ranks in the displayed pair. Otherwise retain it internally even if it belongs to the unconditional Top 2.
-- Show a separate 0-0 diagnostic only when the user explicitly asks for it. In that case, show current decimal odds and EV only when those odds were actually collected; never infer them from totals or 1X2.
-- Archive the audit on every run with `--zero-zero-probability` and `--zero-zero-rank`, plus `--zero-zero-odds` and `--zero-zero-ev` when available. `memory_store.py` rejects missing or inconsistent audits.
+- Calculate the 0-0 probability and its one-based exact-score rank for every pre-match and lineup-check analysis.
+- Archive the audit with `--zero-zero-probability` and `--zero-zero-rank`, plus `--zero-zero-odds` and `--zero-zero-ev` only when current exact-score odds were actually collected. Never infer them from 1X2 or totals.
+- In normal pre-match output, 0-0 appears only when it is the full-time-score component of one of the two selected joint events. Show that event's joint probability; do not append the independent 0-0 marginal, rank, odds, or EV.
+- Otherwise keep the 0-0 fields internal. They may be discussed after the match as a diagnostic, but must not leak through pre-match recommendations, notes, risks, chart captions, or copyable text.
 
-## Display and archive
+## Archive and review
 
-- Show display rank, score, unconditional model probability, and a short scenario label for both user-facing candidates. For a primary-conditioned pair, also show its conditional share and the condition.
-- Do not duplicate 0-0 as a separate audit line when it already appears in the Top-2. When it is outside the Top-2, omit it from normal visual, concise, copyable plain-text, and review output unless the user explicitly requests the diagnostic.
-- Do not leak a hidden non-Top-2 audit through recommendation, notes, risks, chart captions, or other prose. Its probability, rank, odds, and EV remain machine-readable archive fields only.
-- Label both `高方差参考（不计主推）`. They are not formal bets and never enter primary accuracy/ROI.
-- Show exact-score odds and EV only when current market odds were actually collected. Missing odds must remain `数据未取得`; never infer them from 1X2 or totals.
-- Archive the unconditional Top 2 with repeated `--exact-score-pick SCORE:PROBABILITY`. For a formal total primary, also archive the displayed pair with repeated `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` plus `--display-exact-score-event-probability`.
-- Archive the score-model prediction artifact so the validator can reproduce the unconditional Top 2, 0-0 audit, 1X2 marginals, every football-market probability, and the total-primary branch Top 2 from one immutable matrix. A missing display pair, wrong cell probability, wrong unconditional rank, or non-canonical branch ordering must fail archiving.
-- On a lineup check, recalculate both layers and preserve both previous pairs in `revisions`.
-- During review, report displayed-pair hits separately from unconditional Top-1/Top-2 diagnostics. Do not use either diagnostic to change global weights from a small sample.
+- Continue archiving the unconditional Top 2 with repeated `--exact-score-pick SCORE:PROBABILITY`, keep `--predicted-score` equal to unconditional rank 1, and preserve the 0-0 parameters above. These remain internal audit fields.
+- Legacy `--display-exact-score-pick SCORE:PROBABILITY:UNCONDITIONAL_RANK` and `--display-exact-score-event-probability` values may remain for backward-compatible machine audit, but they no longer define anything displayed to the user.
+- Pass `--joint-scenario-file <joint-scenarios.json>` to bind the two user-facing joint events. The archive validator must reproduce them from the immutable path posterior and reject a wrong fixture/version, event probability, ordering, artifact hash, cutoff, or marginal audit.
+- On a lineup check, recalculate and archive the internal exact-score audit, internal HT/FT diagnostic, and joint path artifact. Preserve prior versions in `revisions`; never carry a stale scenario forward by hand.
+- During review, report the archived joint-event outcome separately from unconditional exact-score Top-1/Top-2 and HT/FT Top-1/Top-2 diagnostics. All remain high-variance diagnostics and do not alter primary betting statistics or global weights from a small sample.

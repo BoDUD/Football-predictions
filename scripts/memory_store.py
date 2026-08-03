@@ -19,13 +19,14 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
-    from scripts import corner_ranker, htft_ranker
+    from scripts import corner_ranker, htft_ranker, joint_scenario_model
 except ImportError:  # Direct execution from scripts/.
     script_directory = str(Path(__file__).resolve().parent)
     if script_directory not in sys.path:
         sys.path.insert(0, script_directory)
     import corner_ranker  # type: ignore[no-redef]
     import htft_ranker  # type: ignore[no-redef]
+    import joint_scenario_model  # type: ignore[no-redef]
 
 
 PRIMARY_MARKETS = (
@@ -108,6 +109,11 @@ PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
 HTFT_OUTCOMES = tuple(f"{half}{full}" for half in "HDA" for full in "HDA")
 OBSERVATION_SCHEMA_VERSION = "candidate-observation/1.0.0"
+JOINT_SCENARIO_AUDIT_SCHEMA_VERSION = "joint-scenario-audit/1.0.0"
+MARKET_EVIDENCE_MAX_AGE_MINUTES_BY_STAGE = {
+    "initial": 60,
+    "lineup-check": 30,
+}
 CORNER_OBSERVATION_KIND = "corner_market_observation"
 CORNER_OBSERVATION_GATE_ORDER = (
     "complete_current_market",
@@ -270,6 +276,59 @@ def parse_aware_datetime(value: str, label: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{label} must include timezone")
     return parsed
+
+
+def validate_market_evidence_freshness(
+    record: dict[str, Any], captured_at: Any, label: str
+) -> datetime:
+    """Fail closed when current-market evidence is too old for its archive stage."""
+    stage = str(record.get("analysis_stage") or "initial").strip()
+    maximum_minutes = MARKET_EVIDENCE_MAX_AGE_MINUTES_BY_STAGE.get(stage)
+    if maximum_minutes is None:
+        raise ValueError(f"{label} cannot be checked for unsupported stage {stage!r}")
+    archive_value = record.get("version_archived_at")
+    if archive_value is None:
+        archive_value = record.get("archived_at")
+    if archive_value is None:
+        archive_value = record.get("updated_at", record.get("created_at"))
+    archive_time = parse_aware_datetime(
+        str(archive_value or ""), f"{label} archive time"
+    ).astimezone(timezone.utc)
+    captured_time = parse_aware_datetime(
+        str(captured_at or ""), label
+    ).astimezone(timezone.utc)
+    if captured_time > archive_time:
+        raise ValueError(f"{label} cannot be after archive time")
+    age = archive_time - captured_time
+    maximum_age = timedelta(minutes=maximum_minutes)
+    if age > maximum_age:
+        age_minutes = age.total_seconds() / 60.0
+        raise ValueError(
+            f"{label} is stale for {stage}: {age_minutes:.1f} minutes old "
+            f"exceeds the {maximum_minutes}-minute limit"
+        )
+    return captured_time
+
+
+def validate_candidate_audit_freshness(record: dict[str, Any]) -> None:
+    """Validate every archived candidate market snapshot, including nested copies."""
+
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                child_path = f"{path}.{key}"
+                if key == "market_collected_at" and str(item or "").strip():
+                    validate_market_evidence_freshness(record, item, child_path)
+                else:
+                    walk(item, child_path)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    audits = record.get("candidate_audits", [])
+    if not isinstance(audits, list):
+        raise ValueError("candidate_audits must be a list")
+    walk(audits, "candidate_audits")
 
 
 def parse_timezone(value: Any, label: str):
@@ -834,6 +893,521 @@ def canonical_prediction_hash(payload: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def calculate_joint_scenario_audit_hash(audit: dict[str, Any]) -> str:
+    payload = deepcopy(audit)
+    payload.pop("audit_hash", None)
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("joint scenario audit must contain finite canonical JSON") from exc
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _joint_scenario_lineage(snapshot: dict[str, Any]) -> dict[str, Any]:
+    inputs = snapshot.get("inputs")
+    if not isinstance(inputs, dict):
+        raise ValueError("joint scenario input_artifacts bindings are missing")
+
+    def binding(name: str) -> dict[str, Any]:
+        value = inputs.get(name)
+        if not isinstance(value, dict):
+            raise ValueError(f"joint scenario inputs.{name} binding is missing")
+        return value
+
+    registered = binding("registered_htft_model")
+    score = binding("canonical_score_prediction")
+    htft = binding("htft_prediction")
+    market = binding("market_evidence")
+    lineage = {
+        "registered_htft_model_content_hash": require_sha256(
+            registered.get("content_hash"),
+            "joint scenario registered HT/FT model content_hash",
+        ),
+        "registered_htft_model_hash": require_sha256(
+            registered.get("model_hash"),
+            "joint scenario registered HT/FT model_hash",
+        ),
+        "dataset_manifest_hash": require_sha256(
+            registered.get("dataset_manifest_hash"),
+            "joint scenario dataset_manifest_hash",
+        ),
+        "canonical_score_content_hash": require_sha256(
+            score.get("content_hash"),
+            "joint scenario canonical score content_hash",
+        ),
+        "canonical_score_model_hash": require_sha256(
+            score.get("model_hash"),
+            "joint scenario canonical score model_hash",
+        ),
+        "htft_prediction_content_hash": require_sha256(
+            htft.get("content_hash"),
+            "joint scenario HT/FT prediction content_hash",
+        ),
+        "htft_prediction_hash": require_sha256(
+            htft.get("prediction_hash"),
+            "joint scenario HT/FT prediction_hash",
+        ),
+        "htft_prediction_model_hash": require_sha256(
+            htft.get("model_hash"),
+            "joint scenario HT/FT prediction model_hash",
+        ),
+        "market_evidence_content_hash": None,
+    }
+    market_hash = market.get("content_hash")
+    if market_hash is not None:
+        lineage["market_evidence_content_hash"] = require_sha256(
+            market_hash,
+            "joint scenario market evidence content_hash",
+        )
+    if (
+        lineage["registered_htft_model_hash"]
+        != lineage["htft_prediction_model_hash"]
+    ):
+        raise ValueError(
+            "joint scenario registered model and HT/FT prediction lineage do not match"
+        )
+    return lineage
+
+
+def _joint_scenario_context(
+    record: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    basis = record.get("settlement_basis")
+    if record.get("status") == "reviewed":
+        # A reviewed record is terminal.  Its only authorized active version is
+        # the immutable settlement snapshot; a later top-level audit injection
+        # must never become renderable evidence.
+        if not isinstance(basis, dict):
+            return None, {}
+        return basis.get("joint_scenario_audit"), basis
+    if isinstance(basis, dict):
+        # Once a match has a settlement basis, absence from that immutable
+        # snapshot is authoritative.  A later top-level injection is not a
+        # fallback.
+        return basis.get("joint_scenario_audit"), basis
+    return record.get("joint_scenario_audit"), record
+
+
+def _validate_joint_market_evidence_freshness(
+    snapshot: dict[str, Any], context: dict[str, Any]
+) -> None:
+    """Apply the active archive-stage TTL to every external joint input."""
+    external_anchor = snapshot.get("external_anchor_audit")
+    if not isinstance(external_anchor, dict):
+        raise ValueError("joint scenario external_anchor_audit is missing")
+    if external_anchor.get("enabled") is True:
+        validate_market_evidence_freshness(
+            context,
+            external_anchor.get("captured_at"),
+            "joint scenario external half-time anchor captured_at",
+        )
+
+    market_evidence = snapshot.get("market_evidence")
+    if not isinstance(market_evidence, dict):
+        raise ValueError("joint scenario market_evidence audit is missing")
+    if market_evidence.get("provided") is True:
+        validate_market_evidence_freshness(
+            context,
+            market_evidence.get("captured_at"),
+            "joint scenario attached market evidence captured_at",
+        )
+
+
+def _validate_joint_scenario_record_bindings(
+    record: dict[str, Any],
+    context: dict[str, Any],
+    audit: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    fixture = snapshot.get("fixture")
+    fixture_binding = audit.get("fixture_binding")
+    if not isinstance(fixture, dict) or not isinstance(fixture_binding, dict):
+        raise ValueError("joint scenario fixture binding is missing")
+    fixture_id = str(fixture_binding.get("fixture_id") or "").strip()
+    if not fixture_id:
+        raise ValueError("joint scenario fixture_id binding is required")
+    artifact_fixture_ids = [
+        str(fixture[field])
+        for field in ("fixture_id", "match_id")
+        if fixture.get(field) is not None and str(fixture.get(field)).strip()
+    ]
+    if not artifact_fixture_ids:
+        raise ValueError("joint scenario artifact requires fixture_id or match_id")
+    for artifact_id_field in ("fixture_id", "match_id"):
+        artifact_id = fixture.get(artifact_id_field)
+        if artifact_id is not None and str(artifact_id) != fixture_id:
+            raise ValueError("joint scenario artifact fixture_id does not match the archive")
+    record_fixture_id = record.get("match_id")
+    if record_fixture_id is not None and str(record_fixture_id) != fixture_id:
+        raise ValueError("joint scenario fixture_id does not match the record")
+
+    for field in ("home_team", "away_team"):
+        expected = str(fixture_binding.get(field) or "")
+        if not expected or str(fixture.get(field) or "") != expected:
+            raise ValueError(f"joint scenario fixture {field} binding does not match")
+        record_value = record.get(field)
+        if record_value is not None and str(record_value) != expected:
+            raise ValueError(f"joint scenario fixture {field} does not match the record")
+
+    artifact_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "joint scenario fixture.kickoff"
+    )
+    bound_kickoff = parse_aware_datetime(
+        str(fixture_binding.get("kickoff") or ""),
+        "joint scenario fixture binding kickoff",
+    )
+    if artifact_kickoff.astimezone(timezone.utc) != bound_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("joint scenario fixture kickoff binding does not match")
+    record_kickoff_text = record.get("kickoff", record.get("user_local_kickoff"))
+    if record_kickoff_text is not None:
+        record_kickoff = parse_aware_datetime(
+            str(record_kickoff_text), "joint scenario record kickoff"
+        )
+        if record_kickoff.astimezone(timezone.utc) != artifact_kickoff.astimezone(
+            timezone.utc
+        ):
+            raise ValueError("joint scenario fixture kickoff does not match the record")
+
+    generated_at = parse_aware_datetime(
+        str(snapshot.get("generated_at") or ""), "joint scenario generated_at"
+    )
+    archived_at = parse_aware_datetime(
+        str(audit.get("archived_at") or ""), "joint scenario archived_at"
+    )
+    if generated_at >= artifact_kickoff:
+        raise ValueError("joint scenario generated_at must be strictly before kickoff")
+    if generated_at > archived_at:
+        raise ValueError("joint scenario generated_at cannot be after archive time")
+    expected_archive = context.get("version_archived_at")
+    if expected_archive is None:
+        expected_archive = context.get("archived_at")
+    if expected_archive is None:
+        expected_archive = context.get("updated_at", context.get("created_at"))
+    if expected_archive is not None:
+        expected_archive_time = parse_aware_datetime(
+            str(expected_archive), "joint scenario record archive time"
+        )
+        if archived_at.astimezone(timezone.utc) != expected_archive_time.astimezone(
+            timezone.utc
+        ):
+            raise ValueError("joint scenario archived_at does not match the active version")
+    _validate_joint_market_evidence_freshness(snapshot, context)
+
+
+def _validate_joint_scenario_input_artifacts(
+    context: dict[str, Any],
+    snapshot: dict[str, Any],
+    lineage: dict[str, Any],
+) -> dict[str, str]:
+    provenance = context.get("score_model_provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("joint scenario requires its bound canonical score artifact")
+    raw_score = provenance.get("raw_snapshot")
+    if not isinstance(raw_score, dict):
+        raise ValueError("joint scenario bound score snapshot is missing")
+    score_content_hash = joint_scenario_model.content_hash(raw_score)
+    score_model_hash = require_sha256(
+        provenance.get("model_hash"), "joint scenario bound score model_hash"
+    )
+    if (
+        score_content_hash != lineage["canonical_score_content_hash"]
+        or score_model_hash != lineage["canonical_score_model_hash"]
+    ):
+        raise ValueError(
+            "joint scenario canonical score input hash or model lineage does not match"
+        )
+
+    candidate_audits = context.get("candidate_audits", [])
+    if not isinstance(candidate_audits, list):
+        raise ValueError("joint scenario bound HT/FT audit list is missing")
+    htft_audits = [
+        item
+        for item in candidate_audits
+        if isinstance(item, dict) and item.get("market") == "htft"
+    ]
+    if len(htft_audits) != 1:
+        raise ValueError("joint scenario requires exactly one bound HT/FT audit")
+    model = htft_audits[0].get("model")
+    if not isinstance(model, dict):
+        raise ValueError("joint scenario bound HT/FT audit model is missing")
+    htft_content_hash = require_sha256(
+        model.get("content_hash"), "joint scenario bound HT/FT content_hash"
+    )
+    htft_prediction_hash = require_sha256(
+        model.get("prediction_hash"), "joint scenario bound HT/FT prediction_hash"
+    )
+    registered_model_hash = require_sha256(
+        model.get("model_hash"), "joint scenario bound registered model_hash"
+    )
+    dataset_manifest_hash = require_sha256(
+        model.get("dataset_manifest_hash"),
+        "joint scenario bound dataset_manifest_hash",
+    )
+    if (
+        htft_content_hash != lineage["htft_prediction_content_hash"]
+        or registered_model_hash != lineage["htft_prediction_model_hash"]
+        or registered_model_hash != lineage["registered_htft_model_hash"]
+        or htft_prediction_hash != lineage["htft_prediction_hash"]
+        or dataset_manifest_hash != lineage["dataset_manifest_hash"]
+    ):
+        raise ValueError(
+            "joint scenario HT/FT input hash or model lineage does not match"
+        )
+    return {
+        "canonical_score_content_hash": score_content_hash,
+        "htft_prediction_content_hash": htft_content_hash,
+        "htft_prediction_hash": htft_prediction_hash,
+        "registered_model_hash": registered_model_hash,
+        "dataset_manifest_hash": dataset_manifest_hash,
+    }
+
+
+def _joint_scenario_active_version_binding(
+    context: dict[str, Any],
+    context_lineage: dict[str, str],
+) -> dict[str, str]:
+    stage = str(context.get("analysis_stage") or "").strip()
+    if stage not in {"initial", "lineup-check"}:
+        raise ValueError("joint scenario active version requires a valid analysis_stage")
+
+    fixture_id_value = context.get("fixture_id")
+    match_id_value = context.get("match_id")
+    fixture_id = str(
+        fixture_id_value if fixture_id_value is not None else match_id_value or ""
+    ).strip()
+    if not fixture_id:
+        raise ValueError("joint scenario active version requires fixture_id")
+    if (
+        fixture_id_value is not None
+        and match_id_value is not None
+        and str(fixture_id_value) != str(match_id_value)
+    ):
+        raise ValueError("joint scenario active version fixture identifiers disagree")
+
+    archived_value = context.get("version_archived_at")
+    if archived_value is None:
+        archived_value = context.get("archived_at")
+    if archived_value is None:
+        archived_value = context.get("updated_at", context.get("created_at"))
+    archived_at = parse_aware_datetime(
+        str(archived_value or ""), "joint scenario active version archived_at"
+    ).astimezone(timezone.utc)
+
+    return {
+        "analysis_stage": stage,
+        "version_archived_at": archived_at.isoformat(),
+        "fixture_id": fixture_id,
+        "canonical_score_content_hash": context_lineage[
+            "canonical_score_content_hash"
+        ],
+        "htft_prediction_content_hash": context_lineage[
+            "htft_prediction_content_hash"
+        ],
+        "htft_prediction_hash": context_lineage["htft_prediction_hash"],
+        "registered_model_hash": context_lineage["registered_model_hash"],
+        "dataset_manifest_hash": context_lineage["dataset_manifest_hash"],
+    }
+
+
+def _validate_joint_scenario_active_version_binding(
+    context: dict[str, Any],
+    audit: dict[str, Any],
+    context_lineage: dict[str, str],
+) -> None:
+    binding = audit.get("active_version_binding")
+    if not isinstance(binding, dict):
+        raise ValueError("joint scenario active_version_binding is missing")
+    expected = _joint_scenario_active_version_binding(context, context_lineage)
+    if any(binding.get(field) != value for field, value in expected.items()):
+        raise ValueError("joint scenario active_version_binding does not match context")
+
+    fixture_binding = audit.get("fixture_binding")
+    if (
+        not isinstance(fixture_binding, dict)
+        or fixture_binding.get("fixture_id") != expected["fixture_id"]
+    ):
+        raise ValueError("joint scenario active version fixture binding disagrees")
+    archived_at = parse_aware_datetime(
+        str(audit.get("archived_at") or ""), "joint scenario archived_at"
+    ).astimezone(timezone.utc)
+    if archived_at.isoformat() != expected["version_archived_at"]:
+        raise ValueError("joint scenario active version archive time disagrees")
+
+
+def validated_joint_scenario_audit(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the immutable validated raw joint artifact, or ``None``.
+
+    Consumers must never reconstruct a display fallback from legacy exact-score,
+    HT/FT, prose, or terminal-result fields when this returns ``None``.
+    """
+
+    if not isinstance(record, dict):
+        return None
+    raw_audit, context = _joint_scenario_context(record)
+    if not isinstance(raw_audit, dict):
+        return None
+    try:
+        if (
+            raw_audit.get("schema_version") != JOINT_SCENARIO_AUDIT_SCHEMA_VERSION
+            or raw_audit.get("status") != "validated_diagnostic"
+            or raw_audit.get("formal_eligible") is not False
+        ):
+            return None
+        if raw_audit.get("audit_hash") != calculate_joint_scenario_audit_hash(
+            raw_audit
+        ):
+            return None
+        snapshot = raw_audit.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return None
+        joint_scenario_model.validate_prediction(snapshot)
+        if (
+            raw_audit.get("artifact_type") != snapshot.get("artifact_type")
+            or raw_audit.get("model_version") != snapshot.get("model_version")
+            or raw_audit.get("prediction_hash") != snapshot.get("prediction_hash")
+            or raw_audit.get("snapshot_hash")
+            != joint_scenario_model.content_hash(snapshot)
+            or raw_audit.get("input_artifacts") != snapshot.get("inputs")
+            or raw_audit.get("joint_top_two") != snapshot.get("joint_top_two")
+            or raw_audit.get("derived") != snapshot.get("derived")
+        ):
+            return None
+        require_sha256(
+            raw_audit.get("artifact_sha256"),
+            "joint scenario artifact_sha256",
+        )
+        require_sha256(raw_audit.get("snapshot_hash"), "joint scenario snapshot_hash")
+        require_sha256(
+            raw_audit.get("prediction_hash"), "joint scenario prediction_hash"
+        )
+        lineage = _joint_scenario_lineage(snapshot)
+        if raw_audit.get("model_lineage") != lineage:
+            return None
+        _validate_joint_scenario_record_bindings(
+            record, context, raw_audit, snapshot
+        )
+        context_lineage = _validate_joint_scenario_input_artifacts(
+            context, snapshot, lineage
+        )
+        _validate_joint_scenario_active_version_binding(
+            context, raw_audit, context_lineage
+        )
+    except (
+        joint_scenario_model.JointScenarioError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+    return deepcopy(snapshot)
+
+
+def load_joint_scenario_audit(
+    args: argparse.Namespace,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "joint_scenario_file", "") or "").strip()
+    if not supplied:
+        return None
+    path, raw, snapshot = load_observation_json(
+        args, supplied, "joint scenario file"
+    )
+    try:
+        joint_scenario_model.validate_prediction(snapshot)
+    except joint_scenario_model.JointScenarioError as exc:
+        raise ValueError(f"invalid joint scenario artifact: {exc}") from exc
+
+    fixture = snapshot.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("joint scenario fixture is missing")
+    fixture_id = str(record.get("match_id") or "").strip()
+    if not fixture_id:
+        raise ValueError("joint scenario archival requires a fixture_id")
+    artifact_fixture_ids = [
+        str(fixture[field])
+        for field in ("fixture_id", "match_id")
+        if fixture.get(field) is not None and str(fixture.get(field)).strip()
+    ]
+    if not artifact_fixture_ids:
+        raise ValueError("joint scenario artifact requires fixture_id or match_id")
+    for artifact_id_field in ("fixture_id", "match_id"):
+        artifact_id = fixture.get(artifact_id_field)
+        if artifact_id is not None and str(artifact_id) != fixture_id:
+            raise ValueError("joint scenario artifact fixture_id does not match the record")
+    for field in ("home_team", "away_team"):
+        if str(fixture.get(field) or "") != str(record.get(field) or ""):
+            raise ValueError(f"joint scenario fixture {field} must match the record")
+    fixture_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "joint scenario fixture.kickoff"
+    )
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "joint scenario record kickoff"
+    )
+    if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("joint scenario fixture kickoff must match the record")
+    generated_at = parse_aware_datetime(
+        str(snapshot.get("generated_at") or ""), "joint scenario generated_at"
+    )
+    archived_at = parse_aware_datetime(
+        str(record.get("updated_at") or ""), "joint scenario record updated_at"
+    )
+    if generated_at >= record_kickoff:
+        raise ValueError("joint scenario generated_at must be strictly before kickoff")
+    if generated_at > archived_at:
+        raise ValueError("joint scenario generated_at cannot be after archive time")
+    _validate_joint_market_evidence_freshness(snapshot, record)
+
+    lineage = _joint_scenario_lineage(snapshot)
+    context_lineage = _validate_joint_scenario_input_artifacts(
+        record, snapshot, lineage
+    )
+    active_version_binding = _joint_scenario_active_version_binding(
+        record, context_lineage
+    )
+    audit: dict[str, Any] = {
+        "schema_version": JOINT_SCENARIO_AUDIT_SCHEMA_VERSION,
+        "status": "validated_diagnostic",
+        "formal_eligible": False,
+        "fixture_binding": {
+            "fixture_id": fixture_id,
+            "home_team": str(record.get("home_team") or ""),
+            "away_team": str(record.get("away_team") or ""),
+            "kickoff": fixture_kickoff.astimezone(timezone.utc).isoformat(),
+        },
+        "archived_at": archived_at.astimezone(timezone.utc).isoformat(),
+        "artifact_type": snapshot.get("artifact_type"),
+        "model_version": snapshot.get("model_version"),
+        "prediction_hash": snapshot.get("prediction_hash"),
+        "artifact_filename": path.name,
+        "artifact_sha256": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        "snapshot_hash": joint_scenario_model.content_hash(snapshot),
+        "input_artifacts": deepcopy(snapshot.get("inputs")),
+        "model_lineage": lineage,
+        "active_version_binding": active_version_binding,
+        "joint_top_two": deepcopy(snapshot.get("joint_top_two")),
+        "derived": deepcopy(snapshot.get("derived")),
+        "snapshot": deepcopy(snapshot),
+    }
+    audit["audit_hash"] = calculate_joint_scenario_audit_hash(audit)
+    probe = deepcopy(record)
+    probe["joint_scenario_audit"] = audit
+    if validated_joint_scenario_audit(probe) is None:
+        raise ValueError("joint scenario archive wrapper failed immutable validation")
+    return audit
+
+
 def validate_htft_matrix(value: Any, label: str) -> dict[str, float]:
     if not isinstance(value, dict) or set(value) != set(HTFT_OUTCOMES):
         raise ValueError(f"{label} must contain exactly HH through AA")
@@ -1052,9 +1626,10 @@ def load_htft_observation_audit(
     )
     if generated_at >= record_kickoff:
         raise ValueError("HT/FT observation must be generated before kickoff")
-    if generated_at > parse_aware_datetime(
+    archived_at = parse_aware_datetime(
         str(record.get("updated_at") or ""), "record updated_at"
-    ):
+    )
+    if generated_at > archived_at:
         raise ValueError("HT/FT observation cannot be generated after it is archived")
     provenance = model.get("provenance")
     if not isinstance(provenance, dict):
@@ -1083,7 +1658,7 @@ def load_htft_observation_audit(
         training.get("source_data_hash"),
         "HT/FT observation training source_data_hash",
     )
-    require_sha256(
+    dataset_manifest_hash = require_sha256(
         training.get("dataset_manifest_hash"),
         "HT/FT observation training dataset_manifest_hash",
     )
@@ -1116,6 +1691,136 @@ def load_htft_observation_audit(
         )
     if input_audit.get("model_hash") != model_hash:
         raise ValueError("HT/FT observation ranker model_hash does not match prediction")
+    odds_context = input_audit.get("odds_context")
+    if odds_context is not None:
+        if not isinstance(odds_context, dict):
+            raise ValueError("HT/FT observation odds_context must be an object")
+        validate_market_evidence_freshness(
+            record,
+            odds_context.get("captured_at"),
+            "HT/FT observation market_collected_at",
+        )
+    marginal_targets = provenance.get("marginal_targets")
+    if not isinstance(marginal_targets, dict):
+        raise ValueError("HT/FT observation provenance requires marginal_targets")
+    half_target = marginal_targets.get("half_time")
+    full_target = marginal_targets.get("full_time")
+    if not isinstance(half_target, dict) or not isinstance(full_target, dict):
+        raise ValueError("HT/FT observation marginal_targets must bind both periods")
+    if full_target.get("origin") != "model_component":
+        raise ValueError("HT/FT observation full-time marginal must use model_component")
+    anchor_context = input_audit.get("anchor_context")
+    half_origin = half_target.get("origin")
+    external_anchor_enabled = provenance.get("external_anchor_enabled")
+    if not isinstance(external_anchor_enabled, bool):
+        raise ValueError("HT/FT observation external_anchor_enabled must be boolean")
+    half_external = half_origin == "external_de_vigged_anchor"
+    if external_anchor_enabled != half_external:
+        raise ValueError("HT/FT observation external-anchor flag is inconsistent")
+
+    result_codes = {"home": "H", "draw": "D", "away": "A"}
+
+    def marginal_target_probabilities(
+        target: dict[str, Any], label: str
+    ) -> dict[str, float]:
+        supplied = target.get("probabilities")
+        if not isinstance(supplied, dict) or set(supplied) != set(result_codes):
+            raise ValueError(f"{label} probabilities must contain home/draw/away")
+        normalized: dict[str, float] = {}
+        for name, code in result_codes.items():
+            value = supplied[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0.0
+                or float(value) > 1.0
+            ):
+                raise ValueError(f"{label} {name} probability is invalid")
+            normalized[code] = float(value)
+        if abs(math.fsum(normalized.values()) - 1.0) > 1e-10:
+            raise ValueError(f"{label} probabilities must sum to 1")
+        return normalized
+
+    declared_half_target = marginal_target_probabilities(
+        half_target, "HT/FT half-time marginal target"
+    )
+    declared_full_target = marginal_target_probabilities(
+        full_target, "HT/FT full-time marginal target"
+    )
+    matrix_half_target = {
+        half: math.fsum(matrix[f"{half}{full}"] for full in ("H", "D", "A"))
+        for half in ("H", "D", "A")
+    }
+    matrix_full_target = {
+        full: math.fsum(matrix[f"{half}{full}"] for half in ("H", "D", "A"))
+        for full in ("H", "D", "A")
+    }
+    if any(
+        abs(declared_half_target[result] - matrix_half_target[result]) > 1e-10
+        for result in ("H", "D", "A")
+    ) or any(
+        abs(declared_full_target[result] - matrix_full_target[result]) > 1e-10
+        for result in ("H", "D", "A")
+    ):
+        raise ValueError("HT/FT marginal target provenance does not match model matrix")
+
+    if half_origin == "external_de_vigged_anchor":
+        if not isinstance(anchor_context, dict):
+            raise ValueError(
+                "HT/FT external half-time marginal requires matching anchor_context"
+            )
+        if (
+            half_target.get("de_vigged") is not True
+            or anchor_context.get("kind") != "half_time_current_market"
+            or anchor_context.get("complete") is not True
+            or anchor_context.get("de_vigged") is not True
+            or anchor_context.get("production_pair_mass_gate_validated") is not False
+            or str(anchor_context.get("source") or "").strip()
+            != str(half_target.get("source") or "").strip()
+        ):
+            raise ValueError(
+                "HT/FT ranker anchor_context does not match model marginal provenance"
+            )
+        model_anchor_time = parse_aware_datetime(
+            str(half_target.get("captured_at") or ""),
+            "HT/FT model half-time anchor captured_at",
+        )
+        ranker_anchor_time = parse_aware_datetime(
+            str(anchor_context.get("captured_at") or ""),
+            "HT/FT ranker anchor_context captured_at",
+        )
+        if model_anchor_time.astimezone(timezone.utc) != ranker_anchor_time.astimezone(
+            timezone.utc
+        ):
+            raise ValueError(
+                "HT/FT ranker anchor_context timing does not match model marginal provenance"
+            )
+        anchor_time = model_anchor_time.astimezone(timezone.utc)
+        if anchor_time >= record_kickoff.astimezone(timezone.utc):
+            raise ValueError(
+                "HT/FT external half-time anchor captured_at must be strictly before kickoff"
+            )
+        if anchor_time > archived_at.astimezone(timezone.utc):
+            raise ValueError(
+                "HT/FT external half-time anchor captured_at cannot be after archive time"
+            )
+        if anchor_time > generated_at.astimezone(timezone.utc):
+            raise ValueError(
+                "HT/FT external half-time anchor captured_at cannot be after model generated_at"
+            )
+        validate_market_evidence_freshness(
+            record,
+            model_anchor_time,
+            "HT/FT external half-time anchor captured_at",
+        )
+    elif half_origin == "model_component":
+        if anchor_context is not None:
+            raise ValueError(
+                "HT/FT model-component half-time marginal cannot use anchor_context"
+            )
+    else:
+        raise ValueError("HT/FT observation half-time marginal origin is unsupported")
     half_probabilities = {
         half: math.fsum(
             matrix[f"{half}{full}"] for full in ("H", "D", "A")
@@ -1225,6 +1930,16 @@ def load_htft_observation_audit(
                 "market_probability": scenario.get("market_probability"),
                 "edge_pp": scenario.get("edge_pp"),
                 "ev": scenario.get("ev"),
+                "market_source": (
+                    odds_context.get("source")
+                    if isinstance(odds_context, dict)
+                    else None
+                ),
+                "market_collected_at": (
+                    odds_context.get("captured_at")
+                    if isinstance(odds_context, dict)
+                    else None
+                ),
                 "conditional_stability": scenario.get("conditional_stability"),
                 "state_continuity": scenario.get("state_continuity"),
                 "gates": gates,
@@ -1256,8 +1971,10 @@ def load_htft_observation_audit(
             "artifact_type": model.get("artifact_type"),
             "schema_version": model.get("schema_version"),
             "model_version": model.get("model_version"),
+            "content_hash": joint_scenario_model.content_hash(model),
             "model_hash": model_hash,
             "prediction_hash": prediction_hash,
+            "dataset_manifest_hash": dataset_manifest_hash,
             "artifact_sha256": model_artifact_sha256,
             "artifact_filename": model_path.name,
             "matrix_hash": matrix_hash,
@@ -1269,6 +1986,8 @@ def load_htft_observation_audit(
             "artifact_filename": ranker_path.name,
             "selection_basis": ranker.get("selection_basis"),
             "matrix_mode": ranker.get("matrix_mode"),
+            "anchor_context": deepcopy(anchor_context),
+            "odds_context": deepcopy(odds_context),
             "marginal_validation": deepcopy(marginal_validation),
         },
         "matrix": matrix,
@@ -2100,6 +2819,11 @@ def validate_market_collection_times(
             raise ValueError(f"{market} market_collected_at cannot be in the future")
         if collected >= kickoff:
             raise ValueError(f"{market} market_collected_at must be before kickoff")
+        validate_market_evidence_freshness(
+            record,
+            collected_text,
+            f"{market} market_collected_at",
+        )
 
 
 def parse_exact_score_pick(value: str) -> dict[str, Any]:
@@ -3513,8 +4237,15 @@ def primary_result_for_stats(record: dict[str, Any]) -> str | None:
 
 def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     return {
+        "status": "pending",
+        "settlement_basis": None,
         "analysis_stage": record.get("analysis_stage", "initial"),
         "archived_at": record.get("updated_at", record.get("created_at")),
+        "fixture_id": record.get("match_id"),
+        "match_id": record.get("match_id"),
+        "home_team": record.get("home_team"),
+        "away_team": record.get("away_team"),
+        "kickoff": record.get("kickoff"),
         "page_status": record.get("page_status"),
         "source_kickoff": record.get("source_kickoff"),
         "source_timezone": record.get("source_timezone"),
@@ -3540,6 +4271,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "corner_total_pick": record.get("corner_total_pick"),
         "corner_handicap_pick": record.get("corner_handicap_pick"),
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
+        "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
@@ -3565,6 +4297,11 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "grading_scope": "primary_only",
         "analysis_stage": stage,
         "version_archived_at": record.get("updated_at", record.get("created_at")),
+        "fixture_id": record.get("match_id"),
+        "match_id": record.get("match_id"),
+        "home_team": record.get("home_team"),
+        "away_team": record.get("away_team"),
+        "kickoff": record.get("kickoff"),
         "lineup_rechecked_at": record.get("lineup_rechecked_at"),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
@@ -3585,6 +4322,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
             "corner_handicap": deepcopy(record.get("corner_handicap_pick")),
         },
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
+        "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
         "display_predicted_score": record.get("display_predicted_score"),
@@ -3600,7 +4338,19 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in snapshot.items() if key != "archived_at"}
+    payload = deepcopy(snapshot)
+    payload.pop("archived_at", None)
+    for audit in payload.get("candidate_audits", []):
+        if isinstance(audit, dict):
+            audit.pop("archived_at", None)
+    joint_audit = payload.get("joint_scenario_audit")
+    if isinstance(joint_audit, dict):
+        joint_audit.pop("archived_at", None)
+        joint_audit.pop("audit_hash", None)
+        active_binding = joint_audit.get("active_version_binding")
+        if isinstance(active_binding, dict):
+            active_binding.pop("version_archived_at", None)
+    return payload
 
 
 @locked_history_transaction
@@ -3713,6 +4463,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "corner_total_pick": None,
         "corner_handicap_pick": None,
         "candidate_audits": [],
+        "joint_scenario_audit": None,
         "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
     }
@@ -3722,6 +4473,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     corner_observation = load_corner_observation_audit(args, record)
     if corner_observation is not None:
         record["candidate_audits"].append(corner_observation)
+    validate_candidate_audit_freshness(record)
     validate_probability_triplet(record["probabilities"])
     if args.asian_side:
         record["asian_pick"] = {
@@ -3965,6 +4717,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
 
     provenance = load_score_model_provenance(args)
     record["score_model_provenance"] = provenance
+    record["joint_scenario_audit"] = load_joint_scenario_audit(args, record)
     validate_market_collection_times(record, current)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     if getattr(args, "primary_htft_edge_pp", None) is not None:
@@ -4495,6 +5248,11 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     half_away = int(args.half_away_score) if half_scores_available else None
     if half_scores_available and (half_home < 0 or half_away < 0):
         raise ValueError("Verified half-time scores cannot be negative")
+    if half_scores_available and (half_home > home or half_away > away):
+        raise ValueError(
+            "Verified half-time home/away goals cannot exceed the corresponding "
+            "full-time home/away goals"
+        )
     if primary_market in {"half_time", "htft"} and not half_scores_available:
         raise ValueError(
             "Review refused: a half-time or HT/FT primary requires verified "
@@ -6003,6 +6761,13 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--score-model-file",
         help="UTF-8 JSON score-model snapshot; its exact bytes are SHA-256 archived",
+    )
+    record.add_argument(
+        "--joint-scenario-file",
+        help=(
+            "Validated soccer_joint_scenario_prediction JSON for the same "
+            "fixture; archived as an immutable diagnostic snapshot"
+        ),
     )
     record.add_argument(
         "--htft-observation-model-file",

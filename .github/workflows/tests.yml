@@ -27,6 +27,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install raster test dependencies
+        run: |
+          python -m pip install Pillow==12.2.0
+          sudo apt-get update
+          sudo apt-get install --yes fonts-noto-cjk
+
       - name: Validate skill structure and metadata
         run: |
           python - <<'PY'
@@ -44,6 +50,12 @@ jobs:
               Path("analysis/htft_history_validation.ipynb"),
               Path("scripts/memory_store.py"),
               Path("scripts/score_model.py"),
+              Path("scripts/joint_scenario_model.py"),
+              Path("scripts/joint_path_kernel.py"),
+              Path("scripts/public_market_outlook.py"),
+              Path("scripts/prediction_card_renderer.py"),
+              Path("scripts/review_card_renderer.py"),
+              Path("scripts/plain_text_formatter.py"),
               Path("scripts/history_importer.py"),
               Path("scripts/htft_model.py"),
               Path("scripts/htft_ranker.py"),

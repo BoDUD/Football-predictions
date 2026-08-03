@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import hashlib
+import copy
 import importlib.util
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from xml.etree import ElementTree as ET
 
 
@@ -19,7 +21,7 @@ SPEC.loader.exec_module(renderer)
 
 
 def _payload() -> dict:
-    return {
+    payload = {
         "date": "2026-08-03",
         "title": "今日足球扫盘",
         "subtitle": "赛前综合分析版",
@@ -27,86 +29,190 @@ def _payload() -> dict:
             {
                 "id": "周一001",
                 "archive_match_id": "9001",
+                "archive_stage": "initial",
                 "time": "18:30",
                 "league": "韩K联",
                 "home_team": "主队A",
                 "away_team": "客队B",
-                "total_goals": "2球/3球",
-                "htft": ["胜胜", "平胜"],
-                "scores": ["2:0", "2:1"],
                 "status": "formal_primary",
             },
             {
                 "id": "周一002",
                 "archive_match_id": "9002",
+                "archive_stage": "initial",
                 "time": "20:00",
                 "league": "瑞典超",
                 "home_team": "观察队",
                 "away_team": "样本队",
-                "primary": "平/负",
-                "total_goals": "1球/2球",
-                "htft": ["平平", "平负"],
-                "scores": ["1:1", "1:2"],
+                "primary": "角球大9.5 @0.91",
                 "status": "observation",
             },
             {
                 "id": "周一003",
                 "archive_match_id": "9003",
+                "archive_stage": "initial",
                 "time": "22:00",
                 "league": "英超",
                 "home_team": "待定队",
                 "away_team": "不追队",
                 "primary": "输入内容不会冒充主推",
-                "total_goals": "2球/3球",
-                "htft": ["平平", "胜平"],
-                "scores": ["1:1", "2:1"],
                 "status": "no_bet",
             },
         ],
     }
+    history = _history_index()
+    for row in payload["rows"]:
+        row["archive_version_hash"] = renderer.archive_version_hash(
+            history[row["archive_match_id"]]
+        )
+    return payload
 
 
-def _valid_htft_observation_audit() -> dict:
-    matrix = {
-        "HH": 0.10,
-        "HD": 0.05,
-        "HA": 0.05,
-        "DH": 0.10,
-        "DD": 0.20,
-        "DA": 0.30,
-        "AH": 0.05,
-        "AD": 0.05,
-        "AA": 0.10,
+def _joint_artifact(
+    *,
+    home_team: str = "主队A",
+    away_team: str = "客队B",
+    first: tuple[str, str, float] = ("DD", "1-1", 0.058),
+    second: tuple[str, str, float] = ("AA", "1-2", 0.045),
+    third: tuple[str, str, float] | None = None,
+) -> dict:
+    base_audit = {
+        "provenance": "validated_joint_cells",
+        "probability_mode": "model_only",
+        "status": "model_probability_reference",
+        "recommendation_eligible": False,
+        "template_fallback_allowed": False,
     }
-    matrix_bytes = json.dumps(
-        matrix,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii")
+    audits = {
+        field: dict(base_audit)
+        for field in ("htft_marginal", "one_x_two", "goal_ranges", "btts")
+    }
+    audits["joint_top_two"] = {
+        "provenance": "validated_joint_cells_probability_ranking",
+        "probability_mode": "model_only",
+        "status": "high_variance_reference",
+        "recommendation_eligible": False,
+        "template_fallback_allowed": False,
+    }
+
+    def event(slot: int, value: tuple[str, str, float]) -> dict:
+        home_goals, away_goals = (int(item) for item in value[1].split("-"))
+        return {
+            "slot": slot,
+            "htft": value[0],
+            "score": value[1],
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+            "probability": value[2],
+            "status": "high_variance_reference",
+            "recommendation_eligible": False,
+            "counts_toward_primary_record": False,
+            "odds_available": False,
+        }
+
+    ranked_values = [first, second] + ([third] if third is not None else [])
+    used = {(value[0], value[1]) for value in ranked_values}
+    filler_keys: list[tuple[str, str]] = []
+    for home_goals in range(7):
+        for away_goals in range(7):
+            full = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            score = f"{home_goals}-{away_goals}"
+            for half in ("H", "D", "A"):
+                key = (half + full, score)
+                if key not in used:
+                    filler_keys.append(key)
+            if len(filler_keys) >= 60:
+                break
+        if len(filler_keys) >= 60:
+            break
+    remainder = 1.0 - sum(value[2] for value in ranked_values)
+    assert remainder > 0.0
+    filler_probability = remainder / len(filler_keys)
+    assert filler_probability < second[2]
+
+    joint_cells = []
+    for value in ranked_values:
+        home_goals, away_goals = (int(item) for item in value[1].split("-"))
+        joint_cells.append(
+            {
+                "htft": value[0],
+                "score": value[1],
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "probability": value[2],
+            }
+        )
+    for htft, score in filler_keys:
+        home_goals, away_goals = (int(item) for item in score.split("-"))
+        joint_cells.append(
+            {
+                "htft": htft,
+                "score": score,
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "probability": filler_probability,
+            }
+        )
+
     return {
-        "schema_version": renderer.memory_store.OBSERVATION_SCHEMA_VERSION,
-        "market": "htft",
+        "schema_version": renderer.public_market_outlook.joint_scenario_model.LEGACY_SCHEMA_VERSION,
+        "model_version": renderer.public_market_outlook.joint_scenario_model.LEGACY_MODEL_VERSION,
+        "prediction_hash": "sha256:" + "a" * 64,
+        "probability_mode": "model_only",
+        "formal_eligible": False,
+        "fixture": {
+            "home_team": home_team,
+            "away_team": away_team,
+            "kickoff": "2026-08-03T09:30:00Z",
+        },
+        "joint_top_two": [event(1, first), event(2, second)],
+        "joint_cells": joint_cells,
+        "htft_marginal": {
+            "half_time_result_probabilities": {"H": 0.40, "D": 0.35, "A": 0.25},
+            "full_time_result_probabilities": {"H": 0.42, "D": 0.31, "A": 0.27},
+        },
+        "derived": {
+            "one_x_two": {"home": 0.42, "draw": 0.31, "away": 0.27},
+            "total_goals_distribution": {
+                "0": 0.05,
+                "1": 0.15,
+                "2": 0.32,
+                "3": 0.28,
+                "4": 0.20,
+            },
+            "goal_ranges": {"0-1": 0.20, "2-3": 0.60, "4-6": 0.20, "7+": 0.0},
+            "btts": {"yes": 0.47, "no": 0.53},
+        },
+        "derived_field_audits": audits,
+    }
+
+
+def _valid_corner_observation_audit() -> dict:
+    return {
+        "_renderer_test_valid": True,
+        "kind": renderer.memory_store.CORNER_OBSERVATION_KIND,
+        "market": "corner_markets",
         "status": "observation_only",
         "counts_toward_primary_record": False,
         "monetary_scope": "none",
-        "model": {
-            "model_hash": "sha256:" + "1" * 64,
-            "prediction_hash": "sha256:" + "2" * 64,
-            "artifact_sha256": "sha256:" + "3" * 64,
-            "matrix_hash": "sha256:" + hashlib.sha256(matrix_bytes).hexdigest(),
+        "best_observation": {
+            "market": "corner_total",
+            "side": "over",
+            "line": 9.5,
+            "odds": 0.91,
+            "diagnostic_qualification_status": "qualified",
         },
-        "matrix": matrix,
+    }
+
+
+def _legacy_htft_observation_audit() -> dict:
+    return {
+        "_renderer_test_valid": True,
+        "market": "htft",
         "top_two": [
-            {"selection": "DA", "probability": 0.30, "gates": []},
-            {"selection": "DD", "probability": 0.20, "gates": []},
+            {"selection": "DA", "probability": 0.30},
+            {"selection": "DD", "probability": 0.20},
         ],
-        "provenance": {
-            "strict_forward_oos": True,
-            "fixture_validated": True,
-            "generated_before_kickoff": True,
-            "training_cutoff_before_kickoff": True,
-        },
     }
 
 
@@ -116,29 +222,59 @@ def _history() -> list[dict]:
             "match_id": "9001",
             "mode": "prematch",
             "status": "pending",
+            "analysis_stage": "initial",
+            "created_at": "2026-08-03T00:00:00Z",
+            "updated_at": "2026-08-03T00:10:00Z",
+            "kickoff": "2026-08-03T09:30:00Z",
+            "user_timezone": "Asia/Tokyo",
+            "league_key": "韩K联",
             "home_team": "主队A",
             "away_team": "客队B",
             "primary_market": "total",
             "primary_pick": {"side": "under", "line": 2.5, "odds": 0.92},
+            "candidate_audits": [_valid_corner_observation_audit()],
+            "display_exact_score_picks": [{"score": "9-9"}, {"score": "8-8"}],
+            "_validated_joint_artifact": _joint_artifact(),
         },
         {
             "match_id": "9002",
             "mode": "prematch",
             "status": "pending",
+            "analysis_stage": "initial",
+            "created_at": "2026-08-03T00:00:00Z",
+            "updated_at": "2026-08-03T00:10:00Z",
+            "kickoff": "2026-08-03T11:00:00Z",
+            "user_timezone": "Asia/Tokyo",
+            "league_key": "瑞典超",
             "home_team": "观察队",
             "away_team": "样本队",
             "primary_market": None,
             "primary_pick": None,
-            "candidate_audits": [_valid_htft_observation_audit()],
+            "candidate_audits": [_valid_corner_observation_audit()],
+            "display_exact_score_picks": [{"score": "7-7"}, {"score": "6-6"}],
+            "_validated_joint_artifact": _joint_artifact(
+                home_team="观察队", away_team="样本队"
+            ),
         },
         {
             "match_id": "9003",
             "mode": "prematch",
             "status": "pending",
+            "analysis_stage": "initial",
+            "created_at": "2026-08-03T00:00:00Z",
+            "updated_at": "2026-08-03T00:10:00Z",
+            "kickoff": "2026-08-03T13:00:00Z",
+            "user_timezone": "Asia/Tokyo",
+            "league_key": "英超",
             "home_team": "待定队",
             "away_team": "不追队",
             "primary_market": None,
             "primary_pick": None,
+            "candidate_audits": [_valid_corner_observation_audit()],
+            "display_exact_score_picks": [{"score": "5-5"}, {"score": "4-4"}],
+            "_validated_joint_artifact": _joint_artifact(
+                home_team="待定队", away_team="不追队"
+            ),
         },
     ]
 
@@ -147,7 +283,41 @@ def _history_index() -> dict[str, dict]:
     return {record["match_id"]: record for record in _history()}
 
 
+def _rebind_row(payload: dict, row_index: int, history: dict[str, dict]) -> None:
+    row = payload["rows"][row_index]
+    record = history[row["archive_match_id"]]
+    row["archive_version_hash"] = renderer.archive_version_hash(record)
+
+
+def _validated_joint_scenario_audit(record: dict) -> dict | None:
+    artifact = record.get("_validated_joint_artifact")
+    return artifact if isinstance(artifact, dict) else None
+
+
 class PredictionCardRendererTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = mock.patch.object(
+            renderer.memory_store,
+            "validated_joint_scenario_audit",
+            side_effect=_validated_joint_scenario_audit,
+            create=True,
+        )
+        self.validated_joint = patcher.start()
+        self.addCleanup(patcher.stop)
+        observation_patcher = mock.patch.object(
+            renderer.memory_store,
+            "validated_observation_audit",
+            side_effect=lambda audit: audit.get("_renderer_test_valid") is True,
+        )
+        self.validated_observation = observation_patcher.start()
+        self.addCleanup(observation_patcher.stop)
+        joint_validator_patcher = mock.patch.object(
+            renderer.public_market_outlook.joint_scenario_model,
+            "validate_prediction",
+        )
+        self.joint_validator = joint_validator_patcher.start()
+        self.addCleanup(joint_validator_patcher.stop)
+
     def test_star_is_archive_derived_and_cannot_be_supplied(self) -> None:
         payload = _payload()
         payload["rows"][0]["star"] = True
@@ -162,11 +332,15 @@ class PredictionCardRendererTests(unittest.TestCase):
 
     def test_formal_status_requires_matching_active_archive_primary(self) -> None:
         payload = _payload()
+        history = _history_index()
         payload["rows"][0]["archive_match_id"] = "9002"
         payload["rows"][0]["home_team"] = "观察队"
         payload["rows"][0]["away_team"] = "样本队"
+        payload["rows"][0]["time"] = "20:00"
+        payload["rows"][0]["league"] = "瑞典超"
+        _rebind_row(payload, 0, history)
         with self.assertRaisesRegex(ValueError, "without an archived primary_pick"):
-            renderer.validate_payload(payload, _history_index())
+            renderer.validate_payload(payload, history)
 
         payload = _payload()
         payload["rows"][0]["status"] = "observation"
@@ -178,42 +352,173 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         history = _history_index()
         history["9002"].pop("candidate_audits")
+        _rebind_row(payload, 1, history)
         with self.assertRaisesRegex(ValueError, "without validated candidate_audits"):
             renderer.validate_payload(payload, history)
 
+        payload = _payload()
         history = _history_index()
-        history["9002"]["candidate_audits"] = [
-            {
-                "market": "htft",
-                "status": "observation_only",
-                "top_two": [{"selection": "DA"}],
-            }
-        ]
+        history["9002"]["candidate_audits"] = [_legacy_htft_observation_audit()]
+        _rebind_row(payload, 1, history)
         with self.assertRaisesRegex(ValueError, "without validated candidate_audits"):
             renderer.validate_payload(payload, history)
 
     def test_observation_text_must_match_the_archived_best_candidate(self) -> None:
         payload = _payload()
-        payload["rows"][1]["primary"] = "主/客"
+        payload["rows"][1]["primary"] = "角球小9.5 @0.91"
         with self.assertRaisesRegex(ValueError, "archived best observation"):
             renderer.validate_payload(payload, _history_index())
 
         card = renderer.validate_payload(_payload(), _history_index())
-        self.assertEqual(card.rows[1].primary, "◇ 平/负")
+        self.assertEqual(card.rows[1].primary, "◇ 角球大9.5 @0.91")
         self.assertFalse(card.rows[1].star)
+
+    def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(self) -> None:
+        payload = _payload()
+        history = _history_index()
+        history["9002"]["candidate_audits"][0]["best_observation"][
+            "diagnostic_qualification_status"
+        ] = "unqualified"
+        _rebind_row(payload, 1, history)
+        with self.assertRaisesRegex(ValueError, "without validated candidate_audits"):
+            renderer.validate_payload(payload, history)
+
+    def test_row_is_bound_to_exact_archive_stage_hash_time_and_league(self) -> None:
+        payload = _payload()
+        payload["rows"] = payload["rows"][:1]
+        history = _history_index()
+
+        tampered = copy.deepcopy(payload)
+        tampered["rows"][0]["archive_version_hash"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "does not match the selected archived version"):
+            renderer.validate_payload(tampered, history)
+
+        wrong_time = copy.deepcopy(payload)
+        wrong_time["rows"][0]["time"] = "18:31"
+        with self.assertRaisesRegex(ValueError, "time does not match"):
+            renderer.validate_payload(wrong_time, history)
+
+        wrong_league = copy.deepcopy(payload)
+        wrong_league["rows"][0]["league"] = "芬超"
+        with self.assertRaisesRegex(ValueError, "league does not match"):
+            renderer.validate_payload(wrong_league, history)
+
+    def test_initial_card_cannot_leak_active_lineup_version(self) -> None:
+        history = _history_index()
+        active = history["9001"]
+        initial = renderer.memory_store.revision_snapshot(active)
+        initial["_validated_joint_artifact"] = copy.deepcopy(
+            active["_validated_joint_artifact"]
+        )
+        active["revisions"] = [initial]
+        active["analysis_stage"] = "lineup-check"
+        active["updated_at"] = "2026-08-03T09:10:00Z"
+        active["lineup_rechecked_at"] = "2026-08-03T09:10:00Z"
+        active["primary_market"] = "asian"
+        active["primary_pick"] = {
+            "side": "away",
+            "line": 0.5,
+            "odds": 0.95,
+            "role": "primary",
+        }
+        active["_validated_joint_artifact"] = _joint_artifact(
+            first=("HH", "2-0", 0.20),
+            second=("HD", "1-1", 0.10),
+        )
+
+        payload = _payload()
+        payload["rows"] = payload["rows"][:1]
+        payload["rows"][0]["archive_stage"] = "initial"
+        initial_version = renderer._select_archived_version(
+            active, "initial", "rows[0]"
+        )
+        payload["rows"][0]["archive_version_hash"] = renderer.archive_version_hash(
+            initial_version
+        )
+        card = renderer.validate_payload(payload, history)
+        self.assertEqual(card.rows[0].primary, "小2.5 @0.92")
+        self.assertIn("平平 5.8%", card.rows[0].htft)
+        self.assertIn("1-1 5.8%", card.rows[0].scores)
+        self.assertNotIn("胜胜", card.rows[0].htft)
+        self.assertNotIn("2-0", card.rows[0].scores)
+
+    def test_payload_cannot_supply_archive_derived_market_fields(self) -> None:
+        forbidden_values = {
+            "total_goals": "2球/3球",
+            "htft": ["平平", "负负"],
+            "scores": ["1-1", "1-2"],
+            "one_x_two": "胜/平/负",
+            "joint_scenarios": ["平平·1-1", "负负·1-2"],
+        }
+        for field, value in forbidden_values.items():
+            with self.subTest(field=field):
+                payload = _payload()
+                payload["rows"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "must not be supplied"):
+                    renderer.validate_payload(payload, _history_index())
+
+    def test_joint_market_columns_come_only_from_validated_artifact(self) -> None:
+        history = _history_index()
+        card = renderer.validate_payload(_payload(), history)
+        first = card.rows[0]
+        self.assertEqual(first.total_goals, "2-3球 60.0%\n明确·领先40.0pp")
+        self.assertEqual(first.htft, "平平 5.8%\n负负 4.5%")
+        self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
+        self.assertEqual(self.validated_joint.call_count, 3)
+
+        svg = renderer.render_svg(card)
+        for label in ("主推", "总进球", "半全场", "波胆"):
+            self.assertIn(label, svg)
+        self.assertIn("平平 5.8%", svg)
+        self.assertIn("1-1 5.8%", svg)
+        self.assertNotIn("胜平负", svg)
+        self.assertNotIn("BTTS", svg)
+        self.assertNotIn("9-9", svg)
+
+    def test_complex_joint_distribution_displays_three_paired_items(self) -> None:
+        history = _history_index()
+        history["9001"]["_validated_joint_artifact"] = _joint_artifact(
+            first=("DD", "1-1", 0.058),
+            second=("HH", "2-1", 0.045),
+            third=("DA", "1-2", 0.040),
+        )
+        _rebind_row(_payload(), 0, history)
+        payload = _payload()
+        _rebind_row(payload, 0, history)
+        row = renderer.validate_payload(payload, history).rows[0]
+        self.assertEqual(row.htft.splitlines(), ["平平 5.8%", "胜胜 4.5%", "平负 4.0%"])
+        self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "2-1 4.5%", "1-2 4.0%"])
+
+    def test_missing_or_malformed_joint_artifact_fails_closed(self) -> None:
+        for malformed in (None, {}, {"joint_top_two": []}):
+            with self.subTest(malformed=malformed):
+                history = _history_index()
+                history["9003"]["_validated_joint_artifact"] = malformed
+                card = renderer.validate_payload(_payload(), history)
+                row = card.rows[2]
+                self.assertEqual(row.total_goals, "数据不足")
+                self.assertEqual(row.htft, "数据不足")
+                self.assertEqual(row.scores, "数据不足")
+                self.assertNotIn("5-5", renderer.render_svg(card))
+
+    def test_mismatched_derived_probabilities_fail_closed_as_one_unit(self) -> None:
+        history = _history_index()
+        artifact = copy.deepcopy(history["9001"]["_validated_joint_artifact"])
+        artifact["derived"]["one_x_two"]["home"] = 0.99
+        history["9001"]["_validated_joint_artifact"] = artifact
+        card = renderer.validate_payload(_payload(), history)
+        self.assertEqual(
+            (
+                card.rows[0].total_goals,
+                card.rows[0].htft,
+                card.rows[0].scores,
+            ),
+            ("数据不足", "数据不足", "数据不足"),
+        )
 
     def test_history_is_required(self) -> None:
         with self.assertRaisesRegex(ValueError, "prediction history is required"):
             renderer.validate_payload(_payload())
-
-    def test_htft_and_scores_require_exactly_two_values(self) -> None:
-        for field in ("htft", "scores"):
-            for values in (["only-one"], ["one", "two", "three"], "one/two"):
-                with self.subTest(field=field, values=values):
-                    payload = _payload()
-                    payload["rows"][0][field] = values
-                    with self.assertRaisesRegex(ValueError, "exactly two"):
-                        renderer.validate_payload(payload, _history_index())
 
     def test_status_allowlist_is_strict(self) -> None:
         payload = _payload()
@@ -227,6 +532,7 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload["rows"][0]["home_team"] = "红&蓝<队>"
         history = _history_index()
         history["9001"]["home_team"] = "红&蓝<队>"
+        _rebind_row(payload, 0, history)
         card = renderer.validate_payload(payload, history)
         svg = renderer.render_svg(card)
 
@@ -234,9 +540,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
         self.assertIn("A&amp;B &lt;精选&gt;", svg)
         self.assertIn("红&amp;蓝&lt;队&gt;", svg)
-        self.assertIn("小2.5 @0.92<tspan", svg)
+        self.assertIn("小2.5 @0.92 ★", svg)
         self.assertIn("★", svg)
-        self.assertIn("◇ 平/负", svg)
+        self.assertIn("◇ 角球大9.5 @0.91", svg)
         self.assertIn("无正式推荐", svg)
         self.assertNotIn("输入内容不会冒充主推", svg)
 
@@ -261,6 +567,38 @@ class PredictionCardRendererTests(unittest.TestCase):
             )
             self.assertEqual(int(xml.attrib["height"]), expected)
 
+    def test_svg_footer_explains_pairing_and_stays_inside_panel(self) -> None:
+        card = renderer.validate_payload(_payload(), _history_index())
+        root = ET.fromstring(renderer.render_svg(card))
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        panel = next(
+            node
+            for node in root.findall("svg:rect", namespace)
+            if node.attrib.get("x") == str(renderer.SIDE_MARGIN)
+            and node.attrib.get("y") == str(renderer.PANEL_VERTICAL_MARGIN)
+        )
+        footnote = next(
+            node
+            for node in root.findall("svg:text", namespace)
+            if "半全场与波胆按同序联合事件配对" in (node.text or "")
+        )
+        self.assertIn("总进球只显示最高概率区间", footnote.text or "")
+        self.assertIn("联合路径概率", footnote.text or "")
+        panel_bottom = int(panel.attrib["y"]) + int(panel.attrib["height"])
+        self.assertGreaterEqual(panel_bottom - int(footnote.attrib["y"]), 30)
+
+    def test_long_content_wraps_without_any_ellipsis(self) -> None:
+        payload = _payload()
+        history = _history_index()
+        long_home = "非常非常长而且必须完整显示的主队名称足球俱乐部"
+        payload["rows"][0]["home_team"] = long_home
+        history["9001"]["home_team"] = long_home
+        _rebind_row(payload, 0, history)
+        svg = renderer.render_svg(renderer.validate_payload(payload, history))
+        self.assertIn(long_home, "".join(ET.fromstring(svg).itertext()))
+        self.assertNotIn("…", svg)
+        self.assertNotIn("...", svg)
+
     def test_png_output_when_pillow_is_available(self) -> None:
         try:
             from PIL import Image
@@ -281,6 +619,50 @@ class PredictionCardRendererTests(unittest.TestCase):
                     image.size,
                     (renderer.WIDTH, renderer.validate_payload(_payload(), _history_index()).height),
                 )
+
+    def test_png_footer_text_stays_inside_panel_for_short_and_multirow_cards(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+
+        for row_count in (1, 3):
+            with self.subTest(row_count=row_count):
+                payload = _payload()
+                payload["rows"] = payload["rows"][:row_count]
+                card = renderer.validate_payload(payload, _history_index())
+                with Image.open(BytesIO(renderer.render_raster(card, "PNG"))) as image:
+                    pixels = image.load()
+                    table_bottom = (
+                        renderer.TITLE_HEIGHT
+                        + renderer.HEADER_HEIGHT
+                        + row_count * renderer.ROW_HEIGHT
+                    )
+                    footer_start = table_bottom + 80
+                    muted = tuple(
+                        int(renderer.COLORS["muted"][offset : offset + 2], 16)
+                        for offset in (1, 3, 5)
+                    )
+                    warning = tuple(
+                        int(renderer.COLORS["warning"][offset : offset + 2], 16)
+                        for offset in (1, 3, 5)
+                    )
+                    muted_rows = [
+                        y
+                        for y in range(footer_start, card.height)
+                        if any(pixels[x, y] == muted for x in range(72, renderer.WIDTH - 72))
+                    ]
+                    warning_rows = [
+                        y
+                        for y in range(footer_start, card.height)
+                        if any(pixels[x, y] == warning for x in range(72, renderer.WIDTH - 72))
+                    ]
+
+                self.assertTrue(muted_rows)
+                self.assertTrue(warning_rows)
+                panel_bottom = card.height - renderer.PANEL_VERTICAL_MARGIN
+                self.assertGreaterEqual(panel_bottom - max(muted_rows), 20)
+                self.assertGreaterEqual(min(muted_rows) - max(warning_rows), 10)
 
 
 if __name__ == "__main__":

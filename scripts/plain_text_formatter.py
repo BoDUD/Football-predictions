@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -17,6 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import memory_store
+import public_market_outlook
 
 
 RESULT_LABELS = {
@@ -27,6 +29,24 @@ RESULT_LABELS = {
     "loss": "黑",
 }
 HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
+HTFT_SCENARIO_LABELS = {"H": "胜", "D": "平", "A": "负"}
+ONE_X_TWO_LABELS = {"home": "主胜", "draw": "平局", "away": "客胜"}
+BTTS_LABELS = {"yes": "是", "no": "否"}
+LEAGUE_DISPLAY_LABELS = {
+    "finland_veikkausliiga": "芬超",
+    "finlandveikkausliiga": "芬超",
+    "korea_k_league_1": "韩K联",
+    "koreakleague1": "韩K联",
+    "sweden_allsvenskan": "瑞典超",
+    "swedenallsvenskan": "瑞典超",
+    "england_premier_league": "英超",
+    "france_ligue_1": "法甲",
+    "spain_la_liga": "西甲",
+    "germany_bundesliga": "德甲",
+    "italy_serie_a": "意甲",
+    "uefa_champions_league": "欧冠",
+    "afc_champions_league": "亚冠",
+}
 OBSERVATION_GATE_LABELS = {
     "complete_current_market": "完整当前9路赔率",
     "odds_provenance": "赛前赔率来源时间戳",
@@ -111,6 +131,18 @@ def format_time(value: Any, timezone_name: str = "Asia/Tokyo") -> str:
         return clean_text(value)
 
 
+def league_display_name(record: dict[str, Any]) -> str:
+    """Return a stable user-facing league name instead of an internal key."""
+
+    raw = str(record.get("league_key") or memory_store.league_key_for_record(record) or "").strip()
+    normalized = re.sub(r"[\s-]+", "_", raw.casefold())
+    compact = normalized.replace("_", "")
+    return LEAGUE_DISPLAY_LABELS.get(
+        normalized,
+        LEAGUE_DISPLAY_LABELS.get(compact, raw or "未取得"),
+    )
+
+
 def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[str, Any]) -> str:
     if not market or not isinstance(pick, dict):
         return "无正式推荐"
@@ -172,8 +204,105 @@ def select_version(record: dict[str, Any], kind: str) -> dict[str, Any]:
 
 def merged_version(record: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
     merged = dict(record)
+    # A later lineup-check artifact must never leak into a historical initial
+    # rendering merely because an old revision predates the joint schema.
+    if version is not record and "joint_scenario_audit" not in version:
+        merged["joint_scenario_audit"] = None
     merged.update(version)
     return merged
+
+
+def _top_probability(
+    value: Any, order: tuple[str, ...]
+) -> tuple[str, float] | None:
+    if not isinstance(value, dict) or not value:
+        return None
+    candidates: list[tuple[str, float]] = []
+    for key, raw_probability in value.items():
+        try:
+            probability = float(raw_probability)
+        except (TypeError, ValueError):
+            return None
+        candidates.append((str(key), probability))
+    order_index = {key: index for index, key in enumerate(order)}
+    return min(
+        candidates,
+        key=lambda item: (-item[1], order_index.get(item[0], len(order)), item[0]),
+    )
+
+
+def _insufficient_joint_outlook() -> dict[str, str]:
+    return {
+        "half_time": "数据不足",
+        "one_x_two": "数据不足",
+        "goal_range": "数据不足",
+        "btts": "数据不足",
+        "scenarios": "数据不足",
+        "source": "未取得可验证联合模型",
+    }
+
+
+def _format_public_market(
+    market: dict[str, Any], labels: dict[str, str] | None = None
+) -> str:
+    raw_items = market.get("display_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("public market display selection is incomplete")
+    ranked = list(raw_items)
+    values = " / ".join(
+        f"{(labels or {}).get(str(item.get('code')), clean_text(item.get('label')))}"
+        f"{percentage(item.get('probability'))}"
+        for item in ranked
+    )
+    gap = float(market.get("gap_percentage_points"))
+    clarity = "较明确" if market.get("clarity") == "clear" else "分歧"
+    gap_label = "领先第二名" if len(ranked) == 1 else "前二差"
+    return f"{values}（{clarity}，{gap_label}{gap:.1f}个百分点）"
+
+
+def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
+    """Return every descriptive football field from one validated artifact.
+
+    The formatter intentionally has no legacy fallback.  Independent HT/FT
+    and exact-score lists remain in the archive for review diagnostics only.
+    """
+
+    artifact = memory_store.validated_joint_scenario_audit(version)
+    if not isinstance(artifact, dict):
+        return _insufficient_joint_outlook()
+    try:
+        public = public_market_outlook.build_public_market_outlook(artifact)
+        markets = public["markets"]
+        scenarios = public["joint_scenarios"]
+        scenario_items = scenarios["items"]
+        scenario_text = " / ".join(
+            f"{''.join(HTFT_SCENARIO_LABELS[char] for char in item['htft'])}·"
+            f"{item['score']} {percentage(item['probability'])}"
+            for item in scenario_items
+        )
+        mode = public.get("probability_mode")
+        source = (
+            "纯模型（未混入过期盘口）"
+            if mode == "model_only"
+            else "模型＋有效半场市场锚"
+            if mode == "upstream_half_time_market_anchor"
+            else clean_text(mode)
+        )
+        return {
+            "half_time": _format_public_market(
+                markets["half_time"], {"H": "主胜", "D": "平", "A": "客胜"}
+            ),
+            "one_x_two": _format_public_market(
+                markets["one_x_two"],
+                {"home": "主胜", "draw": "平", "away": "客胜"},
+            ),
+            "goal_range": _format_public_market(markets["goal_ranges"]),
+            "btts": _format_public_market(markets["btts"]),
+            "scenarios": f"高方差参考（不作推荐）：{scenario_text}",
+            "source": source,
+        }
+    except (KeyError, TypeError, ValueError, public_market_outlook.PublicMarketOutlookError):
+        return _insufficient_joint_outlook()
 
 
 def exact_scores(version: dict[str, Any]) -> str:
@@ -250,12 +379,56 @@ def secondary_picks(version: dict[str, Any], record: dict[str, Any]) -> str:
     primary_identity = memory_store.pick_identity(
         version.get("primary_market"), resolved_primary_pick(version)
     )
-    values = []
-    for market, pick in memory_store.formal_picks(version):
+    ranked_values: list[tuple[float, int, str]] = []
+    for sequence_index, (market, pick) in enumerate(memory_store.formal_picks(version)):
         if memory_store.pick_identity(market, pick) == primary_identity:
             continue
-        values.append(format_pick(market, pick, record))
+        try:
+            rank = float(pick.get("confidence_rank"))
+        except (TypeError, ValueError):
+            rank = math.inf
+        ranked_values.append(
+            (rank, sequence_index, format_pick(market, pick, record))
+        )
+    values = [
+        item[2] for item in sorted(ranked_values, key=lambda item: (item[0], item[1]))
+    ]
     return "、".join(values) if values else "无"
+
+
+def structured_analysis_summary(version: dict[str, Any]) -> str:
+    """Produce a non-directional summary that cannot bypass pick gates."""
+
+    if isinstance(resolved_primary_pick(version), dict):
+        return "正式主推来自归档门控；其余字段仅描述同一冻结联合分布"
+    return "无正式方向；各字段仅报告同一冻结联合分布及分歧"
+
+
+def structured_evidence_summary(version: dict[str, Any]) -> str:
+    """Expose factual evidence coverage without printing free-form betting prose."""
+
+    quality = {
+        "high": "高",
+        "medium": "中",
+        "low": "低",
+        "unknown": "未知",
+    }.get(str(version.get("data_quality") or "unknown").casefold(), "未知")
+    evidence = version.get("guardrail_evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    checks = (
+        ("首发", "lineup_confirmed"),
+        ("基本面", "fundamental_supported"),
+        ("机会质量", "chance_quality_supported"),
+        ("进攻部署", "attack_configuration_supported"),
+        ("对手尾部风险", "opponent_tail_risk_checked"),
+    )
+    parts = [f"数据质量{quality}"]
+    parts.extend(
+        f"{label}{'已核' if evidence.get(key) is True else '未确认'}"
+        for label, key in checks
+    )
+    return "；".join(parts)
 
 
 def half_time_text(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -348,19 +521,22 @@ def validate_plain_text(lines: list[str]) -> str:
 def render_initial(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "initial"))
     primary = version.get("primary_pick") if isinstance(version.get("primary_pick"), dict) else {}
+    outlook = joint_outlook(version)
     return validate_plain_text([
         f"【初盘分析｜{record.get('match_id')}】",
-        f"赛事：{record.get('league_key') or memory_store.league_key_for_record(record)}",
+        f"赛事：{league_display_name(record)}",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
         f"开赛：{format_time(record.get('kickoff'))}",
         f"主推：{primary_line(version, record)}",
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
         f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
-        f"半场：{half_time_text(version, record)}",
-        f"半全场：{htft_text(version, record)}",
-        f"比分参考：{exact_scores(version)}",
-        f"核心判断：{display_text(version, 'recommendation')}",
-        f"风险：{display_text(version, 'notes')}",
+        f"半场倾向：{outlook['half_time']}",
+        f"胜平负：{outlook['one_x_two']}",
+        f"总进球：{outlook['goal_range']}",
+        f"双方进球：{outlook['btts']}",
+        f"联合情景：{outlook['scenarios']}",
+        f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
+        f"证据状态：{structured_evidence_summary(version)}",
         "仅供数据分析参考",
     ])
 
@@ -368,6 +544,7 @@ def render_initial(record: dict[str, Any]) -> str:
 def render_lineup(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "lineup-check"))
     primary = version.get("primary_pick") if isinstance(version.get("primary_pick"), dict) else {}
+    outlook = joint_outlook(version)
     change = version.get("primary_change") if isinstance(version.get("primary_change"), dict) else {}
     status = change.get("status")
     if status == "maintained":
@@ -382,7 +559,7 @@ def render_lineup(record: dict[str, Any]) -> str:
             change_line = f"主推变更：{previous_text} → {primary_line(version, record)}"
     return validate_plain_text([
         f"【临场分析｜{record.get('match_id')}】",
-        f"赛事：{record.get('league_key') or memory_store.league_key_for_record(record)}",
+        f"赛事：{league_display_name(record)}",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
         f"检查时间：{format_time(record.get('lineup_rechecked_at'))}",
         "比赛状态：赛前，临场版本已归档",
@@ -390,11 +567,13 @@ def render_lineup(record: dict[str, Any]) -> str:
         f"当前主推：{primary_line(version, record)}",
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
         f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
-        f"半场：{half_time_text(version, record)}",
-        f"半全场：{htft_text(version, record)}",
-        f"比分参考：{exact_scores(version)}",
-        f"临场判断：{display_text(version, 'recommendation')}",
-        f"风险：{display_text(version, 'notes')}",
+        f"半场倾向：{outlook['half_time']}",
+        f"胜平负：{outlook['one_x_two']}",
+        f"总进球：{outlook['goal_range']}",
+        f"双方进球：{outlook['btts']}",
+        f"联合情景：{outlook['scenarios']}",
+        f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
+        f"证据状态：{structured_evidence_summary(version)}",
         "仅供数据分析参考",
     ])
 

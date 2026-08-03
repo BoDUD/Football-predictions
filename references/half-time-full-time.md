@@ -4,7 +4,8 @@ Use this guide whenever a prediction includes first-half or half-time/full-time 
 
 These markets remain `observation_only` in the strict forward policy until clean live-forward
 records with executable prices support a later policy version. The audited historical league
-data now support a versioned nine-class model and evidence-based two-scenario selector, but
+data support a versioned nine-class marginal model. User-facing scenarios, however, must come
+from a unified match-path posterior that jointly represents HT/FT and the full-time score;
 historical probability accuracy is not betting ROI and does not by itself unlock a formal
 HT/FT primary.
 
@@ -46,6 +47,14 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
    conflicting full-time probability views.
 6. Require the HT/FT full-time marginal to match the canonical full-score artifact. The HT/FT
    model supplies association structure; it does not create a conflicting full-time forecast.
+7. For user-facing output, build a versioned non-negative path posterior over half-time and
+   second-half goal counts. It must reproduce the canonical full-time exact-score marginal,
+   the verified half-time marginal, and the HT/FT 3x3 matrix within declared tolerances. Store
+   input hashes, construction version, convergence, normalization, and tail audits.
+8. Aggregate that path posterior to genuine `(HT/FT × full-time score)` joint events and show
+   exactly the two largest joint probabilities. Derive 1X2, total goals, goal range, and BTTS
+   from the same posterior. Never multiply HT/FT and score marginals, place their independent
+   Top 2 lists side by side, or replace a score to force terminal-result agreement.
 
 Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/full-time draw; `DA` = half-time draw/full-time away win.
 
@@ -55,7 +64,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Hong Kong odds: `EV = probability * hk_odds - (1 - probability)`.
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
-- Recommend at most one first-half direction. For HT/FT, always output exactly two probability-selected scenarios whenever a valid nine-outcome model matrix is available.
+- Recommend at most one first-half direction. A valid nine-outcome matrix may retain its own Top 2 for internal component diagnostics, but the user-facing output contains exactly two unified joint events only when a valid match-path posterior is available.
 - While the strict policy keeps these markets paused, label every first-half/HTFT direction as observation even when its price and heuristic EV look positive.
 - A future policy version may make first-half advice actionable only after a versioned model, current complete market, positive server-recalculated EV/edge, medium/high data quality, and lineup-time survival all pass.
 - A future HT/FT formal path additionally requires a normalized supported `league_key`, a complete current nine-outcome market from at least five bookmakers, verified row/column marginals, and adequate clean live-forward calibration. Changing the display/ranking heuristic alone cannot unlock it.
@@ -64,14 +73,17 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
   the same market snapshot, with source and pre-kickoff collection time. Derive the no-vig
   market probabilities internally from that complete set; a caller-supplied probability
   vector plus only some outcome prices remains incomplete and cannot qualify either scenario.
-- Use `scripts/htft_ranker.py` and `probability_top2_v3_post_selection`. Select the two largest
-  joint-probability cells with canonical outcome order as the deterministic tie-break.
+- Use `scripts/htft_ranker.py` and `probability_top2_v3_post_selection` for the archived HT/FT
+  component diagnostic. Select the two largest
+  joint-probability cells with canonical outcome order as the deterministic tie-break for that
+  diagnostic only.
   `scenario_stability_v2` is not an accepted selector. Earlier selector comparisons were
   inspected during development, so do not carry their percentages into the expanded bundle
   or describe them as untouched end-to-end confirmation.
 - Conditional follow-through, state continuity, full-time coherence, and exact-score result
-  agreement remain visible audits but cannot replace a probability Top-2 cell. EV and price
-  also cannot choose either slot.
+  agreement remain visible HT/FT component audits but cannot replace a diagnostic probability
+  Top-2 cell. They also cannot create a user-facing joint event; that event must exist with its
+  own probability in the validated path posterior.
 - For a model-only matrix, load `league_pair_gate_evidence` from the current model registry
   and pass the normalized `league_key` plus the current model hash. The ranker must verify the
   evidence's dataset-manifest hash, evaluation hash, model hash, league key, threshold,
@@ -85,20 +97,27 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
   proxy must never be transferred to a live half-time anchor. Historical two-scenario
   classification rates are not single-bet win rates or ROI.
 - Positive EV and edge are diagnostic qualification gates only after the two probability scenarios are selected. While the market is paused they do not make a scenario formal; under a future enabled policy every model, market, evidence, and calibration check must also pass. Treat a high-EV outcome outside the selected pair as a market anomaly to recheck, not as an automatic recommendation.
+- Market odds may condition the unified posterior only through a versioned method that has
+  passed strict forward calibration and models the dependence among correlated markets. A
+  price used in conditioning cannot then be cited as independent EV evidence against that
+  posterior; use an auditable leave-one-bookmaker-out price or mark the comparison
+  non-independent and ineligible.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a probability match shape, not an actionable positive-EV bet.
-- If current HT/FT odds are missing, keep the same two probability-selected scenarios as `赔率缺失，不可执行`; do not invent odds, market probability, or EV. If the model matrix itself cannot be calculated, mark both slots `数据不足`.
-- Do not replace the two probability-selected outputs with a generic `无正EV建议` or `观望`. Preserve the risk warning instead.
+- If current HT/FT odds are missing, a validated model-only path posterior may still show its
+  two joint events as `赔率缺失，不可执行`, without market probability or EV. If the unified
+  artifact is missing or fails validation, show `数据不足` and no scenario rows. Do not fall
+  back to separate HT/FT/score lists, old records, prose, or manual terminal-result pairing.
 
 ## Visual output
 
 Add these sections after the full-time market analysis:
 
 1. `半场判断`: first-half 1X2 probabilities, likely half-time scores, current half-time Asian/total lines, and the best positive-EV direction.
-2. `半全场矩阵`: a compact 3x3 matrix for HH through AA, with row/column marginal checks and the two probability-selected scenarios highlighted.
-3. `概率形态`: show exactly two rows labelled `主概率形态` and `备选概率形态`, with selection, status, joint probability, combined pair probability, confidence gate, conditional follow-through, state continuity, no-vig market probability, edge, odds, and EV. Do not show a rank column. Show the assumed stake split whenever a mutually exclusive two-selection ticket is discussed.
+2. `半全场矩阵`: a compact 3x3 marginal matrix for HH through AA, with row/column checks against the unified path posterior; do not highlight an independent display Top 2.
+3. `联合比赛路径`: show exactly two rows labelled `主联合情景` and `备选联合情景`, each with HT/FT, full-time score, joint probability, posterior/artifact identity, status, and any eligible market audit. Every displayed total, goal range, BTTS, or 1X2 label must be derived from the same path cells.
 4. `风险`: missing odds, small samples, lineup uncertainty, and high variance.
 
-Concise mode includes the best first-half direction plus both probability-selected HT/FT scenarios. Keep `观察候选（未达标）` labels even in concise mode.
+Concise mode includes the best first-half direction plus both unified joint events. Keep `观察候选（未达标）` labels even in concise mode. If no valid path artifact exists, show only `数据不足` for the scenario section.
 
 ## Supported-competition boundary
 
@@ -125,4 +144,4 @@ and other material competition changes.
 
 The supplied workbook contains six settled HT/FT tickets, not 206 matches. All six used half-time draw as the common branch and paired it with full-time draw/home/away. Two tickets won and four lost: a 33.3% ticket hit rate. Stakes totalled 2,000 and recorded ticket profit totalled 725 before the 9-unit rebate, a 36.25% stake-weighted ROI. The workbook's 73.4% figure is return on the initial 1,000-unit bankroll after top-up/rebate adjustments, not betting ROI.
 
-The log does not contain per-leg odds, stake allocation, half-time score, or which branch settled as the winner. Use it to support the requested display and paired-outcome workflow only. Do not use six tickets to raise the prior probability of half-time draw or to train model weights.
+The log does not contain per-leg odds, stake allocation, half-time score, or which branch settled as the winner. It cannot support a joint path posterior, user-facing scenario pair, or market-conditioning weight. Do not use six tickets to raise the prior probability of half-time draw or to train model weights.
