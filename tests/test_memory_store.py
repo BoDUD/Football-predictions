@@ -10,9 +10,16 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest import mock
 
 from _corner_source_fixture import build_source_bound_dataset
-from scripts import htft_model, joint_scenario_model, score_model
+from scripts import (
+    htft_model,
+    joint_scenario_model,
+    prediction_card_renderer,
+    review_card_renderer,
+    score_model,
+)
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_store.py"
@@ -295,10 +302,17 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "zero_zero_ev": None,
         "recommendation": "测试",
         "source_url": "https://example.test/match",
+        "competition_key": None,
+        "competition_label": None,
+        "competition_id": None,
+        "competition_verification_source": None,
+        "competition_source_locator": None,
+        "competition_collected_at": None,
         "notes": "",
         "model_version": "dixon-coles-time-decay/1.0.0",
         "score_model_file": None,
         "joint_scenario_file": None,
+        "require_complete_analysis": False,
         "htft_observation_model_file": None,
         "htft_observation_ranker_file": None,
         "corner_observation_model_dir": None,
@@ -580,6 +594,50 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
                     else 1.0 / raw - 1.0
                 )
                 values["htft_market_odds"].append(f"{outcome}:{price:.12f}")
+    return SimpleNamespace(**values)
+
+
+def competition_evidence_values(match_id: str = "2991125") -> dict[str, str]:
+    source_url = f"https://zq.titan007.com/analysis/{match_id}cn.htm"
+    return {
+        "competition_key": "brazil_cup",
+        "competition_label": "巴西杯",
+        "competition_id": "186",
+        "verification_source": source_url,
+        "source_locator": "//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+        "collected_at": "2026-07-21T19:00:00+09:00",
+    }
+
+
+def fake_competition_snapshot(record: dict) -> dict:
+    source_url = str(record.get("source_url") or "")
+    return {
+        "source_url": source_url,
+        "response_url": source_url,
+        "page_sha256": "sha256:" + "b" * 64,
+        "etag": 'W/"fixture"',
+        "last_modified": "Tue, 21 Jul 2026 10:00:00 GMT",
+        "collected_at": memory_store.utc_now().isoformat(),
+        "header": {
+            "home_team": str(record.get("home_team") or ""),
+            "away_team": str(record.get("away_team") or ""),
+            "competition_label": "巴西杯",
+            "competition_id": "186",
+            "competition_locator": "//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+        },
+    }
+
+
+def attach_competition_args(
+    base_dir: str, match_id: str = "2991125", **overrides
+) -> SimpleNamespace:
+    values = {
+        "base_dir": base_dir,
+        "match_id": match_id,
+        **competition_evidence_values(match_id),
+        "write": True,
+    }
+    values.update(overrides)
     return SimpleNamespace(**values)
 
 
@@ -927,8 +985,7 @@ class MemoryStoreTests(unittest.TestCase):
         )
 
     def test_record_parser_exposes_joint_scenario_file(self):
-        parsed = memory_store.build_parser().parse_args(
-            [
+        arguments = [
                 "record",
                 "--match-id",
                 "fixture",
@@ -960,9 +1017,80 @@ class MemoryStoreTests(unittest.TestCase):
                 "none",
                 "--joint-scenario-file",
                 "joint.json",
+                "--require-complete-analysis",
             ]
-        )
+        parsed = memory_store.build_parser().parse_args(arguments)
         self.assertEqual(parsed.joint_scenario_file, "joint.json")
+        self.assertTrue(parsed.require_complete_analysis)
+
+        defaulted = memory_store.build_parser().parse_args(arguments[:-1])
+        self.assertTrue(defaulted.require_complete_analysis)
+
+    def test_complete_analysis_guard_rejects_missing_joint_artifact(self):
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "complete analysis requires a valid --joint-scenario-file"
+            ):
+                memory_store.cmd_record(
+                    record_args(base, require_complete_analysis=True)
+                )
+
+            history_path = memory_store.data_path(base)
+            self.assertFalse(history_path.exists())
+
+    def test_complete_analysis_guard_defaults_on_for_direct_callers(self):
+        with tempfile.TemporaryDirectory() as base:
+            args = record_args(base)
+            delattr(args, "require_complete_analysis")
+            with self.assertRaisesRegex(
+                ValueError, "complete analysis requires a valid --joint-scenario-file"
+            ):
+                memory_store.cmd_record(args)
+
+    def test_complete_analysis_guard_accepts_valid_joint_artifact(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                self.joint_record_args(base, require_complete_analysis=True)
+            )["record"]
+
+            self.assertIsNotNone(
+                memory_store.validated_joint_scenario_audit(created)
+            )
+
+    def test_real_complete_archive_renders_model_leader_and_joint_pairs_end_to_end(self):
+        with tempfile.TemporaryDirectory() as base:
+            created = memory_store.cmd_record(
+                self.joint_record_args(base, require_complete_analysis=True)
+            )["record"]
+            payload = {
+                "rows": [
+                    {
+                        "id": JOINT_FIXTURE_ID,
+                        "archive_match_id": JOINT_FIXTURE_ID,
+                        "archive_stage": "initial",
+                        "archive_version_hash": prediction_card_renderer.archive_version_hash(
+                            created
+                        ),
+                        "time": "19:30",
+                        "league": "test_league",
+                        "home_team": "Alpha",
+                        "away_team": "Bravo",
+                        "status": "no_bet",
+                    }
+                ]
+            }
+
+            card = prediction_card_renderer.validate_payload(
+                payload, {JOINT_FIXTURE_ID: created}
+            )
+
+            self.assertTrue(card.rows[0].primary.startswith("◇ 模型首选："))
+            self.assertNotEqual(card.rows[0].total_goals, "数据不足")
+            self.assertIn(len(card.rows[0].htft.splitlines()), {2, 3})
+            self.assertEqual(
+                len(card.rows[0].htft.splitlines()),
+                len(card.rows[0].scores.splitlines()),
+            )
 
     def test_joint_scenario_artifact_is_archived_and_publicly_validated(self):
         with tempfile.TemporaryDirectory() as base:
@@ -1527,12 +1655,15 @@ class MemoryStoreTests(unittest.TestCase):
 
     def setUp(self):
         self._real_utc_now = memory_store.utc_now
+        self._real_competition_fetch = memory_store.fetch_titan_competition_snapshot
         memory_store.utc_now = lambda: datetime(
             2026, 7, 21, 10, 0, tzinfo=timezone.utc
         )
+        memory_store.fetch_titan_competition_snapshot = fake_competition_snapshot
 
     def tearDown(self):
         memory_store.utc_now = self._real_utc_now
+        memory_store.fetch_titan_competition_snapshot = self._real_competition_fetch
 
     def test_market_evidence_freshness_is_stage_aware_and_recursive(self):
         archive_time = "2026-07-21T10:00:00Z"
@@ -2061,6 +2192,506 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(saved["primary_result"], before["primary_result"])
             self.assertEqual(saved["total_result"], before["total_result"])
             self.assertEqual(saved["revisions"], before["revisions"])
+
+    def test_legacy_settlement_identity_migration_freezes_review_and_stats(self):
+        record = strict_metric_record(
+            "legacy-2913681",
+            probabilities={"home_win": 0.35, "draw": 0.40, "away_win": 0.25},
+            final_score="1-1",
+            selected=False,
+            league="finland_veikkausliiga",
+        )
+        record.update(
+            {
+                "league_key": "finland_veikkausliiga",
+                "source_url": "https://zq.titan007.com/analysis/2913681cn.htm",
+                "competition_evidence": {"untrusted": "attached-after-review"},
+                "analysis_stage": "lineup-check",
+                "home_team": "KuPS",
+                "away_team": "HJK",
+                "kickoff": "2026-08-04T01:00:00+09:00",
+                "half_time_score": "0-0",
+                "reviewed_at": "2026-08-03T17:05:00+00:00",
+                "counts_toward_primary_record": False,
+                # This mirrors the legacy on-disk basis: settlement fields were
+                # frozen, but fixture/competition identity fields were absent.
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "grading_scope": "primary_only",
+                    "analysis_stage": "lineup-check",
+                    "version_archived_at": "2026-08-03T15:33:45+00:00",
+                    "lineup_rechecked_at": "2026-08-03T15:33:45+00:00",
+                    "primary_market": None,
+                    "primary_pick": None,
+                    "primary_result": None,
+                    "formal_picks": {},
+                    "candidate_audits": [],
+                    "counts_toward_primary_record": False,
+                    "revision_count": 1,
+                },
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as base:
+            path = memory_store.data_path(base)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps([record], ensure_ascii=False), encoding="utf-8")
+
+            migrated = memory_store.cmd_migrate_settlement_basis(
+                SimpleNamespace(base_dir=base, write=True)
+            )
+            self.assertEqual(migrated["changed_match_ids"], ["legacy-2913681"])
+            saved = memory_store.load_history(path)[0]
+            basis = saved["settlement_basis"]
+            self.assertEqual(basis["league"], "finland_veikkausliiga")
+            self.assertEqual(basis["league_key"], "finland_veikkausliiga")
+            self.assertEqual(
+                basis["source_url"],
+                "https://zq.titan007.com/analysis/2913681cn.htm",
+            )
+            self.assertIsNone(basis["competition_evidence"])
+            self.assertEqual(
+                basis["competition_identity_migration"][
+                    "competition_evidence_status"
+                ],
+                "unavailable_in_legacy_settlement_basis",
+            )
+
+            card_before = review_card_renderer.build_card(saved)
+            stats_before = memory_store.calculate_stats([saved])
+            self.assertEqual(card_before.league, "芬超")
+            self.assertIn("finland_veikkausliiga", stats_before["leagues"])
+            self.assertEqual(
+                card_before.settlement_hash,
+                memory_store.canonical_prediction_hash(basis),
+            )
+
+            tampered = copy.deepcopy(saved)
+            tampered["league"] = "england_premier_league"
+            tampered["league_key"] = "england_premier_league"
+            tampered["source_url"] = "https://example.test/tampered"
+            tampered["competition_evidence"] = None
+            card_after = review_card_renderer.build_card(tampered)
+            stats_after = memory_store.calculate_stats([tampered])
+
+            self.assertEqual(card_after.league, card_before.league)
+            self.assertEqual(card_after.settlement_hash, card_before.settlement_hash)
+            self.assertEqual(stats_after["leagues"], stats_before["leagues"])
+            self.assertNotIn("england_premier_league", stats_after["leagues"])
+
+            repeated = memory_store.cmd_migrate_settlement_basis(
+                SimpleNamespace(base_dir=base, write=False)
+            )
+            self.assertEqual(repeated["changed_match_ids"], [])
+
+    def test_brazil_cup_stage_labels_normalize_to_one_competition_key(self):
+        labels = (
+            "巴西杯",
+            "2026巴西杯16强次回合",
+            "巴西杯1/8决赛首回合",
+            "巴西杯四分之一决赛次回合",
+            "2026巴西杯决赛",
+        )
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    memory_store.normalize_league_name(label), "brazil_cup"
+                )
+
+    def test_competition_evidence_build_validate_and_tamper_fail_closed(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        record = {
+            "match_id": match_id,
+            "home_team": "瑞模贝雷",
+            "away_team": "桑托斯",
+            "kickoff": "2026-08-05T09:30:00+09:00",
+            "source_url": values["verification_source"],
+        }
+
+        evidence = memory_store.build_competition_evidence(record, **values)
+        record["competition_evidence"] = evidence
+        self.assertEqual(
+            memory_store.validated_competition_evidence(record), evidence
+        )
+        self.assertEqual(evidence["competition"]["key"], "brazil_cup")
+        self.assertEqual(evidence["competition"]["label"], "巴西杯")
+        self.assertRegex(evidence["evidence_hash"], r"^sha256:[0-9a-f]{64}$")
+
+        changed_without_hash = copy.deepcopy(record)
+        changed_without_hash["competition_evidence"]["competition"]["label"] = "巴甲"
+        self.assertIsNone(
+            memory_store.validated_competition_evidence(changed_without_hash)
+        )
+
+        rebound_tamper = copy.deepcopy(record)
+        rebound_tamper["competition_evidence"]["fixture"]["home_team"] = "伪造主队"
+        rebound_tamper["competition_evidence"]["evidence_hash"] = (
+            memory_store.calculate_competition_evidence_hash(
+                rebound_tamper["competition_evidence"]
+            )
+        )
+        self.assertIsNone(
+            memory_store.validated_competition_evidence(rebound_tamper)
+        )
+
+        with self.assertRaisesRegex(ValueError, "not registered|do not match the registry"):
+            memory_store.build_competition_evidence(
+                record,
+                **{
+                    **values,
+                    "competition_key": "england_premier_league",
+                    "competition_label": "英超",
+                    "competition_id": "999",
+                    "source_locator": "//info.titan007.com/fake/competition_999.htm",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be in the future"):
+            with mock.patch.object(
+                memory_store,
+                "fetch_titan_competition_snapshot",
+                return_value={
+                    **fake_competition_snapshot(record),
+                    "collected_at": "2099-01-01T00:00:00+09:00",
+                },
+            ):
+                memory_store.build_competition_evidence(
+                    record,
+                    **{
+                        **values,
+                        "collected_at": "2099-01-01T00:00:00+09:00",
+                    },
+                )
+
+    def test_competition_evidence_is_derived_from_matching_titan_header_html(self):
+        values = competition_evidence_values("2991125")
+        record = {
+            "match_id": "2991125",
+            "home_team": "瑞模贝雷",
+            "away_team": "桑托斯",
+            "kickoff": "2026-08-05T09:30:00+09:00",
+            "source_url": values["verification_source"],
+        }
+        raw_html = b"""
+        <a href='//zq.titan007.com/cn/team/Summary/1964.html'>\xe7\x91\x9e\xe6\xa8\xa1\xe8\xb4\x9d\xe9\x9b\xb7(\xe4\xb8\xbb)</a>
+        <a class='LName' href='//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm'>\xe5\xb7\xb4\xe8\xa5\xbf\xe6\x9d\xaf</a>
+        <a href='//zq.titan007.com/cn/team/Summary/337.html'>\xe6\xa1\x91\xe6\x89\x98\xe6\x96\xaf</a>
+        """
+        snapshot = memory_store.extract_titan_competition_snapshot(
+            raw_html,
+            source_url=record["source_url"],
+            response_url=record["source_url"],
+            record=record,
+            collected_at=memory_store.utc_now(),
+        )
+        evidence = memory_store.build_competition_evidence(
+            record, **values, _source_snapshot=snapshot
+        )
+        self.assertEqual(evidence["source"]["header"]["competition_label"], "巴西杯")
+        self.assertRegex(evidence["source"]["page_sha256"], r"^sha256:[0-9a-f]{64}$")
+
+        wrong_fixture = {**record, "home_team": "塞伊奈约基", "away_team": "赫尔辛基"}
+        with self.assertRaisesRegex(ValueError, "teams do not match"):
+            memory_store.build_competition_evidence(
+                wrong_fixture, **values, _source_snapshot=snapshot
+            )
+
+    def test_real_competition_stats_are_separate_from_proxy_model_league(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        record = strict_metric_record(
+            match_id,
+            probabilities={"home_win": 0.6, "draw": 0.2, "away_win": 0.2},
+            final_score="1-0",
+            selected=True,
+            league="brazil_serie_a",
+        )
+        record.update(
+            {
+                "league_key": "brazil_serie_a",
+                "home_team": "瑞模贝雷",
+                "away_team": "桑托斯",
+                "kickoff": "2026-08-05T09:30:00+09:00",
+                "source_url": values["verification_source"],
+            }
+        )
+        record["competition_evidence"] = memory_store.build_competition_evidence(
+            record, **values
+        )
+
+        stats = memory_store.calculate_stats([record])
+        self.assertIn("brazil_cup", stats["leagues"])
+        self.assertNotIn("brazil_serie_a", stats["leagues"])
+        self.assertEqual(stats["leagues"]["brazil_cup"]["primary"]["matches"], 1)
+
+    def test_reviewed_stats_use_settlement_frozen_competition_identity(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        record = strict_metric_record(
+            match_id,
+            probabilities={"home_win": 0.6, "draw": 0.2, "away_win": 0.2},
+            final_score="1-0",
+            selected=True,
+            league="brazil_serie_a",
+        )
+        record.update(
+            {
+                "league_key": "brazil_serie_a",
+                "home_team": "瑞模贝雷",
+                "away_team": "桑托斯",
+                "kickoff": "2026-08-05T09:30:00+09:00",
+                "source_url": values["verification_source"],
+            }
+        )
+        record["competition_evidence"] = memory_store.build_competition_evidence(
+            record, **values
+        )
+        record["settlement_basis"] = {
+            "match_id": record["match_id"],
+            "home_team": record["home_team"],
+            "away_team": record["away_team"],
+            "kickoff": record["kickoff"],
+            "source_url": record["source_url"],
+            "league": record["league"],
+            "league_key": record["league_key"],
+            "competition_evidence": copy.deepcopy(record["competition_evidence"]),
+            "primary_result": "win",
+        }
+
+        record["league"] = "england_premier_league"
+        record["league_key"] = "england_premier_league"
+        record["competition_evidence"] = None
+
+        self.assertEqual(memory_store.competition_key_for_record(record), "brazil_cup")
+        stats = memory_store.calculate_stats([record])
+        self.assertIn("brazil_cup", stats["leagues"])
+        self.assertNotIn("england_premier_league", stats["leagues"])
+
+    def test_lineup_cannot_replace_invalid_existing_competition_evidence(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        cli_values = {
+            "competition_key": values["competition_key"],
+            "competition_label": values["competition_label"],
+            "competition_id": values["competition_id"],
+            "competition_verification_source": values["verification_source"],
+            "competition_source_locator": values["source_locator"],
+            "competition_collected_at": values["collected_at"],
+        }
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id=match_id,
+                    source_url=values["verification_source"],
+                    **cli_values,
+                )
+            )
+            path = memory_store.data_path(base)
+            history = memory_store.load_history(path)
+            history[0]["competition_evidence"]["competition"]["label"] = "伪造赛事"
+            memory_store.save_history(path, history)
+
+            with self.assertRaisesRegex(
+                ValueError, "existing competition evidence is invalid"
+            ):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id=match_id,
+                        analysis_stage="lineup-check",
+                        source_url=values["verification_source"],
+                        **cli_values,
+                    )
+                )
+
+    def test_lineup_kickoff_change_requires_and_accepts_fresh_competition_evidence(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        cli_values = {
+            "competition_key": values["competition_key"],
+            "competition_label": values["competition_label"],
+            "competition_id": values["competition_id"],
+            "competition_verification_source": values["verification_source"],
+            "competition_source_locator": values["source_locator"],
+            "competition_collected_at": values["collected_at"],
+        }
+        changed_time = {
+            "source_kickoff": "2026-07-21T18:25:00+08:00",
+            "user_local_kickoff": "2026-07-21T19:25:00+09:00",
+            "kickoff": "2026-07-21T19:25:00+09:00",
+        }
+        with tempfile.TemporaryDirectory() as base:
+            initial = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id=match_id,
+                    source_url=values["verification_source"],
+                    **cli_values,
+                )
+            )["record"]
+            self.assertIsNotNone(
+                memory_store.validated_competition_evidence(initial)
+            )
+
+            with self.assertRaisesRegex(ValueError, "supply fresh source-verified"):
+                memory_store.cmd_record(
+                    record_args(
+                        base,
+                        match_id=match_id,
+                        analysis_stage="lineup-check",
+                        source_url=values["verification_source"],
+                        **changed_time,
+                    )
+                )
+
+            lineup = memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id=match_id,
+                    analysis_stage="lineup-check",
+                    source_url=values["verification_source"],
+                    **changed_time,
+                    **cli_values,
+                )
+            )["record"]
+            self.assertIsNotNone(
+                memory_store.validated_competition_evidence(lineup)
+            )
+            self.assertEqual(
+                lineup["competition_evidence"]["fixture"]["kickoff"],
+                "2026-07-21T19:25:00+09:00",
+            )
+
+    def test_attach_competition_evidence_preserves_prediction_and_is_idempotent(self):
+        match_id = "2991125"
+        values = competition_evidence_values(match_id)
+        with tempfile.TemporaryDirectory() as base:
+            memory_store.cmd_record(
+                record_args(
+                    base,
+                    match_id=match_id,
+                    source_url=values["verification_source"],
+                )
+            )
+            path = memory_store.data_path(base)
+            history = memory_store.load_history(path)
+            history[0]["revisions"] = [
+                {"analysis_stage": "initial", "sentinel": "keep-revision"}
+            ]
+            history[0]["settlement_basis"] = {
+                "policy": "test-frozen-basis",
+                "sentinel": "keep-settlement",
+            }
+            memory_store.save_history(path, history)
+
+            before = memory_store.load_history(path)[0]
+            before_snapshot = memory_store.snapshot_payload(
+                memory_store.revision_snapshot(before)
+            )
+            before_hash = memory_store.canonical_prediction_hash(before_snapshot)
+            before_revisions = copy.deepcopy(before["revisions"])
+            before_settlement = copy.deepcopy(before["settlement_basis"])
+
+            attached = memory_store.cmd_attach_competition_evidence(
+                attach_competition_args(base, match_id)
+            )
+            self.assertTrue(attached["written"])
+            self.assertFalse(attached["duplicate_ignored"])
+            self.assertTrue(attached["prediction_fields_unchanged"])
+            self.assertTrue(attached["archive_version_hash_changed"])
+
+            after = memory_store.load_history(path)[0]
+            after_snapshot = memory_store.snapshot_payload(
+                memory_store.revision_snapshot(after)
+            )
+            self.assertNotEqual(after_snapshot, before_snapshot)
+            self.assertNotEqual(
+                memory_store.canonical_prediction_hash(after_snapshot), before_hash
+            )
+            self.assertEqual(after["revisions"], before_revisions)
+            self.assertEqual(after["settlement_basis"], before_settlement)
+            self.assertEqual(len(after["metadata_revisions"]), 1)
+            self.assertIsNotNone(
+                memory_store.validated_competition_evidence(after)
+            )
+
+            bytes_after_first_attach = path.read_bytes()
+            duplicate = memory_store.cmd_attach_competition_evidence(
+                attach_competition_args(base, match_id)
+            )
+            self.assertTrue(duplicate["duplicate_ignored"])
+            self.assertFalse(duplicate["written"])
+            self.assertEqual(path.read_bytes(), bytes_after_first_attach)
+
+            conflicting = attach_competition_args(
+                base,
+                match_id,
+                competition_key="brazil_serie_a",
+                competition_label="巴甲",
+                competition_id="4",
+                source_locator="//zq.titan007.com/cn/league.aspx?sclassid=4",
+            )
+            with self.assertRaisesRegex(ValueError, "not registered"):
+                memory_store.cmd_attach_competition_evidence(conflicting)
+            self.assertEqual(path.read_bytes(), bytes_after_first_attach)
+
+    def test_reviewed_archive_rejects_competition_attachment(self):
+        with tempfile.TemporaryDirectory() as base:
+            path = memory_store.data_path(base)
+            path.parent.mkdir(parents=True)
+            record = reviewed_record("2991125")
+            record.update(
+                {
+                    "home_team": "瑞模贝雷",
+                    "away_team": "桑托斯",
+                    "kickoff": "2026-08-05T09:30:00+09:00",
+                    "source_url": competition_evidence_values()["verification_source"],
+                }
+            )
+            memory_store.save_history(path, [record])
+
+            with self.assertRaisesRegex(ValueError, "only to a pending prematch"):
+                memory_store.cmd_attach_competition_evidence(
+                    attach_competition_args(base)
+                )
+
+    def test_record_rejects_every_partial_competition_evidence_shape(self):
+        full = competition_evidence_values("2991125")
+        cli_names = {
+            "competition_key": full["competition_key"],
+            "competition_label": full["competition_label"],
+            "competition_id": full["competition_id"],
+            "competition_verification_source": full["verification_source"],
+            "competition_source_locator": full["source_locator"],
+            "competition_collected_at": full["collected_at"],
+        }
+        with tempfile.TemporaryDirectory() as base:
+            for index, missing in enumerate(cli_names):
+                partial = dict(cli_names)
+                partial[missing] = None
+                match_id = f"partial-competition-{index}"
+                partial["competition_verification_source"] = (
+                    f"https://zq.titan007.com/analysis/{match_id}cn.htm"
+                    if missing != "competition_verification_source"
+                    else None
+                )
+                with self.subTest(missing=missing):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "competition evidence requires every --competition-\\* field",
+                    ):
+                        memory_store.cmd_record(
+                            record_args(
+                                base,
+                                match_id=match_id,
+                                source_url=(
+                                    partial["competition_verification_source"]
+                                    or "https://example.test/match"
+                                ),
+                                **partial,
+                            )
+                        )
 
     def test_league_normalization_grouped_stats_migration_and_calibration(self):
         self.assertEqual(memory_store.normalize_league_name("2026芬超第16轮"), "芬超")

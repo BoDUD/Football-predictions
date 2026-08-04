@@ -162,12 +162,25 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertNotIn("AA+", visible)
         self.assertNotIn("…", visible)
         self.assertNotIn("...", visible)
+        self.assertIn("联合参考来自结算依据绑定的冻结联合路径", visible)
         self.public_builder.assert_called_once_with(_artifact())
 
     def test_formal_primary_and_result_are_read_only_from_settlement_basis(self) -> None:
         card = renderer.build_card(_record(primary=True))
         self.assertEqual(card.primary_settlement, "主推：小2.5 @0.92\n结算：红")
         self.assertEqual(card.primary_result, "win")
+
+    def test_review_uses_settlement_frozen_league_identity(self) -> None:
+        record = _record()
+        record["settlement_basis"]["league"] = "芬超"
+        record["settlement_basis"]["league_key"] = "finland_veikkausliiga"
+        record["settlement_basis"]["competition_evidence"] = None
+        record["league"] = "英超"
+        record["league_key"] = "england_premier_league"
+
+        card = renderer.build_card(record)
+
+        self.assertEqual(card.league, "芬超")
 
     def test_tampered_primary_binding_is_rejected(self) -> None:
         record = _record()
@@ -189,7 +202,10 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertEqual(card.events, ())
         self.assertEqual(card.htft_reference, "数据不足")
         self.assertEqual(card.score_reference, "数据不足")
-        self.assertNotIn("9-9", "\n".join(renderer.visible_text(card)))
+        visible = "\n".join(renderer.visible_text(card))
+        self.assertNotIn("9-9", visible)
+        self.assertIn("冻结结算依据未包含可验证联合路径", visible)
+        self.assertNotIn("联合参考来自结算依据绑定的冻结联合路径", visible)
 
     def test_invalid_public_display_fails_closed_without_independent_fallback(self) -> None:
         bad = _outlook(3)
@@ -204,6 +220,16 @@ class ReviewCardRendererTests(unittest.TestCase):
         record["half_time_score"] = "3-0"
         with self.assertRaisesRegex(renderer.ReviewCardError, "cannot exceed"):
             renderer.build_card(record)
+
+    def test_missing_half_time_score_is_rendered_as_unavailable(self) -> None:
+        record = _record()
+        record["half_time_score"] = None
+
+        card = renderer.build_card(record)
+
+        self.assertEqual(card.half_time_score, "未取得")
+        self.assertEqual(card.final_score, "2-1")
+        self.assertIn("未取得", renderer.render_svg(card))
 
     def test_svg_has_eight_columns_dynamic_three_events_and_no_ellipsis(self) -> None:
         card = renderer.build_card(_record())
@@ -245,6 +271,27 @@ class ReviewCardRendererTests(unittest.TestCase):
                 self.assertEqual(image.format, "PNG")
                 self.assertEqual(image.width, renderer.WIDTH)
                 self.assertEqual(image.height, renderer._card_height(renderer.build_card(_record())))
+
+    def test_wide_latin_team_name_wraps_inside_review_match_cell(self) -> None:
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        record = _record()
+        record["home_team"] = "W" * 20
+        record["settlement_basis"]["home_team"] = "W" * 20
+        card = renderer.build_card(record)
+        cells = renderer._wrapped_cells(card)
+        match_lines = cells[2]
+        self.assertGreaterEqual(len(match_lines), 3)
+        self.assertEqual(cells[0], ("2913681",))
+
+        image = Image.new("RGB", (renderer.COLUMNS[2][2], renderer._row_height(card)))
+        draw = ImageDraw.Draw(image)
+        font = renderer._font(renderer.CELL_FONT_SIZES[2])
+        for line in match_lines:
+            bounds = draw.textbbox((0, 0), line or " ", font=font)
+            self.assertLessEqual(bounds[2] - bounds[0], renderer.COLUMNS[2][2] - 18)
 
     def test_cli_does_not_accept_user_supplied_prediction_content(self) -> None:
         parser = renderer.build_parser()

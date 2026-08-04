@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Added live-fetched, page-hash-bound Titan competition metadata so the user-facing Chinese tournament name is separated from an internal proxy-model league key.
+- Added a complete-analysis archive guard for normal initial and lineup-check predictions.
+- Added a real archive-to-card integration test for non-counting model leaders and paired joint scenarios.
+
+### Changed
+- Render no-formal-primary matches with a non-counting `◇ 模型首选` from the validated joint 1X2 leader when complete analysis exists; reserve `数据不足` for missing or invalid joint artifacts.
+- Make review-card provenance wording reflect whether the frozen settlement version actually contains a validated joint path.
+- Derive card date/title/stage from the archive, reject mixed stages/dates and duplicate matches, and freeze competition identity into settlement/statistics.
+- Upgrade legacy reviewed settlement bases through an explicit audited migration so later top-level league changes cannot alter review cards or statistics; missing historical competition evidence remains explicitly unavailable.
+- Reject market-direction or odds-shaped text in caller-controlled fixture metadata and account for wide Latin glyphs when enforcing fixed-card width limits.
+- Allow missing half-time results in review images only when the settlement contract permits them, displaying `未取得` instead of failing rendering.
+
 ## [3.2.0] - 2026-08-03
 
 ### Added

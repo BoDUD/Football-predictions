@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -32,13 +33,23 @@ HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
 HTFT_SCENARIO_LABELS = {"H": "胜", "D": "平", "A": "负"}
 ONE_X_TWO_LABELS = {"home": "主胜", "draw": "平局", "away": "客胜"}
 BTTS_LABELS = {"yes": "是", "no": "否"}
-LEAGUE_DISPLAY_LABELS = {
+MARKET_DIRECTION_TEXT = re.compile(
+    r"(?:"
+    r"(?:角球|总进球|进球|半场)?[大小]\s*[+-]?\d+(?:\.\d+)?"
+    r"|(?:让|受让)\s*[+-]?\d+(?:\.\d+)?"
+    r"|@\s*\d+(?:\.\d+)?"
+    r")",
+    re.IGNORECASE,
+)
+UNSAFE_LEAGUE_DISPLAY = re.compile(r"[★◇]|主推|推荐|稳胆|必中|必红|…|\.\.\.")
+CANONICAL_LEAGUE_DISPLAY_LABELS = {
+    "brazil_serie_a": "巴甲",
+    "japan_j1": "日职",
+    "norway_eliteserien": "挪超",
+    "usa_mls": "美职联",
     "finland_veikkausliiga": "芬超",
-    "finlandveikkausliiga": "芬超",
     "korea_k_league_1": "韩K联",
-    "koreakleague1": "韩K联",
     "sweden_allsvenskan": "瑞典超",
-    "swedenallsvenskan": "瑞典超",
     "england_premier_league": "英超",
     "france_ligue_1": "法甲",
     "spain_la_liga": "西甲",
@@ -46,7 +57,15 @@ LEAGUE_DISPLAY_LABELS = {
     "italy_serie_a": "意甲",
     "uefa_champions_league": "欧冠",
     "afc_champions_league": "亚冠",
+    "brazil_cup": "巴西杯",
 }
+LEAGUE_DISPLAY_LABELS = dict(CANONICAL_LEAGUE_DISPLAY_LABELS)
+LEAGUE_DISPLAY_LABELS.update(
+    {
+        key.replace("_", ""): label
+        for key, label in CANONICAL_LEAGUE_DISPLAY_LABELS.items()
+    }
+)
 OBSERVATION_GATE_LABELS = {
     "complete_current_market": "完整当前9路赔率",
     "odds_provenance": "赛前赔率来源时间戳",
@@ -134,13 +153,56 @@ def format_time(value: Any, timezone_name: str = "Asia/Tokyo") -> str:
 def league_display_name(record: dict[str, Any]) -> str:
     """Return a stable user-facing league name instead of an internal key."""
 
-    raw = str(record.get("league_key") or memory_store.league_key_for_record(record) or "").strip()
-    normalized = re.sub(r"[\s-]+", "_", raw.casefold())
-    compact = normalized.replace("_", "")
-    return LEAGUE_DISPLAY_LABELS.get(
-        normalized,
-        LEAGUE_DISPLAY_LABELS.get(compact, raw or "未取得"),
+    identity = memory_store.competition_identity_record(record)
+    evidence = memory_store.validated_competition_evidence(identity)
+    if isinstance(evidence, dict):
+        competition = evidence.get("competition")
+        if isinstance(competition, dict):
+            label = str(competition.get("label") or "").strip()
+            if label:
+                return _safe_league_display(label)
+
+    raw_key = str(
+        identity.get("league_key")
+        or memory_store.league_key_for_record(identity)
+        or ""
+    ).strip()
+    normalized_key = re.sub(r"[\s-]+", "_", raw_key.casefold())
+    mapped = LEAGUE_DISPLAY_LABELS.get(
+        normalized_key, LEAGUE_DISPLAY_LABELS.get(normalized_key.replace("_", ""))
     )
+    if mapped:
+        return _safe_league_display(mapped)
+
+    raw_label = unicodedata.normalize(
+        "NFKC", str(identity.get("league") or "")
+    ).strip()
+    normalized_label = memory_store.normalize_league_name(raw_label)
+    normalized_label_key = re.sub(r"[\s-]+", "_", normalized_label.casefold())
+    mapped = LEAGUE_DISPLAY_LABELS.get(
+        normalized_label_key,
+        LEAGUE_DISPLAY_LABELS.get(normalized_label_key.replace("_", "")),
+    )
+    if mapped:
+        return _safe_league_display(mapped)
+    if re.search(r"[\u3400-\u9fff]", normalized_label):
+        return _safe_league_display(normalized_label)
+    if re.search(r"[\u3400-\u9fff]", raw_key):
+        return _safe_league_display(raw_key)
+    return "赛事待核验"
+
+
+def _safe_league_display(value: Any) -> str:
+    label = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if (
+        not label
+        or len(label) > 24
+        or UNSAFE_LEAGUE_DISPLAY.search(label)
+        or MARKET_DIRECTION_TEXT.search(label)
+        or not re.search(r"[\u3400-\u9fff]", label)
+    ):
+        return "赛事待核验"
+    return label
 
 
 def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[str, Any]) -> str:
@@ -305,6 +367,45 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
         return _insufficient_joint_outlook()
 
 
+def model_leader_reference(version: dict[str, Any]) -> str:
+    """Return the same non-primary reference selected by the image renderer."""
+
+    if isinstance(resolved_primary_pick(version), dict):
+        return "无"
+    observations = qualified_observation_references(version)
+    if observations:
+        return (
+            f"◇ 观察方向：{observations[0]}"
+            "（不计主推、不计战绩）"
+        )
+    artifact = memory_store.validated_joint_scenario_audit(version)
+    if not isinstance(artifact, dict):
+        return "无"
+    try:
+        market = public_market_outlook.build_public_market_outlook(artifact)["markets"][
+            "one_x_two"
+        ]
+        if market.get("recommendation_eligible") is not False:
+            return "无"
+        top1 = market["top1"]
+        code = str(top1["code"])
+        label = ONE_X_TWO_LABELS[code]
+        probability_value = float(top1["probability"])
+        if not math.isfinite(probability_value) or not 0.0 < probability_value <= 1.0:
+            return "无"
+        return (
+            f"◇ 模型首选：{label}{percentage(probability_value)}"
+            "（不计主推、不计战绩）"
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        public_market_outlook.PublicMarketOutlookError,
+    ):
+        return "无"
+
+
 def exact_scores(version: dict[str, Any]) -> str:
     raw_picks = version.get("display_exact_score_picks")
     if not isinstance(raw_picks, list) or not raw_picks:
@@ -373,6 +474,39 @@ def resolved_primary_pick(version: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(half_time_pick, dict):
             return half_time_pick
     return pick
+
+
+def qualified_observation_references(
+    version: dict[str, Any],
+) -> tuple[str, ...]:
+    """Return only independently validated, qualified corner observations."""
+
+    raw_audits = version.get("candidate_audits")
+    if not isinstance(raw_audits, list):
+        return ()
+    labels: list[str] = []
+    for audit in raw_audits:
+        if not isinstance(audit, dict):
+            continue
+        try:
+            valid = memory_store.validated_observation_audit(audit)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid or audit.get("kind") != memory_store.CORNER_OBSERVATION_KIND:
+            continue
+        best = audit.get("best_observation")
+        if (
+            not isinstance(best, dict)
+            or best.get("diagnostic_qualification_status") != "qualified"
+        ):
+            continue
+        market = str(best.get("market") or "")
+        if not market:
+            continue
+        label = format_pick(market, best, version)
+        if label and label != "无正式推荐" and label not in labels:
+            labels.append(label)
+    return tuple(labels)
 
 
 def secondary_picks(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -523,13 +657,14 @@ def render_initial(record: dict[str, Any]) -> str:
     primary = version.get("primary_pick") if isinstance(version.get("primary_pick"), dict) else {}
     outlook = joint_outlook(version)
     return validate_plain_text([
-        f"【初盘分析｜{record.get('match_id')}】",
-        f"赛事：{league_display_name(record)}",
-        f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
-        f"开赛：{format_time(record.get('kickoff'))}",
-        f"主推：{primary_line(version, record)}",
+        f"【初盘分析｜{version.get('match_id')}】",
+        f"赛事：{league_display_name(version)}",
+        f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
+        f"开赛：{format_time(version.get('kickoff'))}",
+        f"主推：{primary_line(version, version)}",
+        model_leader_reference(version),
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
+        f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
         f"半场倾向：{outlook['half_time']}",
         f"胜平负：{outlook['one_x_two']}",
         f"总进球：{outlook['goal_range']}",
@@ -548,25 +683,26 @@ def render_lineup(record: dict[str, Any]) -> str:
     change = version.get("primary_change") if isinstance(version.get("primary_change"), dict) else {}
     status = change.get("status")
     if status == "maintained":
-        change_line = f"主推维持：{primary_line(version, record)}"
+        change_line = f"主推维持：{primary_line(version, version)}"
     else:
         previous_versions = [item for item in record.get("revisions", []) if isinstance(item, dict)]
         previous = merged_version(record, previous_versions[-1]) if previous_versions else {}
-        previous_text = primary_line(previous, record) if previous else "原方向"
+        previous_text = primary_line(previous, previous) if previous else "原方向"
         if not primary:
             change_line = f"主推取消：{previous_text} → 不下注"
         else:
-            change_line = f"主推变更：{previous_text} → {primary_line(version, record)}"
+            change_line = f"主推变更：{previous_text} → {primary_line(version, version)}"
     return validate_plain_text([
-        f"【临场分析｜{record.get('match_id')}】",
-        f"赛事：{league_display_name(record)}",
-        f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
-        f"检查时间：{format_time(record.get('lineup_rechecked_at'))}",
+        f"【临场分析｜{version.get('match_id')}】",
+        f"赛事：{league_display_name(version)}",
+        f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
+        f"检查时间：{format_time(version.get('lineup_rechecked_at'))}",
         "比赛状态：赛前，临场版本已归档",
         change_line,
-        f"当前主推：{primary_line(version, record)}",
+        f"当前主推：{primary_line(version, version)}",
+        model_leader_reference(version),
         f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选参考：{secondary_picks(version, record)}（不结算、不计战绩、不计金额）",
+        f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
         f"半场倾向：{outlook['half_time']}",
         f"胜平负：{outlook['one_x_two']}",
         f"总进球：{outlook['goal_range']}",
@@ -612,8 +748,9 @@ def performance_text(block: dict[str, Any] | None) -> str:
 def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
     select_version(record, "review")
     stats = memory_store.calculate_stats(history)
-    league_key = record.get("league_key") or memory_store.league_key_for_record(record)
+    league_key = memory_store.competition_key_for_record(record)
     league = stats["leagues"].get(league_key, {})
+    league_label = league_display_name(record)
     basis = record.get("settlement_basis") if isinstance(record.get("settlement_basis"), dict) else memory_store.settlement_basis_for_record(record)
     basis_label = "临场版" if basis.get("analysis_stage") == "lineup-check" else "初盘版"
     primary = basis.get("primary_pick") if isinstance(basis.get("primary_pick"), dict) else {}
@@ -630,7 +767,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
     )
     observation_line = observation_review_text(record)
     return validate_plain_text([
-        f"【赛后复盘｜{league_key}｜{record.get('match_id')}】",
+        f"【赛后复盘｜{league_label}｜{record.get('match_id')}】",
         f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
         f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
         f"结算依据：{basis_label}最终有效推荐",
@@ -641,7 +778,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         f"比分参考：{exact_scores(record)}｜命中排名："
         f"{record.get('display_exact_score_hit_rank', record.get('exact_score_hit_rank')) or '未命中'}",
         f"本场关键：{display_text(record, 'key_learning')}",
-        f"{league_key}主推：{performance_text(league.get('primary'))}",
+        f"{league_label}主推：{performance_text(league.get('primary'))}",
         f"累计主推：{performance_text(stats.get('primary'))}",
         "复盘用于校准分析，不代表未来收益",
     ])

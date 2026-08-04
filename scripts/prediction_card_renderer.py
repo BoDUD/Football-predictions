@@ -53,11 +53,14 @@ COLUMNS = (
     ("波胆", "scores", 180),
 )
 
-# Visual-width wrapping limits.  A CJK glyph counts as two units and a Latin
-# character as one, which keeps SVG and Pillow wrapping deterministic.
-CELL_WRAP_UNITS = (10, 8, 12, 30, 24, 18, 22, 18)
+# Visual-width wrapping limits.  A CJK glyph counts as two units and Latin
+# glyphs use a conservative 1.5-unit estimate.  The identifier column allows a
+# normal Titan match ID to stay on one line; genuinely wider labels still wrap
+# and are fitted against their measured Pillow bounds.
+CELL_WRAP_UNITS = (14, 8, 12, 30, 24, 18, 22, 18)
 
-REQUIRED_TOP_LEVEL = ("date", "title", "subtitle", "rows")
+REQUIRED_TOP_LEVEL = ("rows",)
+ARCHIVE_DERIVED_HEADER_FIELDS = frozenset({"date", "title", "subtitle"})
 REQUIRED_ROW_FIELDS = (
     "id",
     "archive_match_id",
@@ -83,6 +86,9 @@ ARCHIVE_DERIVED_ROW_FIELDS = frozenset(
 )
 ALLOWED_STATUSES = frozenset({"formal_primary", "observation", "no_bet"})
 HTFT_RESULT_LABELS = {"H": "胜", "D": "平", "A": "负"}
+ONE_X_TWO_RESULT_LABELS = {"home": "主胜", "draw": "平局", "away": "客胜"}
+FORBIDDEN_METADATA = re.compile(r"[★◇]|主推|推荐|稳胆|必中|必红")
+FORBIDDEN_ELLIPSES = ("…", "...")
 
 COLORS = {
     "page": "#fff8fa",
@@ -134,6 +140,29 @@ def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _safe_metadata_text(
+    value: Any,
+    field: str,
+    *,
+    max_length: int,
+    max_visual_units: int | None = None,
+) -> str:
+    result = _required_text(value, field)
+    if "\n" in result or "\r" in result:
+        raise ValueError(f"{field} must be single-line text")
+    if len(result) > max_length:
+        raise ValueError(f"{field} is too long for the fixed card layout")
+    if max_visual_units is not None and _visual_width(result) > max_visual_units:
+        raise ValueError(f"{field} is too wide for the fixed card layout")
+    if FORBIDDEN_METADATA.search(result) or plain_text_formatter.MARKET_DIRECTION_TEXT.search(
+        result
+    ):
+        raise ValueError(f"{field} must not contain recommendation markers")
+    if any(token in result for token in FORBIDDEN_ELLIPSES):
+        raise ValueError(f"{field} must not contain an ellipsis")
+    return result
 
 
 def _display_value(value: Any, field: str) -> str:
@@ -189,29 +218,8 @@ def _archived_observation_labels(
     record: Mapping[str, Any], prefix: str
 ) -> tuple[str, ...]:
     """Return only fully qualified, independently validated observations."""
-    raw_audits = record.get("candidate_audits")
-    if not isinstance(raw_audits, list):
-        return ()
-    labels: list[str] = []
-    for audit in raw_audits:
-        if not isinstance(audit, dict):
-            continue
-        try:
-            valid = memory_store.validated_observation_audit(audit)
-        except (TypeError, ValueError):
-            valid = False
-        if not valid or audit.get("kind") != memory_store.CORNER_OBSERVATION_KIND:
-            continue
-        best = audit.get("best_observation")
-        if not isinstance(best, dict) or best.get("diagnostic_qualification_status") != "qualified":
-            continue
-        market = str(best.get("market") or "")
-        if not market:
-            continue
-        label = plain_text_formatter.format_pick(market, best, dict(record))
-        if label and label != "无正式推荐" and label not in labels:
-            labels.append(label)
-    return tuple(labels)
+    del prefix  # Kept in the signature for stable caller error context.
+    return plain_text_formatter.qualified_observation_references(dict(record))
 
 
 def archive_version_hash(version: Mapping[str, Any]) -> str:
@@ -242,9 +250,26 @@ def _expected_kickoff_time(version: Mapping[str, Any]) -> str:
     return match.group(1)
 
 
-def _joint_artifact_display(record: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Return total and coupled HT/FT-score values from one validated artifact."""
-    insufficient = ("数据不足", "数据不足", "数据不足")
+def _expected_kickoff_date(version: Mapping[str, Any]) -> str:
+    rendered = plain_text_formatter.format_time(
+        version.get("kickoff"), str(version.get("user_timezone") or "Asia/Tokyo")
+    )
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}\b", rendered)
+    if match is None:
+        raise ValueError("archived fixture kickoff date cannot be rendered")
+    return match.group(1)
+
+
+def _joint_artifact_display(
+    record: Mapping[str, Any],
+) -> tuple[str, str, str, str | None]:
+    """Return display values from one validated artifact, or fail closed as a unit.
+
+    The optional fourth value is a diagnostic 1X2 model leader.  It is never a
+    formal recommendation and may be shown only for a ``no_bet`` row.
+    """
+
+    insufficient = ("数据不足", "数据不足", "数据不足", None)
     try:
         artifact = memory_store.validated_joint_scenario_audit(record)
     except (TypeError, ValueError):
@@ -263,6 +288,25 @@ def _joint_artifact_display(record: Mapping[str, Any]) -> tuple[str, str, str]:
             f"{clarity}·领先{gap:.1f}pp"
         )
 
+        one_x_two_market = public["markets"]["one_x_two"]
+        if one_x_two_market.get("recommendation_eligible") is not False:
+            raise ValueError("1X2 model leader must remain recommendation-ineligible")
+        one_x_two_top1 = one_x_two_market["top1"]
+        one_x_two_code = str(one_x_two_top1["code"])
+        if one_x_two_code not in ONE_X_TWO_RESULT_LABELS:
+            raise ValueError("invalid 1X2 display code")
+        one_x_two_percentage = float(one_x_two_top1["percentage"])
+        if (
+            not math.isfinite(one_x_two_percentage)
+            or one_x_two_percentage <= 0.0
+            or one_x_two_percentage > 100.0
+        ):
+            raise ValueError("invalid 1X2 display probability")
+        model_leader = (
+            f"◇ 模型首选：{ONE_X_TWO_RESULT_LABELS[one_x_two_code]} "
+            f"{one_x_two_percentage:.1f}%\n（不计主推、不计战绩）"
+        )
+
         scenario_items = public["joint_scenarios"]["items"]
         if not isinstance(scenario_items, list) or len(scenario_items) not in {2, 3}:
             raise ValueError("joint scenarios must contain two or three display items")
@@ -278,7 +322,7 @@ def _joint_artifact_display(record: Mapping[str, Any]) -> tuple[str, str, str]:
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
             htft_lines.append(f"{label} {percentage:.1f}%")
             score_lines.append(f"{item['score']} {percentage:.1f}%")
-        return total_goals, "\n".join(htft_lines), "\n".join(score_lines)
+        return total_goals, "\n".join(htft_lines), "\n".join(score_lines), model_leader
     except (
         KeyError,
         TypeError,
@@ -298,15 +342,21 @@ def validate_payload(
     missing = [field for field in REQUIRED_TOP_LEVEL if field not in payload]
     if missing:
         raise ValueError(f"missing top-level fields: {', '.join(missing)}")
-
-    date = _required_text(payload["date"], "date")
-    title = _required_text(payload["title"], "title")
-    subtitle = _required_text(payload["subtitle"], "subtitle")
+    supplied_headers = sorted(ARCHIVE_DERIVED_HEADER_FIELDS.intersection(payload))
+    if supplied_headers:
+        raise ValueError(
+            "header metadata is archive-derived and must not be supplied: "
+            + ", ".join(supplied_headers)
+        )
     raw_rows = payload["rows"]
     if not isinstance(raw_rows, list) or not raw_rows:
         raise ValueError("rows must be a non-empty JSON array")
 
     rows: list[CardRow] = []
+    seen_match_ids: set[str] = set()
+    archive_stages: set[str] = set()
+    kickoff_dates: set[str] = set()
+    archive_match_ids: list[str] = []
     for index, raw in enumerate(raw_rows):
         prefix = f"rows[{index}]"
         if not isinstance(raw, Mapping):
@@ -334,11 +384,20 @@ def validate_payload(
         archived = archived_records.get(archive_match_id)
         if archived is None:
             raise ValueError(f"{prefix} archive_match_id {archive_match_id} was not found")
-        if archived.get("mode") != "prematch" or archived.get("status") != "pending":
-            raise ValueError(f"{prefix} must bind to an active pending prematch archive")
+        if archived.get("mode") != "prematch" or archived.get("status") not in {
+            "pending",
+            "reviewed",
+        }:
+            raise ValueError(f"{prefix} must bind to a prematch prediction archive")
 
         archive_stage = _required_text(raw["archive_stage"], f"{prefix}.archive_stage")
+        if archive_match_id in seen_match_ids:
+            raise ValueError(f"{prefix} duplicates an archived match")
+        seen_match_ids.add(archive_match_id)
+        archive_stages.add(archive_stage)
+        archive_match_ids.append(archive_match_id)
         archived_version = _select_archived_version(archived, archive_stage, prefix)
+        kickoff_dates.add(_expected_kickoff_date(archived_version))
         supplied_hash = _required_text(
             raw["archive_version_hash"], f"{prefix}.archive_version_hash"
         ).casefold()
@@ -347,8 +406,18 @@ def validate_payload(
         if supplied_hash != archive_version_hash(archived_version):
             raise ValueError(f"{prefix}.archive_version_hash does not match the selected archived version")
 
-        home = _required_text(raw["home_team"], f"{prefix}.home_team")
-        away = _required_text(raw["away_team"], f"{prefix}.away_team")
+        home = _safe_metadata_text(
+            raw["home_team"],
+            f"{prefix}.home_team",
+            max_length=48,
+            max_visual_units=60,
+        )
+        away = _safe_metadata_text(
+            raw["away_team"],
+            f"{prefix}.away_team",
+            max_length=48,
+            max_visual_units=60,
+        )
         if archived_version.get("home_team") != home or archived_version.get("away_team") != away:
             raise ValueError(f"{prefix} teams do not match the selected archived fixture")
 
@@ -357,14 +426,65 @@ def validate_payload(
         if supplied_time != expected_time:
             raise ValueError(f"{prefix}.time does not match the selected archived fixture ({expected_time})")
         supplied_league = _required_text(raw["league"], f"{prefix}.league")
-        expected_league = plain_text_formatter.league_display_name(archived_version)
-        if supplied_league != expected_league:
+        expected_league = _safe_metadata_text(
+            plain_text_formatter.league_display_name(archived_version),
+            f"{prefix}.archived_league_display",
+            max_length=24,
+            max_visual_units=24,
+        )
+        evidence_raw = archived_version.get("competition_evidence")
+        evidence = memory_store.validated_competition_evidence(archived_version)
+        if evidence_raw is not None and not isinstance(evidence, dict):
+            raise ValueError(f"{prefix} archived competition evidence is invalid")
+        supplied_evidence_hash = raw.get("competition_evidence_hash")
+        if isinstance(evidence, dict):
+            expected_evidence_hash = str(evidence.get("evidence_hash") or "")
+            if supplied_evidence_hash != expected_evidence_hash:
+                raise ValueError(
+                    f"{prefix}.competition_evidence_hash does not match the archived metadata"
+                )
+        elif supplied_evidence_hash is not None:
+            raise ValueError(
+                f"{prefix}.competition_evidence_hash is not authorized by the archive"
+            )
+        accepted_league_values = {expected_league}
+        for field in ("league", "league_key"):
+            archived_value = archived_version.get(field)
+            if isinstance(archived_value, str) and archived_value.strip():
+                accepted_league_values.add(archived_value.strip())
+        if supplied_league not in accepted_league_values:
             raise ValueError(f"{prefix}.league does not match the selected archived fixture ({expected_league})")
 
+        total_goals, htft, scores, model_leader = _joint_artifact_display(
+            archived_version
+        )
+
         archived_primary = _archived_primary(archived_version, prefix)
-        if status == "formal_primary":
-            if archived_primary is None:
-                raise ValueError(f"{prefix} cannot be formal_primary without an archived primary_pick")
+        authorized_labels = _archived_observation_labels(archived_version, prefix)
+        derived_status = (
+            "formal_primary"
+            if archived_primary is not None
+            else "observation"
+            if authorized_labels
+            else "no_bet"
+        )
+        if status != derived_status:
+            if status == "formal_primary":
+                raise ValueError(
+                    f"{prefix} cannot be formal_primary without an archived primary_pick"
+                )
+            if status == "observation" and derived_status == "no_bet":
+                raise ValueError(
+                    f"{prefix} cannot be observation without validated candidate_audits"
+                )
+            if derived_status == "formal_primary":
+                raise ValueError(
+                    f"{prefix}.{status} conflicts with an archived active formal primary"
+                )
+            raise ValueError(
+                f"{prefix}.status does not match the archive-derived status ({derived_status})"
+            )
+        if derived_status == "formal_primary":
             supplied_primary = raw.get("primary")
             if supplied_primary is not None and _display_value(
                 supplied_primary, f"{prefix}.primary"
@@ -372,28 +492,28 @@ def validate_payload(
                 raise ValueError(f"{prefix}.primary does not match the archived active primary")
             primary = archived_primary
             star = True
+        elif derived_status == "observation":
+            primary = authorized_labels[0]
+            supplied_primary = raw.get("primary")
+            if supplied_primary is not None and _display_value(
+                supplied_primary, f"{prefix}.primary"
+            ) != primary:
+                raise ValueError(
+                    f"{prefix}.primary does not match the archived best observation"
+                )
+            primary = f"◇ {primary}\n（不计主推、不计战绩）"
+            star = False
         else:
-            if archived_primary is not None:
-                raise ValueError(f"{prefix}.{status} conflicts with an archived active formal primary")
-            primary = _display_value(raw.get("primary", "无正式推荐"), f"{prefix}.primary")
+            primary = model_leader or "数据不足"
             star = False
 
-        if status == "no_bet":
-            primary = "无正式推荐"
-        elif status == "observation":
-            authorized_labels = _archived_observation_labels(archived_version, prefix)
-            if not authorized_labels:
-                raise ValueError(f"{prefix} cannot be observation without validated candidate_audits")
-            if primary not in authorized_labels:
-                raise ValueError(f"{prefix}.primary does not match an archived best observation")
-            primary = f"◇ {primary}"
-
-        total_goals, htft, scores = _joint_artifact_display(archived_version)
         rows.append(
             CardRow(
-                identifier=_required_text(raw["id"], f"{prefix}.id"),
+                identifier=_safe_metadata_text(
+                    raw["id"], f"{prefix}.id", max_length=24, max_visual_units=20
+                ),
                 time=supplied_time,
-                league=supplied_league,
+                league=expected_league,
                 match=f"{home}\nvs {away}",
                 primary=primary,
                 total_goals=total_goals,
@@ -403,14 +523,34 @@ def validate_payload(
                 star=star,
             )
         )
+    if len(archive_stages) != 1:
+        raise ValueError("one prediction card cannot mix initial and lineup-check rows")
+    if len(kickoff_dates) != 1:
+        raise ValueError("one prediction card cannot mix local kickoff dates")
+    stage = next(iter(archive_stages))
+    stage_label = "初盘分析" if stage == "initial" else "临场分析"
+    date = next(iter(kickoff_dates))
+    if len(rows) == 1:
+        title = f"{rows[0].league}｜赛前模型卡"
+        subtitle = f"{archive_match_ids[0]}｜日本时间 {rows[0].time}｜{stage_label}"
+    else:
+        title = "今日足球扫盘"
+        subtitle = f"{stage_label}｜{len(rows)}场"
     return Card(date=date, title=title, subtitle=subtitle, rows=tuple(rows))
 
 
-def _char_units(char: str) -> int:
-    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+def _char_units(char: str) -> float:
+    if unicodedata.east_asian_width(char) in {"W", "F"}:
+        return 2.0
+    # Latin glyphs are not monospaced: treating a wide ``W`` as one unit can
+    # overflow a cell even when the nominal wrap count passes.  A conservative
+    # 1.5-unit width keeps the SVG heuristic and real Pillow bounds aligned.
+    if char.isascii() and not char.isspace():
+        return 1.5
+    return 1.0
 
 
-def _visual_width(text: str) -> int:
+def _visual_width(text: str) -> float:
     return sum(_char_units(char) for char in text)
 
 
@@ -426,8 +566,12 @@ def _wrap_line(text: str, max_units: int) -> list[str]:
         cost = _char_units(char)
         if current and used + cost > max_units:
             if last_break >= 0:
-                head = "".join(current[: last_break + 1]).rstrip()
-                tail = "".join(current[last_break + 1 :]).lstrip()
+                # Keep the break delimiter in the preceding tspan.  SVG lays a
+                # trailing space out harmlessly, while XML ``itertext()`` then
+                # preserves the exact visible phrase instead of joining
+                # ``主胜`` and ``42.0%`` into ``主胜42.0%``.
+                head = "".join(current[: last_break + 1])
+                tail = "".join(current[last_break + 1 :])
                 if head:
                     lines.append(head)
                 current = list(tail)
@@ -550,7 +694,9 @@ def render_svg(card: Card) -> str:
             font_size = _svg_font_size(lines, width, ROW_HEIGHT, base)
             fill = COLORS["text"]
             weight = "600" if key in {"time", "primary"} else "500"
-            if key == "primary" and row.status == "observation":
+            if key == "primary" and (
+                row.status == "observation" or row.primary.startswith("◇")
+            ):
                 fill = COLORS["observation"]
             elif key == "primary" and row.status == "no_bet":
                 fill = COLORS["no_bet"]
@@ -582,7 +728,7 @@ def render_svg(card: Card) -> str:
     parts.extend(
         [
             f'<text x="72" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["star"]}">★ 正式主推中的最高信心方向</text>',
-            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["observation"]}">◇ 观察方向（不计主推）</text>',
+            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["observation"]}">◇ 观察/模型首选（不计主推战绩）</text>',
             f'<text x="{WIDTH - 76}" y="{footer_y}" text-anchor="end" font-family="Microsoft YaHei, sans-serif" font-size="20" fill="{COLORS["muted"]}">正式主推 {formal_count} 场</text>',
             f'<line x1="72" y1="{footer_y + 22}" x2="{WIDTH - 72}" y2="{footer_y + 22}" stroke="{COLORS["grid"]}"/>',
             f'<text x="72" y="{footer_y + 61}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["warning"]}">提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。</text>',
@@ -729,7 +875,9 @@ def render_raster(card: Card, output_format: str) -> bytes:
             box = (x, y, x + width, y + ROW_HEIGHT)
             font = _fit_pil_font(draw, lines, box, base, bold=bold)
             fill = COLORS["text"]
-            if key == "primary" and row.status == "observation":
+            if key == "primary" and (
+                row.status == "observation" or row.primary.startswith("◇")
+            ):
                 fill = COLORS["observation"]
             elif key == "primary" and row.status == "no_bet":
                 fill = COLORS["no_bet"]
@@ -749,7 +897,12 @@ def render_raster(card: Card, output_format: str) -> bytes:
 
     footer_y = table_bottom + 22
     draw.text((72, footer_y), "★ 正式主推中的最高信心方向", font=footer_font, fill=COLORS["star"])
-    draw.text((455, footer_y), "◇ 观察方向（不计主推）", font=footer_font, fill=COLORS["observation"])
+    draw.text(
+        (455, footer_y),
+        "◇ 观察/模型首选（不计主推战绩）",
+        font=footer_font,
+        fill=COLORS["observation"],
+    )
     count_text = f"正式主推 {sum(row.status == 'formal_primary' for row in card.rows)} 场"
     count_width = draw.textbbox((0, 0), count_text, font=footer_font)[2]
     draw.text((WIDTH - 76 - count_width, footer_y), count_text, font=footer_font, fill=COLORS["muted"])

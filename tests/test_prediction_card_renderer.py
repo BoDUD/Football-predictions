@@ -22,9 +22,6 @@ SPEC.loader.exec_module(renderer)
 
 def _payload() -> dict:
     payload = {
-        "date": "2026-08-03",
-        "title": "今日足球扫盘",
-        "subtitle": "赛前综合分析版",
         "rows": [
             {
                 "id": "周一001",
@@ -270,7 +267,7 @@ def _history() -> list[dict]:
             "away_team": "不追队",
             "primary_market": None,
             "primary_pick": None,
-            "candidate_audits": [_valid_corner_observation_audit()],
+            "candidate_audits": [],
             "display_exact_score_picks": [{"score": "5-5"}, {"score": "4-4"}],
             "_validated_joint_artifact": _joint_artifact(
                 home_team="待定队", away_team="不追队"
@@ -330,6 +327,88 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertFalse(card.rows[2].star)
         self.assertEqual(card.rows[0].primary, "小2.5 @0.92")
 
+    def test_no_bet_uses_validated_joint_1x2_leader_without_becoming_primary(self) -> None:
+        payload = _payload()
+        payload["rows"] = payload["rows"][2:]
+        card = renderer.validate_payload(payload, _history_index())
+        row = card.rows[0]
+
+        self.assertEqual(
+            row.primary,
+            "◇ 模型首选：主胜 42.0%\n（不计主推、不计战绩）",
+        )
+        self.assertEqual(row.status, "no_bet")
+        self.assertFalse(row.star)
+        svg = renderer.render_svg(card)
+        self.assertIn("正式主推 0 场", svg)
+        self.assertNotIn("42.0% ★", "".join(ET.fromstring(svg).itertext()))
+
+    def test_caller_cannot_hide_an_archived_observation_as_no_bet(self) -> None:
+        payload = _payload()
+        payload["rows"] = payload["rows"][1:2]
+        payload["rows"][0]["status"] = "no_bet"
+        with self.assertRaisesRegex(ValueError, "archive-derived status"):
+            renderer.validate_payload(payload, _history_index())
+
+    def test_duplicate_archived_match_is_rejected(self) -> None:
+        payload = _payload()
+        payload["rows"] = [
+            copy.deepcopy(payload["rows"][0]),
+            copy.deepcopy(payload["rows"][0]),
+        ]
+        with self.assertRaisesRegex(ValueError, "duplicates an archived match"):
+            renderer.validate_payload(payload, _history_index())
+
+    def test_header_is_archive_derived_and_identifier_cannot_carry_pick_markers(self) -> None:
+        for field, value in (
+            ("date", "2099-12-31"),
+            ("title", "大2.5 @0.95"),
+            ("subtitle", "临场复查 胜胜 / 2-1"),
+        ):
+            with self.subTest(field=field):
+                payload = _payload()
+                payload[field] = value
+                with self.assertRaisesRegex(ValueError, "header metadata is archive-derived"):
+                    renderer.validate_payload(payload, _history_index())
+
+        payload = _payload()
+        payload["rows"][0]["id"] = "周一001◇"
+        with self.assertRaisesRegex(ValueError, "recommendation markers"):
+            renderer.validate_payload(payload, _history_index())
+
+        card = renderer.validate_payload(_payload(), _history_index())
+        self.assertEqual(card.date, "2026-08-03")
+        self.assertEqual(card.title, "今日足球扫盘")
+        self.assertEqual(card.subtitle, "初盘分析｜3场")
+
+    def test_card_cannot_mix_archive_stages_or_local_kickoff_dates(self) -> None:
+        history = _history_index()
+        history["9002"]["analysis_stage"] = "lineup-check"
+        payload = _payload()
+        payload["rows"][1]["archive_stage"] = "lineup-check"
+        _rebind_row(payload, 1, history)
+        with self.assertRaisesRegex(ValueError, "cannot mix initial and lineup-check"):
+            renderer.validate_payload(payload, history)
+
+        history = _history_index()
+        history["9002"]["kickoff"] = "2026-08-04T11:00:00Z"
+        payload = _payload()
+        payload["rows"][1]["time"] = "20:00"
+        _rebind_row(payload, 1, history)
+        with self.assertRaisesRegex(ValueError, "cannot mix local kickoff dates"):
+            renderer.validate_payload(payload, history)
+
+    def test_reviewed_archive_can_rerender_its_immutable_prematch_version(self) -> None:
+        history = _history_index()
+        history["9003"]["status"] = "reviewed"
+        payload = _payload()
+        payload["rows"] = payload["rows"][2:]
+        _rebind_row(payload, 0, history)
+
+        card = renderer.validate_payload(payload, history)
+        self.assertEqual(card.rows[0].league, "英超")
+        self.assertFalse(card.rows[0].star)
+
     def test_formal_status_requires_matching_active_archive_primary(self) -> None:
         payload = _payload()
         history = _history_index()
@@ -370,7 +449,10 @@ class PredictionCardRendererTests(unittest.TestCase):
             renderer.validate_payload(payload, _history_index())
 
         card = renderer.validate_payload(_payload(), _history_index())
-        self.assertEqual(card.rows[1].primary, "◇ 角球大9.5 @0.91")
+        self.assertEqual(
+            card.rows[1].primary,
+            "◇ 角球大9.5 @0.91\n（不计主推、不计战绩）",
+        )
         self.assertFalse(card.rows[1].star)
 
     def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(self) -> None:
@@ -402,6 +484,105 @@ class PredictionCardRendererTests(unittest.TestCase):
         wrong_league["rows"][0]["league"] = "芬超"
         with self.assertRaisesRegex(ValueError, "league does not match"):
             renderer.validate_payload(wrong_league, history)
+
+    def test_archive_version_hash_binds_ordinary_league_identity(self) -> None:
+        record = _history_index()["9003"]
+        original = renderer.archive_version_hash(record)
+        changed = copy.deepcopy(record)
+        changed["league"] = "england_premier_league"
+        changed["league_key"] = "england_premier_league"
+        self.assertNotEqual(renderer.archive_version_hash(changed), original)
+
+    def test_archived_raw_or_key_league_is_accepted_but_only_resolved_chinese_is_rendered(self) -> None:
+        history = _history_index()
+        archived = history["9003"]
+        archived["league"] = "巴西杯16强次回合"
+        archived["league_key"] = "brazil_serie_a"
+
+        for supplied in (archived["league"], archived["league_key"], "巴西杯"):
+            with self.subTest(supplied=supplied), mock.patch.object(
+                renderer.plain_text_formatter,
+                "league_display_name",
+                return_value="巴西杯",
+            ):
+                payload = _payload()
+                payload["rows"] = payload["rows"][2:]
+                payload["rows"][0]["league"] = supplied
+                payload["rows"][0]["archive_version_hash"] = renderer.archive_version_hash(
+                    archived
+                )
+
+                card = renderer.validate_payload(payload, history)
+                self.assertEqual(card.rows[0].league, "巴西杯")
+                svg = renderer.render_svg(card)
+                self.assertIn("巴西杯", svg)
+                self.assertNotIn("brazil_serie_a", svg)
+                self.assertNotIn("巴西杯16强次回合", svg)
+
+        with mock.patch.object(
+            renderer.plain_text_formatter,
+            "league_display_name",
+            return_value="巴西杯",
+        ):
+            forged = _payload()
+            forged["rows"] = forged["rows"][2:]
+            forged["rows"][0]["league"] = "巴甲"
+            forged["rows"][0]["archive_version_hash"] = renderer.archive_version_hash(
+                archived
+            )
+            with self.assertRaisesRegex(ValueError, "league does not match"):
+                renderer.validate_payload(forged, history)
+
+    def test_verified_competition_metadata_requires_its_independent_hash_binding(self) -> None:
+        history = _history_index()
+        archived = history["9003"]
+        archived.update(
+            {
+                "league": "brazil_serie_a",
+                "league_key": "brazil_serie_a",
+                "source_url": "https://zq.titan007.com/analysis/9003cn.htm",
+            }
+        )
+        evidence = renderer.memory_store.build_competition_evidence(
+            archived,
+            competition_key="brazil_cup",
+            competition_label="巴西杯",
+            competition_id="186",
+            verification_source=archived["source_url"],
+            source_locator="//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+            collected_at="2026-08-03T00:00:00Z",
+            _source_snapshot={
+                "source_url": archived["source_url"],
+                "response_url": archived["source_url"],
+                "page_sha256": "sha256:" + "b" * 64,
+                "etag": "",
+                "last_modified": "",
+                "collected_at": "2026-08-03T00:00:00Z",
+                "header": {
+                    "home_team": archived["home_team"],
+                    "away_team": archived["away_team"],
+                    "competition_label": "巴西杯",
+                    "competition_id": "186",
+                    "competition_locator": "//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+                },
+            },
+        )
+        archived["competition_evidence"] = evidence
+        payload = _payload()
+        payload["rows"] = payload["rows"][2:]
+        payload["rows"][0]["league"] = "brazil_serie_a"
+        _rebind_row(payload, 0, history)
+
+        with self.assertRaisesRegex(ValueError, "competition_evidence_hash"):
+            renderer.validate_payload(payload, history)
+        payload["rows"][0]["competition_evidence_hash"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "competition_evidence_hash"):
+            renderer.validate_payload(payload, history)
+
+        payload["rows"][0]["competition_evidence_hash"] = evidence["evidence_hash"]
+        card = renderer.validate_payload(payload, history)
+        self.assertEqual(card.rows[0].league, "巴西杯")
+        self.assertNotIn("brazil_serie_a", renderer.render_svg(card))
 
     def test_initial_card_cannot_leak_active_lineup_version(self) -> None:
         history = _history_index()
@@ -496,24 +677,27 @@ class PredictionCardRendererTests(unittest.TestCase):
                 history["9003"]["_validated_joint_artifact"] = malformed
                 card = renderer.validate_payload(_payload(), history)
                 row = card.rows[2]
+                self.assertEqual(row.primary, "数据不足")
                 self.assertEqual(row.total_goals, "数据不足")
                 self.assertEqual(row.htft, "数据不足")
                 self.assertEqual(row.scores, "数据不足")
+                self.assertNotIn("模型首选：", renderer.render_svg(card))
                 self.assertNotIn("5-5", renderer.render_svg(card))
 
     def test_mismatched_derived_probabilities_fail_closed_as_one_unit(self) -> None:
         history = _history_index()
-        artifact = copy.deepcopy(history["9001"]["_validated_joint_artifact"])
+        artifact = copy.deepcopy(history["9003"]["_validated_joint_artifact"])
         artifact["derived"]["one_x_two"]["home"] = 0.99
-        history["9001"]["_validated_joint_artifact"] = artifact
+        history["9003"]["_validated_joint_artifact"] = artifact
         card = renderer.validate_payload(_payload(), history)
         self.assertEqual(
             (
-                card.rows[0].total_goals,
-                card.rows[0].htft,
-                card.rows[0].scores,
+                card.rows[2].primary,
+                card.rows[2].total_goals,
+                card.rows[2].htft,
+                card.rows[2].scores,
             ),
-            ("数据不足", "数据不足", "数据不足"),
+            ("数据不足", "数据不足", "数据不足", "数据不足"),
         )
 
     def test_history_is_required(self) -> None:
@@ -528,7 +712,6 @@ class PredictionCardRendererTests(unittest.TestCase):
 
     def test_svg_escapes_xml_and_exposes_guarded_markers(self) -> None:
         payload = _payload()
-        payload["title"] = "今日 A&B <精选>"
         payload["rows"][0]["home_team"] = "红&蓝<队>"
         history = _history_index()
         history["9001"]["home_team"] = "红&蓝<队>"
@@ -538,13 +721,13 @@ class PredictionCardRendererTests(unittest.TestCase):
 
         root = ET.fromstring(svg)
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
-        self.assertIn("A&amp;B &lt;精选&gt;", svg)
         self.assertIn("红&amp;蓝&lt;队&gt;", svg)
         self.assertIn("小2.5 @0.92 ★", svg)
         self.assertIn("★", svg)
         self.assertIn("◇ 角球大9.5 @0.91", svg)
-        self.assertIn("无正式推荐", svg)
-        self.assertNotIn("输入内容不会冒充主推", svg)
+        rendered_text = "".join(root.itertext())
+        self.assertIn("◇ 模型首选：主胜 42.0%", rendered_text)
+        self.assertNotIn("输入内容不会冒充主推", rendered_text)
 
     def test_svg_file_is_written_and_height_tracks_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -598,6 +781,107 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertIn(long_home, "".join(ET.fromstring(svg).itertext()))
         self.assertNotIn("…", svg)
         self.assertNotIn("...", svg)
+
+    def test_unsafe_derived_league_falls_back_without_rendering_injected_text(self) -> None:
+        for league in (
+            "主推大2.5",
+            "大2.5赛事",
+            "角球大10.5 @0.99",
+            "伪赛事…",
+            "超" * 40,
+        ):
+            with self.subTest(league=league):
+                history = _history_index()
+                history["9003"]["league_key"] = "custom"
+                history["9003"]["league"] = league
+                payload = _payload()
+                payload["rows"] = payload["rows"][2:]
+                payload["rows"][0]["league"] = league
+                _rebind_row(payload, 0, history)
+                card = renderer.validate_payload(payload, history)
+                svg = renderer.render_svg(card)
+                self.assertEqual(card.rows[0].league, "赛事待核验")
+                self.assertNotIn(league, svg)
+
+    def test_team_market_direction_shape_is_rejected_without_blocking_real_names(self) -> None:
+        for injected in ("大2.5 @0.95", "角球大10.5", "受让+0.5"):
+            with self.subTest(injected=injected):
+                history = _history_index()
+                payload = _payload()
+                payload["rows"] = payload["rows"][:1]
+                history["9001"]["home_team"] = injected
+                payload["rows"][0]["home_team"] = injected
+                _rebind_row(payload, 0, history)
+                with self.assertRaisesRegex(ValueError, "recommendation markers"):
+                    renderer.validate_payload(payload, history)
+
+        for team in ("大阪钢巴", "大田韩亚市民", "Academy U21"):
+            with self.subTest(team=team):
+                history = _history_index()
+                payload = _payload()
+                payload["rows"] = payload["rows"][:1]
+                history["9001"]["home_team"] = team
+                payload["rows"][0]["home_team"] = team
+                _rebind_row(payload, 0, history)
+                card = renderer.validate_payload(payload, history)
+                self.assertIn(team, card.rows[0].match)
+
+    def test_team_width_limit_prevents_fixed_row_overlap(self) -> None:
+        for too_wide in ("超" * 31, "W" * 48):
+            with self.subTest(too_wide=too_wide[:4]):
+                history = _history_index()
+                payload = _payload()
+                payload["rows"] = payload["rows"][:1]
+                history["9001"]["home_team"] = too_wide
+                payload["rows"][0]["home_team"] = too_wide
+                _rebind_row(payload, 0, history)
+                with self.assertRaisesRegex(ValueError, "too wide"):
+                    renderer.validate_payload(payload, history)
+
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        history = _history_index()
+        payload = _payload()
+        payload["rows"] = payload["rows"][:1]
+        maximum = "超" * 30
+        history["9001"]["home_team"] = maximum
+        history["9001"]["away_team"] = maximum
+        payload["rows"][0]["home_team"] = maximum
+        payload["rows"][0]["away_team"] = maximum
+        _rebind_row(payload, 0, history)
+        row = renderer.validate_payload(payload, history).rows[0]
+        lines = renderer._cell_lines(row.match, renderer.CELL_WRAP_UNITS[3])
+        image = Image.new("RGB", (renderer.COLUMNS[3][2], renderer.ROW_HEIGHT))
+        draw = ImageDraw.Draw(image)
+        box = (0, 0, renderer.COLUMNS[3][2], renderer.ROW_HEIGHT)
+        font = renderer._fit_pil_font(draw, lines, box, 21)
+        bounds = draw.multiline_textbbox(
+            (0, 0), "\n".join(lines), font=font, spacing=5, align="center"
+        )
+        self.assertLessEqual(bounds[2] - bounds[0], box[2] - 14)
+        self.assertLessEqual(bounds[3] - bounds[1], box[3] - 14)
+
+    def test_numeric_titan_match_id_stays_on_one_line_and_fits(self) -> None:
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        history = _history_index()
+        payload = _payload()
+        payload["rows"] = payload["rows"][:1]
+        payload["rows"][0]["id"] = "2991125"
+        row = renderer.validate_payload(payload, history).rows[0]
+        lines = renderer._cell_lines(row.identifier, renderer.CELL_WRAP_UNITS[0])
+        self.assertEqual(lines, ("2991125",))
+
+        image = Image.new("RGB", (renderer.COLUMNS[0][2], renderer.ROW_HEIGHT))
+        draw = ImageDraw.Draw(image)
+        box = (0, 0, renderer.COLUMNS[0][2], renderer.ROW_HEIGHT)
+        font = renderer._fit_pil_font(draw, lines, box, 21)
+        bounds = draw.textbbox((0, 0), lines[0], font=font)
+        self.assertLessEqual(bounds[2] - bounds[0], box[2] - 14)
 
     def test_png_output_when_pillow_is_available(self) -> None:
         try:
