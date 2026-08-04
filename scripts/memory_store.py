@@ -7,6 +7,7 @@ import argparse
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
+from html.parser import HTMLParser
 import hashlib
 import json
 import math
@@ -16,6 +17,8 @@ import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -163,13 +166,55 @@ LEAGUE_ALIASES = {
     "韩国K联": "韩K联",
     "韩国K联赛": "韩K联",
     "K联赛": "韩K联",
+    "巴西杯": "brazil_cup",
 }
 LEAGUE_STAGE_SUFFIX = re.compile(
     r"(?:"
     r"(?:常规赛|小组赛|资格赛|预选赛|附加赛)?第?\d+(?:轮|周|阶段)|"
-    r"(?:1/16|1/8|1/4)决赛|十六强|八强|四分之一决赛|半决赛|决赛"
+    r"(?:1/16|1/8|1/4)决赛(?:(?:首|次)回合)?|"
+    r"(?:十六强|16强|八强|8强|四分之一决赛|半决赛|决赛)(?:(?:首|次)回合)?"
     r")$"
 )
+COMPETITION_EVIDENCE_SCHEMA_VERSION = "titan-fixture-competition/1.1.0"
+SETTLEMENT_IDENTITY_MIGRATION_SCHEMA_VERSION = (
+    "legacy-settlement-competition-identity/1.0.0"
+)
+COMPETITION_KEY_PATTERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
+COMPETITION_CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
+COMPETITION_SOURCE_PATTERN = re.compile(
+    r"https://zq\.titan007\.com/analysis/(?P<match_id>\d+)cn\.htm\Z",
+    re.IGNORECASE,
+)
+COMPETITION_LOCATOR_PATTERN = re.compile(
+    r"(?:https?:)?//(?:info|zq)\.titan007\.com/",
+    re.IGNORECASE,
+)
+COMPETITION_EVIDENCE_REGISTRY = {
+    "brazil_cup": {
+        "label": "巴西杯",
+        "source_id": "186",
+        "locator_pattern": (
+            r"(?:https?:)?//info\.titan007\.com/cup_match/[^?#]+/"
+            r"cupmatch_186\.htm(?:[?#].*)?\Z"
+        ),
+    },
+}
+TITAN_COMPETITION_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Referer": "https://zq.titan007.com/",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 def data_path(base_dir: str | None) -> Path:
@@ -443,6 +488,45 @@ def normalize_league_name(value: Any) -> str:
 
 def league_key_for_record(record: dict[str, Any]) -> str:
     return normalize_league_name(record.get("league_key") or record.get("league"))
+
+
+def competition_identity_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Use settlement-frozen competition metadata for reviewed records."""
+
+    basis = record.get("settlement_basis")
+    if record.get("status") != "reviewed" or not isinstance(basis, dict):
+        return record
+    frozen = dict(record)
+    for key in (
+        "match_id",
+        "home_team",
+        "away_team",
+        "kickoff",
+        "source_url",
+        "league",
+        "league_key",
+        "competition_evidence",
+    ):
+        # A reviewed record must never fill a missing settlement identity field
+        # from mutable top-level metadata.  Legacy records remain fail-closed
+        # (unknown competition) until the explicit settlement migration freezes
+        # their preserved top-level league identity.
+        frozen[key] = deepcopy(basis.get(key))
+    return frozen
+
+
+def competition_key_for_record(record: dict[str, Any]) -> str:
+    """Return the real competition cohort, separate from any proxy model key."""
+
+    identity = competition_identity_record(record)
+    evidence = validated_competition_evidence(identity)
+    if isinstance(evidence, dict):
+        competition = evidence.get("competition")
+        if isinstance(competition, dict):
+            key = str(competition.get("key") or "").strip()
+            if key:
+                return key
+    return league_key_for_record(identity)
 
 
 def split_line(line: float) -> tuple[float, float]:
@@ -891,6 +975,427 @@ def canonical_prediction_hash(payload: dict[str, Any]) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError("HT/FT observation model contains non-canonical values") from exc
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+class _TitanCompetitionHeaderParser(HTMLParser):
+    """Extract the visible competition link and the two header team links."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._capture: tuple[str, str] | None = None
+        self._text: list[str] = []
+        self.competitions: list[tuple[str, str]] = []
+        self.teams: list[tuple[str, str]] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag.casefold() != "a" or self._capture is not None:
+            return
+        attributes = {key.casefold(): value or "" for key, value in attrs}
+        href = attributes.get("href", "").strip()
+        classes = set(attributes.get("class", "").split())
+        if "LName" in classes:
+            self._capture = ("competition", href)
+            self._text = []
+        elif "/team/Summary/" in href:
+            self._capture = ("team", href)
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() != "a" or self._capture is None:
+            return
+        kind, href = self._capture
+        text = unicodedata.normalize("NFKC", "".join(self._text)).strip()
+        if text:
+            target = self.competitions if kind == "competition" else self.teams
+            target.append((href, text))
+        self._capture = None
+        self._text = []
+
+
+def _source_team_name(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"\s*\(主\)\s*$", "", text)
+    return re.sub(r"\s+", "", text)
+
+
+def _decode_titan_html(raw: bytes) -> str:
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("Titan analysis page is not valid UTF-8 or GB18030 HTML")
+
+
+def extract_titan_competition_snapshot(
+    raw_html: bytes,
+    *,
+    source_url: str,
+    response_url: str,
+    record: dict[str, Any],
+    collected_at: datetime,
+    etag: str = "",
+    last_modified: str = "",
+) -> dict[str, Any]:
+    """Derive competition evidence from the actual Titan analysis-page header."""
+
+    if not raw_html or len(raw_html) > 2_000_000:
+        raise ValueError("Titan analysis page size is invalid")
+    parser = _TitanCompetitionHeaderParser()
+    parser.feed(_decode_titan_html(raw_html))
+    if len(parser.competitions) != 1:
+        raise ValueError("Titan analysis header must contain one competition link")
+    if len(parser.teams) < 2:
+        raise ValueError("Titan analysis header does not contain both team links")
+
+    locator, label = parser.competitions[0]
+    competition_id_match = re.search(r"cupmatch_(\d+)\.htm(?:[?#].*)?\Z", locator)
+    if competition_id_match is None:
+        raise ValueError("Titan competition header link has no supported competition id")
+    header_home = _source_team_name(parser.teams[0][1])
+    header_away = _source_team_name(parser.teams[1][1])
+    expected_home = _source_team_name(record.get("home_team"))
+    expected_away = _source_team_name(record.get("away_team"))
+    if not expected_home or not expected_away:
+        raise ValueError("archived fixture teams are missing")
+    if header_home != expected_home or header_away != expected_away:
+        raise ValueError("Titan analysis header teams do not match the archived fixture")
+
+    return {
+        "source_url": source_url,
+        "response_url": response_url,
+        "page_sha256": f"sha256:{hashlib.sha256(raw_html).hexdigest()}",
+        "etag": str(etag or ""),
+        "last_modified": str(last_modified or ""),
+        "collected_at": collected_at.isoformat(),
+        "header": {
+            "home_team": parser.teams[0][1],
+            "away_team": parser.teams[1][1],
+            "competition_label": label,
+            "competition_id": competition_id_match.group(1),
+            "competition_locator": locator,
+        },
+    }
+
+
+def fetch_titan_competition_snapshot(
+    record: dict[str, Any], *, timeout_seconds: float = 20.0
+) -> dict[str, Any]:
+    """Fetch and parse the exact archived Titan fixture page before metadata writes."""
+
+    source_url = str(record.get("source_url") or "").strip()
+    source_match = COMPETITION_SOURCE_PATTERN.fullmatch(source_url)
+    if source_match is None or source_match.group("match_id") != str(
+        record.get("match_id") or ""
+    ):
+        raise ValueError("competition verification requires the matching Titan analysis URL")
+    request = Request(source_url, headers=TITAN_COMPETITION_FETCH_HEADERS)
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw_html = response.read(2_000_001)
+            response_url = str(response.geturl())
+            etag = str(response.headers.get("ETag") or "")
+            last_modified = str(response.headers.get("Last-Modified") or "")
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise ValueError(f"cannot fetch Titan competition evidence: {exc}") from exc
+    if response_url != source_url:
+        raise ValueError("Titan competition evidence redirected away from the archived source")
+    return extract_titan_competition_snapshot(
+        raw_html,
+        source_url=source_url,
+        response_url=response_url,
+        record=record,
+        collected_at=utc_now(),
+        etag=etag,
+        last_modified=last_modified,
+    )
+
+
+def _competition_evidence_payload(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact hash-bound fixture competition metadata."""
+
+    return {
+        "schema_version": evidence.get("schema_version"),
+        "status": evidence.get("status"),
+        "fixture": deepcopy(evidence.get("fixture")),
+        "competition": deepcopy(evidence.get("competition")),
+        "source": deepcopy(evidence.get("source")),
+    }
+
+
+def calculate_competition_evidence_hash(evidence: dict[str, Any]) -> str:
+    return canonical_prediction_hash(_competition_evidence_payload(evidence))
+
+
+def build_competition_evidence(
+    record: dict[str, Any],
+    *,
+    competition_key: Any,
+    competition_label: Any,
+    competition_id: Any,
+    verification_source: Any,
+    source_locator: Any,
+    collected_at: Any,
+    _source_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build metadata only after parsing the live Titan fixture header."""
+
+    match_id = str(record.get("match_id") or "").strip()
+    if not match_id:
+        raise ValueError("competition evidence requires an archived match_id")
+    key = str(competition_key or "").strip().casefold()
+    if not COMPETITION_KEY_PATTERN.fullmatch(key):
+        raise ValueError("competition_key must use lowercase letters, digits, and underscores")
+    label = unicodedata.normalize("NFKC", str(competition_label or "")).strip()
+    if not label or len(label) > 32 or not COMPETITION_CJK_PATTERN.search(label):
+        raise ValueError("competition_label must be a concise Chinese label")
+    source_id = str(competition_id or "").strip()
+    if not source_id.isdigit() or int(source_id) <= 0:
+        raise ValueError("competition_id must be a positive Titan competition id")
+    registry_entry = COMPETITION_EVIDENCE_REGISTRY.get(key)
+    if not isinstance(registry_entry, dict):
+        raise ValueError("competition_key is not registered for source-verified display")
+    if label != registry_entry.get("label") or source_id != registry_entry.get("source_id"):
+        raise ValueError("competition key, Chinese label, and Titan id do not match the registry")
+
+    source_url = str(verification_source or "").strip()
+    source_match = COMPETITION_SOURCE_PATTERN.fullmatch(source_url)
+    if source_match is None or source_match.group("match_id") != match_id:
+        raise ValueError("competition verification source must be the matching Titan analysis page")
+    if source_url != str(record.get("source_url") or "").strip():
+        raise ValueError("competition verification source must match the archived source_url")
+    snapshot = (
+        deepcopy(_source_snapshot)
+        if isinstance(_source_snapshot, dict)
+        else fetch_titan_competition_snapshot(record)
+    )
+    if set(snapshot) != {
+        "source_url",
+        "response_url",
+        "page_sha256",
+        "etag",
+        "last_modified",
+        "collected_at",
+        "header",
+    }:
+        raise ValueError("Titan competition source snapshot shape is invalid")
+    header = snapshot.get("header")
+    if not isinstance(header, dict) or set(header) != {
+        "home_team",
+        "away_team",
+        "competition_label",
+        "competition_id",
+        "competition_locator",
+    }:
+        raise ValueError("Titan competition header snapshot shape is invalid")
+    if (
+        snapshot.get("source_url") != source_url
+        or snapshot.get("response_url") != source_url
+    ):
+        raise ValueError("Titan competition snapshot URL does not match the archived source")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(snapshot.get("page_sha256") or "")):
+        raise ValueError("Titan competition snapshot page hash is invalid")
+    if _source_team_name(header.get("home_team")) != _source_team_name(
+        record.get("home_team")
+    ) or _source_team_name(header.get("away_team")) != _source_team_name(
+        record.get("away_team")
+    ):
+        raise ValueError("Titan competition snapshot teams do not match the fixture")
+    if str(header.get("competition_label") or "") != label or str(
+        header.get("competition_id") or ""
+    ) != source_id:
+        raise ValueError("Titan competition snapshot does not support the supplied competition")
+
+    locator = str(source_locator or "").strip()
+    if locator != str(header.get("competition_locator") or ""):
+        raise ValueError("competition source locator does not match the Titan header snapshot")
+    if not COMPETITION_LOCATOR_PATTERN.match(locator):
+        raise ValueError("competition source locator must be a Titan competition link")
+    if re.search(rf"(?<!\d){re.escape(source_id)}(?!\d)", locator) is None:
+        raise ValueError("competition source locator must contain the Titan competition id")
+    if re.fullmatch(str(registry_entry["locator_pattern"]), locator, re.IGNORECASE) is None:
+        raise ValueError("competition source locator does not match the registered Titan link")
+
+    asserted_collected = parse_aware_datetime(
+        str(collected_at or ""), "competition evidence collected_at"
+    )
+    captured = parse_aware_datetime(
+        str(snapshot.get("collected_at") or ""),
+        "Titan competition snapshot collected_at",
+    )
+    if abs((asserted_collected - captured).total_seconds()) > 300:
+        raise ValueError("competition collected_at does not match the live page capture")
+    if captured > utc_now().astimezone(captured.tzinfo) + timedelta(minutes=5):
+        raise ValueError("competition evidence collected_at cannot be in the future")
+    kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "competition evidence fixture kickoff"
+    )
+    evidence = {
+        "schema_version": COMPETITION_EVIDENCE_SCHEMA_VERSION,
+        "status": "verified_source_metadata",
+        "fixture": {
+            "match_id": match_id,
+            "home_team": str(record.get("home_team") or ""),
+            "away_team": str(record.get("away_team") or ""),
+            "kickoff": kickoff.isoformat(),
+        },
+        "competition": {
+            "key": key,
+            "label": label,
+            "source_id": source_id,
+        },
+        "source": {
+            "url": source_url,
+            "response_url": str(snapshot["response_url"]),
+            "locator": locator,
+            "collected_at": captured.isoformat(),
+            "method": "titan_analysis_header_link",
+            "page_sha256": str(snapshot["page_sha256"]),
+            "etag": str(snapshot.get("etag") or ""),
+            "last_modified": str(snapshot.get("last_modified") or ""),
+            "header": deepcopy(header),
+        },
+    }
+    evidence["evidence_hash"] = calculate_competition_evidence_hash(evidence)
+    return evidence
+
+
+def validated_competition_evidence(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return verified competition metadata only when every fixture binding passes."""
+
+    evidence = record.get("competition_evidence")
+    if not isinstance(evidence, dict):
+        return None
+    try:
+        if set(evidence) != {
+            "schema_version",
+            "status",
+            "fixture",
+            "competition",
+            "source",
+            "evidence_hash",
+        }:
+            return None
+        if (
+            evidence.get("schema_version") != COMPETITION_EVIDENCE_SCHEMA_VERSION
+            or evidence.get("status") != "verified_source_metadata"
+            or evidence.get("evidence_hash")
+            != calculate_competition_evidence_hash(evidence)
+        ):
+            return None
+        fixture = evidence.get("fixture")
+        competition = evidence.get("competition")
+        source = evidence.get("source")
+        if not isinstance(fixture, dict) or not isinstance(competition, dict) or not isinstance(source, dict):
+            return None
+        if set(fixture) != {"match_id", "home_team", "away_team", "kickoff"}:
+            return None
+        if set(competition) != {"key", "label", "source_id"}:
+            return None
+        if set(source) != {
+            "url",
+            "response_url",
+            "locator",
+            "collected_at",
+            "method",
+            "page_sha256",
+            "etag",
+            "last_modified",
+            "header",
+        }:
+            return None
+        if any(
+            str(fixture.get(field) or "") != str(record.get(record_field) or "")
+            for field, record_field in (
+                ("match_id", "match_id"),
+                ("home_team", "home_team"),
+                ("away_team", "away_team"),
+            )
+        ):
+            return None
+        fixture_kickoff = parse_aware_datetime(
+            str(fixture.get("kickoff") or ""), "competition evidence fixture kickoff"
+        )
+        record_kickoff = parse_aware_datetime(
+            str(record.get("kickoff") or ""), "competition evidence record kickoff"
+        )
+        if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(timezone.utc):
+            return None
+        key = str(competition.get("key") or "")
+        label = str(competition.get("label") or "")
+        source_id = str(competition.get("source_id") or "")
+        registry_entry = COMPETITION_EVIDENCE_REGISTRY.get(key)
+        if (
+            not COMPETITION_KEY_PATTERN.fullmatch(key)
+            or not label
+            or len(label) > 32
+            or not COMPETITION_CJK_PATTERN.search(label)
+            or not source_id.isdigit()
+            or int(source_id) <= 0
+            or not isinstance(registry_entry, dict)
+            or label != registry_entry.get("label")
+            or source_id != registry_entry.get("source_id")
+        ):
+            return None
+        source_url = str(source.get("url") or "")
+        source_match = COMPETITION_SOURCE_PATTERN.fullmatch(source_url)
+        header = source.get("header")
+        if (
+            source_match is None
+            or source_match.group("match_id") != str(record.get("match_id") or "")
+            or source_url != str(record.get("source_url") or "")
+            or source.get("response_url") != source_url
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(source.get("page_sha256") or "")
+            )
+            or not isinstance(header, dict)
+            or set(header)
+            != {
+                "home_team",
+                "away_team",
+                "competition_label",
+                "competition_id",
+                "competition_locator",
+            }
+            or _source_team_name(header.get("home_team"))
+            != _source_team_name(record.get("home_team"))
+            or _source_team_name(header.get("away_team"))
+            != _source_team_name(record.get("away_team"))
+            or header.get("competition_label") != label
+            or str(header.get("competition_id") or "") != source_id
+            or header.get("competition_locator") != source.get("locator")
+            or not COMPETITION_LOCATOR_PATTERN.match(str(source.get("locator") or ""))
+            or re.search(
+                rf"(?<!\d){re.escape(source_id)}(?!\d)",
+                str(source.get("locator") or ""),
+            )
+            is None
+            or re.fullmatch(
+                str(registry_entry["locator_pattern"]),
+                str(source.get("locator") or ""),
+                re.IGNORECASE,
+            )
+            is None
+            or source.get("method") != "titan_analysis_header_link"
+        ):
+            return None
+        collected = parse_aware_datetime(
+            str(source.get("collected_at") or ""), "competition evidence collected_at"
+        )
+        if collected > utc_now().astimezone(collected.tzinfo) + timedelta(minutes=5):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return deepcopy(evidence)
 
 
 def calculate_joint_scenario_audit_hash(audit: dict[str, Any]) -> str:
@@ -4246,6 +4751,10 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "home_team": record.get("home_team"),
         "away_team": record.get("away_team"),
         "kickoff": record.get("kickoff"),
+        "source_url": record.get("source_url"),
+        "league": record.get("league"),
+        "league_key": record.get("league_key"),
+        "competition_evidence": deepcopy(record.get("competition_evidence")),
         "page_status": record.get("page_status"),
         "source_kickoff": record.get("source_kickoff"),
         "source_timezone": record.get("source_timezone"),
@@ -4302,6 +4811,10 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "home_team": record.get("home_team"),
         "away_team": record.get("away_team"),
         "kickoff": record.get("kickoff"),
+        "source_url": record.get("source_url"),
+        "league": record.get("league"),
+        "league_key": record.get("league_key"),
+        "competition_evidence": deepcopy(record.get("competition_evidence")),
         "lineup_rechecked_at": record.get("lineup_rechecked_at"),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
@@ -4416,6 +4929,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "zero_zero_audit": zero_zero_audit,
         "recommendation": args.recommendation,
         "source_url": args.source_url,
+        "competition_evidence": deepcopy(existing.get("competition_evidence")) if existing else None,
+        "metadata_revisions": deepcopy(existing.get("metadata_revisions", [])) if existing else [],
         "notes": args.notes,
         "data_quality": args.data_quality,
         "guardrail_evidence": {
@@ -4467,6 +4982,51 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
     }
+    competition_values = {
+        "competition_key": getattr(args, "competition_key", None),
+        "competition_label": getattr(args, "competition_label", None),
+        "competition_id": getattr(args, "competition_id", None),
+        "verification_source": getattr(args, "competition_verification_source", None),
+        "source_locator": getattr(args, "competition_source_locator", None),
+        "collected_at": getattr(args, "competition_collected_at", None),
+    }
+    supplied_competition_values = [
+        value is not None and str(value).strip() != ""
+        for value in competition_values.values()
+    ]
+    if any(supplied_competition_values) and not all(supplied_competition_values):
+        raise ValueError("competition evidence requires every --competition-* field")
+    if all(supplied_competition_values):
+        supplied_evidence = build_competition_evidence(record, **competition_values)
+        existing_raw_evidence = (
+            existing.get("competition_evidence") if isinstance(existing, dict) else None
+        )
+        previous_evidence = (
+            validated_competition_evidence(existing) if isinstance(existing, dict) else None
+        )
+        if existing_raw_evidence is not None and previous_evidence is None:
+            raise ValueError("existing competition evidence is invalid")
+        if previous_evidence is not None and (
+            previous_evidence.get("competition") != supplied_evidence.get("competition")
+            or previous_evidence.get("source", {}).get("url")
+            != supplied_evidence.get("source", {}).get("url")
+            or previous_evidence.get("source", {}).get("locator")
+            != supplied_evidence.get("source", {}).get("locator")
+        ):
+            raise ValueError("lineup-check competition evidence conflicts with the initial archive")
+        # A legitimate kickoff correction changes the fixture binding, so the
+        # freshly fetched evidence must replace (not reuse) the initial copy.
+        record["competition_evidence"] = supplied_evidence
+    elif record.get("competition_evidence") is not None:
+        inherited_evidence = validated_competition_evidence(record)
+        if inherited_evidence is None:
+            raise ValueError(
+                "fixture metadata changed; supply fresh source-verified "
+                "--competition-* evidence for this version"
+            )
+        record["competition_evidence"] = inherited_evidence
+    if record.get("competition_evidence") is not None and validated_competition_evidence(record) is None:
+        raise ValueError("competition evidence is invalid for the incoming archived version")
     htft_observation = load_htft_observation_audit(args, record)
     if htft_observation is not None:
         record["candidate_audits"].append(htft_observation)
@@ -4718,6 +5278,14 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     provenance = load_score_model_provenance(args)
     record["score_model_provenance"] = provenance
     record["joint_scenario_audit"] = load_joint_scenario_audit(args, record)
+    if (
+        bool(getattr(args, "require_complete_analysis", True))
+        and validated_joint_scenario_audit(record) is None
+    ):
+        raise ValueError(
+            "complete analysis requires a valid --joint-scenario-file; "
+            "the initial/lineup card was not archived"
+        )
     validate_market_collection_times(record, current)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     if getattr(args, "primary_htft_edge_pp", None) is not None:
@@ -4854,6 +5422,98 @@ def cmd_migrate_leagues(args: argparse.Namespace) -> dict[str, Any]:
 
 
 @locked_history_transaction
+def cmd_attach_competition_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    """Append source-verified metadata to one still-pending prediction."""
+
+    path = data_path(args.base_dir)
+    history = load_history(path)
+    record = find_record(history, args.match_id)
+    if not isinstance(record, dict):
+        raise ValueError(f"No archived match found: {args.match_id}")
+    if record.get("mode") != "prematch" or record.get("status") != "pending":
+        raise ValueError("competition evidence can be attached only to a pending prematch archive")
+
+    revisions_before = deepcopy(record.get("revisions", []))
+    settlement_before = deepcopy(record.get("settlement_basis"))
+    archive_hash_before = canonical_prediction_hash(
+        snapshot_payload(revision_snapshot(record))
+    )
+    supplied = build_competition_evidence(
+        record,
+        competition_key=args.competition_key,
+        competition_label=args.competition_label,
+        competition_id=args.competition_id,
+        verification_source=args.verification_source,
+        source_locator=args.source_locator,
+        collected_at=args.collected_at,
+    )
+    existing_raw = record.get("competition_evidence")
+    existing = validated_competition_evidence(record)
+    legacy_replaced = False
+    if existing_raw is not None and existing is None and (
+        not isinstance(existing_raw, dict)
+        or existing_raw.get("schema_version") != "titan-fixture-competition/1.0.0"
+    ):
+        raise ValueError("Archived competition evidence is invalid")
+    if isinstance(existing_raw, dict) and existing is None:
+        legacy_replaced = True
+    duplicate_ignored = False
+    if existing is not None:
+        same_identity = (
+            existing.get("fixture") == supplied.get("fixture")
+            and existing.get("competition") == supplied.get("competition")
+            and existing.get("source", {}).get("url")
+            == supplied.get("source", {}).get("url")
+            and existing.get("source", {}).get("locator")
+            == supplied.get("source", {}).get("locator")
+        )
+        if not same_identity:
+            raise ValueError("Conflicting competition evidence is already archived")
+        duplicate_ignored = True
+    else:
+        record["competition_evidence"] = supplied
+        revisions = record.setdefault("metadata_revisions", [])
+        if not isinstance(revisions, list):
+            raise ValueError("Archived metadata revision log is invalid")
+        revisions.append(
+            {
+                "kind": "competition_evidence",
+                "attached_at": supplied["source"]["collected_at"],
+                "previous_evidence_hash": (
+                    existing_raw.get("evidence_hash")
+                    if isinstance(existing_raw, dict)
+                    else None
+                ),
+                "evidence_hash": supplied["evidence_hash"],
+                "source_page_sha256": supplied["source"]["page_sha256"],
+            }
+        )
+
+    if record.get("revisions", []) != revisions_before:
+        raise ValueError("Competition evidence unexpectedly modified prediction revisions")
+    if record.get("settlement_basis") != settlement_before:
+        raise ValueError("Competition evidence unexpectedly modified settlement data")
+    archive_hash_after = canonical_prediction_hash(
+        snapshot_payload(revision_snapshot(record))
+    )
+    if args.write and not duplicate_ignored:
+        save_history(path, history)
+    return {
+        "ok": True,
+        "path": str(path),
+        "written": bool(args.write and not duplicate_ignored),
+        "duplicate_ignored": duplicate_ignored,
+        "legacy_replaced": legacy_replaced,
+        "match_id": str(record.get("match_id")),
+        "competition_evidence": existing or supplied,
+        "archive_version_hash_before": archive_hash_before,
+        "archive_version_hash_after": archive_hash_after,
+        "archive_version_hash_changed": archive_hash_before != archive_hash_after,
+        "prediction_fields_unchanged": True,
+    }
+
+
+@locked_history_transaction
 def cmd_migrate_settlement_basis(args: argparse.Namespace) -> dict[str, Any]:
     """Backfill settlement audit metadata without re-grading reviewed records."""
     path = data_path(args.base_dir)
@@ -4862,13 +5522,57 @@ def cmd_migrate_settlement_basis(args: argparse.Namespace) -> dict[str, Any]:
     for record in history:
         if record.get("mode") != "prematch" or record.get("status") != "reviewed":
             continue
-        if isinstance(record.get("settlement_basis"), dict):
-            continue
         before = deepcopy(record)
-        record["settlement_basis"] = settlement_basis_for_record(record)
+        existing_basis = record.get("settlement_basis")
+        if isinstance(existing_basis, dict):
+            basis = deepcopy(existing_basis)
+        else:
+            basis = settlement_basis_for_record(record)
+
+        missing_identity_fields = [
+            field
+            for field in ("source_url", "league", "league_key", "competition_evidence")
+            if field not in basis
+        ]
+        if not isinstance(existing_basis, dict):
+            # A top-level evidence object on a legacy reviewed record cannot
+            # prove that it existed when the match was settled.  Do not promote
+            # it into the immutable basis during compatibility migration.
+            basis["competition_evidence"] = None
+            missing_identity_fields = [
+                "source_url",
+                "league",
+                "league_key",
+                "competition_evidence",
+            ]
+
+        if not missing_identity_fields:
+            continue
+
+        for field in ("source_url", "league", "league_key"):
+            if field not in basis:
+                basis[field] = deepcopy(record.get(field))
+        if "competition_evidence" not in basis:
+            basis["competition_evidence"] = None
+        basis["competition_identity_migration"] = {
+            "schema_version": SETTLEMENT_IDENTITY_MIGRATION_SCHEMA_VERSION,
+            "source": "legacy_reviewed_record_top_level_at_migration",
+            "migrated_at": utc_now().isoformat(),
+            "frozen_fields": ["source_url", "league", "league_key"],
+            "competition_evidence_status": (
+                "preserved_from_existing_settlement_basis"
+                if isinstance(existing_basis, dict)
+                and "competition_evidence" in existing_basis
+                and existing_basis.get("competition_evidence") is not None
+                else "unavailable_in_legacy_settlement_basis"
+            ),
+        }
+        record["settlement_basis"] = basis
         without_basis = deepcopy(record)
         without_basis.pop("settlement_basis", None)
-        if without_basis != before:
+        before_without_basis = deepcopy(before)
+        before_without_basis.pop("settlement_basis", None)
+        if without_basis != before_without_basis:
             raise ValueError(
                 f"Settlement-basis migration modified graded data for match {record.get('match_id')}"
             )
@@ -5150,7 +5854,7 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Only pre-match predictions can be reviewed for accuracy")
     if record.get("status") == "reviewed":
         stats = calculate_stats(history)
-        league_key = league_key_for_record(record)
+        league_key = competition_key_for_record(record)
         return {
             "ok": True,
             "already_reviewed": True,
@@ -5354,12 +6058,13 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             "key_learning": args.key_learning,
         },
         "league_key": league_key_for_record(record),
+        "competition_key": competition_key_for_record(record),
         "settlement_basis": settlement_basis,
     })
     warnings = []
     save_history(path, history)
     stats = calculate_stats(history)
-    league_key = league_key_for_record(record)
+    league_key = competition_key_for_record(record)
     return {
         "ok": True,
         "path": str(path),
@@ -6394,7 +7099,12 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
     ]
     return {
         "league_key": league_key,
-        "source_labels": sorted({str(record.get("league", "unknown")) for record in records}),
+        "source_labels": sorted(
+            {
+                str(competition_identity_record(record).get("league") or "unknown")
+                for record in records
+            }
+        ),
         "matches": len(records),
         "reviewed_matches": len(records),
         "strict_forward_reviewed_matches": len(strict_records),
@@ -6443,8 +7153,12 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     exact_scores = exact_score_diagnostics(strict_reviewed)
     display_exact_scores = exact_score_diagnostics(strict_reviewed, display=True)
     leagues: dict[str, dict[str, Any]] = {}
-    for league_key in sorted({league_key_for_record(record) for record in reviewed}):
-        subset = [record for record in reviewed if league_key_for_record(record) == league_key]
+    for league_key in sorted({competition_key_for_record(record) for record in reviewed}):
+        subset = [
+            record
+            for record in reviewed
+            if competition_key_for_record(record) == league_key
+        ]
         leagues[league_key] = league_performance(subset, league_key)
     primary_by_market = primary_market_performance(strict_reviewed)
     quarantined_primary = performance_block(primary_pairs(excluded_reviewed))
@@ -6756,6 +7470,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     record.add_argument("--recommendation", default="")
     record.add_argument("--source-url", default="")
+    record.add_argument("--competition-key")
+    record.add_argument("--competition-label")
+    record.add_argument("--competition-id")
+    record.add_argument("--competition-verification-source")
+    record.add_argument("--competition-source-locator")
+    record.add_argument("--competition-collected-at")
+    record.add_argument(
+        "--require-complete-analysis",
+        action="store_true",
+        default=True,
+        help=(
+            "Fail closed unless a valid source-bound joint scenario artifact "
+            "is archived for this version (enabled by default)"
+        ),
+    )
     record.add_argument("--notes", default="")
     record.add_argument("--model-version")
     record.add_argument(
@@ -7082,6 +7811,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migrate_leagues.add_argument("--write", action="store_true", help="Persist league-key migration")
 
+    competition = sub.add_parser(
+        "attach-competition-evidence",
+        help="Attach source-verified fixture competition metadata without changing predictions",
+    )
+    competition.add_argument("--match-id", required=True)
+    competition.add_argument("--competition-key", required=True)
+    competition.add_argument("--competition-label", required=True)
+    competition.add_argument("--competition-id", required=True)
+    competition.add_argument("--verification-source", required=True)
+    competition.add_argument("--source-locator", required=True)
+    competition.add_argument("--collected-at", required=True)
+    competition.add_argument("--write", action="store_true")
+
     migrate_basis = sub.add_parser(
         "migrate-settlement-basis",
         help="Backfill active-version settlement metadata without re-grading matches",
@@ -7123,6 +7865,8 @@ def main() -> int:
             result = cmd_migrate_primary(args)
         elif args.command == "migrate-leagues":
             result = cmd_migrate_leagues(args)
+        elif args.command == "attach-competition-evidence":
+            result = cmd_attach_competition_evidence(args)
         elif args.command == "migrate-settlement-basis":
             result = cmd_migrate_settlement_basis(args)
         elif args.command == "migrate-learning-scopes":

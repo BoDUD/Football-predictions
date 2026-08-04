@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -186,6 +187,24 @@ def joint_artifact() -> dict:
     }
 
 
+def competition_snapshot(record: dict, collected_at: str) -> dict:
+    return {
+        "source_url": record["source_url"],
+        "response_url": record["source_url"],
+        "page_sha256": "sha256:" + "b" * 64,
+        "etag": "",
+        "last_modified": "",
+        "collected_at": collected_at,
+        "header": {
+            "home_team": record["home_team"],
+            "away_team": record["away_team"],
+            "competition_label": "巴西杯",
+            "competition_id": "186",
+            "competition_locator": "//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+        },
+    }
+
+
 class PlainTextFormatterTests(unittest.TestCase):
     def setUp(self) -> None:
         validator = patch.object(
@@ -231,6 +250,100 @@ class PlainTextFormatterTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?:^|\n)(?:#|[-*+] |```)")
         self.assertNotIn("<table", text.lower())
         self.assertLessEqual(len(text.splitlines()), 18)
+
+    def test_all_registered_model_league_keys_have_chinese_display_labels(self):
+        expected = {
+            "brazil_serie_a": "巴甲",
+            "norway_eliteserien": "挪超",
+            "japan_j1": "日职",
+            "usa_mls": "美职联",
+            "england_premier_league": "英超",
+            "france_ligue_1": "法甲",
+            "spain_la_liga": "西甲",
+            "germany_bundesliga": "德甲",
+            "italy_serie_a": "意甲",
+            "korea_k_league_1": "韩K联",
+            "sweden_allsvenskan": "瑞典超",
+            "finland_veikkausliiga": "芬超",
+            "uefa_champions_league": "欧冠",
+            "afc_champions_league": "亚冠",
+        }
+        for league_key, display in expected.items():
+            with self.subTest(league_key=league_key):
+                self.assertEqual(
+                    formatter.league_display_name(
+                        {"league": league_key, "league_key": league_key}
+                    ),
+                    display,
+                )
+
+    def test_unknown_ascii_league_key_never_leaks_to_user_output(self):
+        for league_key in ("unknown_ascii_league", "brazil_serie_b", "some-league"):
+            with self.subTest(league_key=league_key):
+                display = formatter.league_display_name(
+                    {"league": league_key, "league_key": league_key}
+                )
+                self.assertEqual(display, "赛事待核验")
+                self.assertNotIn(league_key, display)
+
+    def test_unsafe_chinese_league_label_never_leaks_to_user_output(self):
+        for label in (
+            "主推大2.5",
+            "大2.5赛事",
+            "角球大10.5 @0.99",
+            "伪赛事…",
+            "超" * 40,
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    formatter.league_display_name(
+                        {"league": label, "league_key": "custom"}
+                    ),
+                    "赛事待核验",
+                )
+
+    def test_market_shape_filter_does_not_block_ordinary_team_or_age_text(self):
+        for label in ("大阪钢巴", "大田韩亚市民", "青年U21联赛"):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    formatter.league_display_name(
+                        {"league": label, "league_key": "custom"}
+                    ),
+                    label,
+                )
+
+    def test_brazil_cup_stage_label_renders_as_chinese_competition(self):
+        self.assertEqual(
+            formatter.league_display_name(
+                {"league": "2026巴西杯16强次回合"}
+            ),
+            "巴西杯",
+        )
+
+    def test_verified_competition_evidence_overrides_proxy_model_league(self):
+        record = base_record()
+        record.update(
+            {
+                "league": "brazil_serie_a",
+                "league_key": "brazil_serie_a",
+                "source_url": "https://zq.titan007.com/analysis/42cn.htm",
+            }
+        )
+        record["competition_evidence"] = (
+            formatter.memory_store.build_competition_evidence(
+                record,
+                competition_key="brazil_cup",
+                competition_label="巴西杯",
+                competition_id="186",
+                verification_source=record["source_url"],
+                source_locator="//info.titan007.com/cup_match/2026-2027/cupmatch_vs/cupmatch_186.htm",
+                collected_at="2026-07-22T18:00:00+09:00",
+                _source_snapshot=competition_snapshot(
+                    record, "2026-07-22T18:00:00+09:00"
+                ),
+            )
+        )
+        self.assertEqual(formatter.league_display_name(record), "巴西杯")
 
     def test_initial_plain_text_is_complete(self):
         with tempfile.TemporaryDirectory() as base:
@@ -355,6 +468,67 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertNotIn("半全场：", text)
             self.assert_plain(text)
 
+    def test_no_primary_plain_text_exposes_non_counting_joint_model_leader(self):
+        record = base_record()
+        record["primary_market"] = None
+        record["primary_pick"] = None
+        record["total_pick"] = None
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            with patch.object(
+                formatter.memory_store,
+                "validated_joint_scenario_audit",
+                return_value=joint_artifact(),
+            ):
+                text = formatter.render(base, "42", "initial")
+
+        self.assertIn(
+            "◇ 模型首选：客胜46.0%（不计主推、不计战绩）",
+            text,
+        )
+        self.assertIn("主推：无正式推荐", text)
+        self.assert_plain(text)
+
+    def test_qualified_observation_precedes_joint_model_leader_in_plain_text(self):
+        record = base_record()
+        record["primary_market"] = None
+        record["primary_pick"] = None
+        record["total_pick"] = None
+        record["candidate_audits"] = [
+            {
+                "kind": formatter.memory_store.CORNER_OBSERVATION_KIND,
+                "best_observation": {
+                    "market": "corner_total",
+                    "side": "over",
+                    "line": 9.5,
+                    "odds": 0.91,
+                    "diagnostic_qualification_status": "qualified",
+                },
+            }
+        ]
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            with (
+                patch.object(
+                    formatter.memory_store,
+                    "validated_joint_scenario_audit",
+                    return_value=joint_artifact(),
+                ),
+                patch.object(
+                    formatter.memory_store,
+                    "validated_observation_audit",
+                    return_value=True,
+                ),
+            ):
+                text = formatter.render(base, "42", "initial")
+
+        self.assertIn(
+            "◇ 观察方向：角球大9.5 @0.91（不计主推、不计战绩）",
+            text,
+        )
+        self.assertNotIn("◇ 模型首选", text)
+        self.assert_plain(text)
+
     def test_format_pick_supports_expanded_markets(self):
         record = base_record()
         cases = (
@@ -468,6 +642,43 @@ class PlainTextFormatterTests(unittest.TestCase):
             )
             self.assertIn("当前主推：主队角球-1.5 @0.95", lineup_text)
             self.assert_plain(lineup_text)
+
+    def test_initial_text_uses_its_frozen_fixture_not_later_lineup_metadata(self):
+        record = base_record()
+        initial = copy.deepcopy(record)
+        initial.update(
+            {
+                "analysis_stage": "initial",
+                "league": "finland_veikkausliiga",
+                "league_key": "finland_veikkausliiga",
+                "home_team": "初盘主队",
+                "away_team": "初盘客队",
+                "kickoff": "2026-07-23T12:00:00+09:00",
+                "revisions": [],
+            }
+        )
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "league": "england_premier_league",
+                "league_key": "england_premier_league",
+                "home_team": "临场主队",
+                "away_team": "临场客队",
+                "kickoff": "2026-07-23T13:00:00+09:00",
+                "lineup_rechecked_at": "2026-07-23T12:35:00+09:00",
+                "primary_change": {"status": "maintained"},
+                "revisions": [initial],
+            }
+        )
+
+        text = formatter.render_initial(record)
+
+        self.assertIn("赛事：芬超", text)
+        self.assertIn("比赛：初盘主队 vs 初盘客队", text)
+        self.assertIn("开赛：2026-07-23 12:00（日本时间）", text)
+        self.assertNotIn("英超", text)
+        self.assertNotIn("临场主队", text)
+        self.assertNotIn("13:00（日本时间）", text)
 
     def test_zero_zero_is_displayed_only_when_it_ranks_in_top_two(self):
         record = base_record()
@@ -696,6 +907,10 @@ class PlainTextFormatterTests(unittest.TestCase):
             "settlement_basis": {
                 "policy": "latest_active_prematch_version",
                 "analysis_stage": "lineup-check",
+                "source_url": record.get("source_url"),
+                "league": record["league"],
+                "league_key": record["league_key"],
+                "competition_evidence": None,
                 "evaluation_eligibility": {
                     "policy_version": "strict-oos-market-policy-v1",
                     "strict_forward_oos": True,

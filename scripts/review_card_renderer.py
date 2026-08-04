@@ -195,6 +195,16 @@ def _parse_score(value: Any, field: str) -> tuple[str, int, int]:
     return text, int(match.group(1)), int(match.group(2))
 
 
+def _parse_optional_score(
+    value: Any, field: str
+) -> tuple[str, int | None, int | None]:
+    """Render an unavailable score honestly while validating any supplied value."""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "未取得", None, None
+    return _parse_score(value, field)
+
+
 def load_history_records(path: Path) -> dict[str, dict[str, Any]]:
     """Load history without accepting a caller-authored presentation payload."""
     try:
@@ -357,11 +367,15 @@ def build_card(record: dict[str, Any]) -> ReviewCard:
     identifier = _required_text(str(record.get("match_id") or ""), "match_id")
     home_team = _required_text(record.get("home_team"), "home_team")
     away_team = _required_text(record.get("away_team"), "away_team")
-    half_score, half_home, half_away = _parse_score(
+    half_score, half_home, half_away = _parse_optional_score(
         record.get("half_time_score"), "half_time_score"
     )
     final_score, final_home, final_away = _parse_score(record.get("final_score"), "final_score")
-    if half_home > final_home or half_away > final_away:
+    if (
+        half_home is not None
+        and half_away is not None
+        and (half_home > final_home or half_away > final_away)
+    ):
         raise ReviewCardError("half-time score cannot exceed final score")
 
     primary = basis.get("primary_pick")
@@ -415,6 +429,12 @@ def load_card(history_path: Path, match_id: str) -> ReviewCard:
     return build_card(record)
 
 
+def joint_reference_note(card: ReviewCard) -> str:
+    if card.joint_status == "validated_joint_paths":
+        return "联合参考来自结算依据绑定的冻结联合路径；高方差，不计主推或战绩。"
+    return "冻结结算依据未包含可验证联合路径；不从赛后结果或其他版本补填。"
+
+
 def visible_text(card: ReviewCard) -> tuple[str, ...]:
     """Return every user-visible string for deterministic QA."""
     stage_label = "临场版" if card.settlement_stage == "lineup-check" else "初盘版"
@@ -423,7 +443,7 @@ def visible_text(card: ReviewCard) -> tuple[str, ...]:
         f"{card.league}｜{card.identifier}｜{stage_label}最终结算依据",
         *(label for label, _key, _width in COLUMNS),
         *card.row_values,
-        "联合参考来自结算依据绑定的冻结联合路径；高方差，不计主推或战绩。",
+        joint_reference_note(card),
         f"赛前版本归档：{card.settlement_archived_at}",
         f"结算绑定：{card.settlement_hash}",
         "复盘用于校准分析，不代表未来收益",
@@ -448,7 +468,17 @@ def _wrap_units(text: str, maximum_units: int) -> tuple[str, ...]:
         current: list[str] = []
         used = 0
         for character in paragraph:
-            cost = 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+            if unicodedata.east_asian_width(character) in {"W", "F"}:
+                cost = 2
+            elif character.isascii() and character.isalpha():
+                # Latin letters can be as wide as a CJK glyph in Microsoft
+                # YaHei (notably W/M).  Review cells use a fixed font size, so
+                # budget them conservatively instead of letting a long club
+                # name cross the next column.  Digits and punctuation retain a
+                # one-unit cost so normal Titan IDs and scores stay on one line.
+                cost = 2
+            else:
+                cost = 1
             if current and used + cost > maximum_units:
                 output.append("".join(current))
                 current = []
@@ -465,8 +495,9 @@ def _wrapped_cells(card: ReviewCard) -> tuple[tuple[str, ...], ...]:
     for value, (_label, _key, width), font_size in zip(
         card.row_values, COLUMNS, CELL_FONT_SIZES
     ):
-        # A CJK glyph consumes two visual units and is roughly one font-size
-        # wide.  This conservative budget leaves horizontal cell padding.
+        # A CJK glyph or Latin letter consumes two visual units and is roughly
+        # one font-size wide.  Digits/punctuation consume one.  This
+        # conservative budget leaves horizontal cell padding.
         cells.append(
             _wrap_units(value, max(2, int((width - 18) / (font_size / 2))))
         )
@@ -568,7 +599,7 @@ def render_svg(card: ReviewCard) -> str:
         [
             f'<line x1="{SIDE_MARGIN}" y1="{row_y}" x2="{SIDE_MARGIN + TABLE_WIDTH}" y2="{row_y}" stroke="{COLORS["grid"]}"/>',
             f'<line x1="{SIDE_MARGIN}" y1="{footer_y}" x2="{SIDE_MARGIN + TABLE_WIDTH}" y2="{footer_y}" stroke="{COLORS["grid"]}"/>',
-            f'<text x="{SIDE_MARGIN + 30}" y="{footer_y + 43}" font-size="23" font-weight="700" fill="{COLORS["warning"]}">联合参考来自结算依据绑定的冻结联合路径；高方差，不计主推或战绩。</text>',
+            f'<text x="{SIDE_MARGIN + 30}" y="{footer_y + 43}" font-size="23" font-weight="700" fill="{COLORS["warning"]}">{escape(joint_reference_note(card))}</text>',
             f'<text x="{SIDE_MARGIN + 30}" y="{footer_y + 82}" font-size="20" fill="{COLORS["muted"]}">赛前版本归档：{escape(card.settlement_archived_at)}</text>',
             f'<text x="{SIDE_MARGIN + 30}" y="{footer_y + 115}" font-size="18" fill="{COLORS["muted"]}">结算绑定：{escape(card.settlement_hash)}</text>',
             f'<text x="{SIDE_MARGIN + 30}" y="{footer_y + 146}" font-size="20" fill="{COLORS["muted"]}">复盘用于校准分析，不代表未来收益</text>',
@@ -705,7 +736,7 @@ def render_png(card: ReviewCard) -> bytes:
         width=1,
     )
     footer_lines = (
-        ("联合参考来自结算依据绑定的冻结联合路径；高方差，不计主推或战绩。", 23, COLORS["warning"], True),
+        (joint_reference_note(card), 23, COLORS["warning"], True),
         (f"赛前版本归档：{card.settlement_archived_at}", 20, COLORS["muted"], False),
         (f"结算绑定：{card.settlement_hash}", 18, COLORS["muted"], False),
         ("复盘用于校准分析，不代表未来收益", 20, COLORS["muted"], False),

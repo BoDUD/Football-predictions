@@ -28,7 +28,8 @@ Quick prediction results only - best for fast decisions:
 ### Mode B: 可视化模式 (Visual/Detailed)
 Use one simple deterministic image plus analytical text. Initial and lineup-check images share
 the same fixed eight columns: `编号`, `时间`, `赛事`, `主队 vs 客队`, `主推`, `总进球`, `半全场`,
-and `波胆`. The stage appears in the title/subtitle and does not change the table. In the image,
+and `波胆`. The renderer derives the date, title, and stage subtitle from the bound archive;
+callers cannot supply them, mix stages/dates, or repeat one match. The stage does not change the table. In the image,
 show only the highest-probability goal range with its probability and lead over second place.
 Show HT/FT and exact score as positionally paired events from the same path posterior: normally
 two pairs, or three only when the versioned complexity rule detects a divided top cluster.
@@ -369,7 +370,7 @@ archive command from the probability distribution, complete current market, and 
 format. A caller-supplied value is only an assertion to audit; it is never authoritative.
 
 ### Final Output
-1. Best threshold-qualified recommendation from the unified market pool; if none qualifies, show the highest-ranked observation as `不下注`
+1. Headline direction in archive-derived order: best threshold-qualified formal primary; otherwise the highest-ranked separately qualified observation as `◇ 观察/不下注`; otherwise the validated joint 1X2 Top-1 as `◇ 模型首选（不计主推、不计战绩）`; otherwise `数据不足`. Never show both non-primary fallbacks as competing headline directions.
 2. One highest-probability goal range plus its probability lead in the compact image; retain the complete goal-range distribution in text/audit
 3. Two user-facing `(HT/FT × full-time score)` joint events normally, or three only when the versioned complexity rule passes; if the artifact is unavailable, show `数据不足` and no fallback scenarios
 4. Confidence level for each recommendation and the best qualified first-half direction, or `无正EV建议`

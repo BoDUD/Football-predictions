@@ -50,7 +50,7 @@ Moving an outbox event to `processed` records dispatch, not analytical success. 
 ## Match-specific child tasks
 
 - Lineup title: `临场复查 <match_id>｜<home_team> vs <away_team>`.
-- Review title: `复盘｜<league_key>｜<match_id>｜<home_team> vs <away_team>`.
+- Review title: `复盘｜<competition_display_label>｜<match_id>｜<home_team> vs <away_team>`. Resolve the source-verified Chinese display label through the same path as the card; use a stable Chinese league mapping or `赛事待核验` when evidence is unavailable. Keep ASCII competition/league keys in internal scheduler metadata only.
 - Resolve the current task ID from `nodeRepl.requestMeta.threadId` before claiming. Refuse to continue if it is absent; never invent or reuse an originating task ID.
 - Read the Skill, claim the exact scheduler item with `--thread-id <current_thread_id>`, and stop/archive on a refused claim.
 - Persist a complete non-empty result artifact and call `complete` with the current task ID and artifact path.
