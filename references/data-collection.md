@@ -10,7 +10,7 @@
 
 Base URL: `https://zq.titan007.com/analysis/{match_id}cn.htm`
 
-Use 新球体育 (XinQiu Sports) data provider on the page.
+Use 新球体育 (XinQiu Sports) data provider on the page for fixture state, odds, and its available team data. Do not treat Titan as the exclusive lineup source. At lineup-check, follow [lineup-sources.md](lineup-sources.md) whenever Titan does not show both confirmed starting XIs.
 
 ## Input Formats
 
@@ -138,10 +138,14 @@ registry training, and final workbook-to-HTFT order, follow
 - **Note**: Starting lineups are typically published 30-60 minutes before match kickoff
 - If collecting data earlier than this window, mark lineup data as "not yet available"
 - Re-check for lineups closer to kickoff time if user requests update
-- If lineup not available, proceed with prediction using available squad depth info from bench
+- During the scheduled lineup-check, do not stop after an empty Titan lineup section. Execute the complete fallback in [lineup-sources.md](lineup-sources.md) in the same claimed attempt.
+- Use official competition/federation or club announcements first. Use a public ESPN lineup page with a stable numeric `gameId` as the first general fallback and a Sofascore page with an exact event ID as the second. Do not automate FotMob, Flashscore, or Soccerway; their published terms restrict automated or systematic retrieval.
+- If the fallback still does not satisfy the confirmation contract, proceed with `lineup_confirmed=false`, state every source checked, and use available squad-depth/injury information only as unconfirmed context. Missing lineups alone are not a reason to invent an XI or abort an otherwise valid no-lineup archive.
 
 #### When Available, Extract:
 - Starting XI for both teams
+- Whether each page labels the XI as actual/confirmed or predicted/probable
+- Exact source URL, source tier, timezone-aware collection time, and fixture-binding fields
 - Key player stats (goals/assists this season)
 - Injury/suspension list (especially core players - impact assessment)
 - Bench strength / notable substitutes
@@ -162,8 +166,8 @@ registry training, and final workbook-to-HTFT order, follow
 7. Extract corner-total and corner-handicap markets plus independent corner-profile data
 8. Extract first-half and half-time/full-time markets and half-time scoring data when available
 9. Extract team fundamentals from the main analysis page
-10. If available near match time, extract lineup data from the lineup section
-11. If lineup not yet published, note this and proceed with available data
+10. Near match time, inspect Titan's lineup section; if either starting XI is absent, run the official-site → ESPN → Sofascore fallback and validate the stable event ID, fixture, and confirmation label
+11. If the lineup evidence contract still fails, list the checked sources, mark the lineup unconfirmed, and proceed without enabling any lineup-dependent formal gate
 12. Compile all data into a structured format before proceeding to prediction
 
 Do not calculate formal EV from a display screenshot that omits the opposite side, odds

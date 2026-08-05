@@ -68,14 +68,16 @@ Organize all collected data into these categories:
 - Head-to-head records (last 3-5 years: W/D/L, goal trends)
 - League standings and points gap
 - Both teams' match motivation
-- **If lineup not yet published**: Note "阵容未公布" and proceed with available data
+- **If Titan has no lineup during a lineup-check**: Follow [lineup-sources.md](lineup-sources.md) before declaring the lineup unavailable
 
 ### 2. Squad & Lineup
 - Starting XI (if available - typically 30-60 min before kickoff)
+- Source URL, visible actual/confirmed versus predicted label, timezone-aware collection time, and exact fixture binding
 - Key player stats (goals/assists)
 - Injury/suspension list (especially core player absence impact)
 - Bench depth (substitute player quality)
-- **If unavailable**: Mark as "待公布" and use squad depth info only
+- **Confirmation**: Require both complete XIs under [lineup-sources.md](lineup-sources.md) before enabling `lineup_confirmed`; matching predicted lineups never qualify
+- **If unavailable after fallback**: Name the sources checked, mark as "待公布/未确认", and use squad depth info only
 
 ### 3. Match Importance
 - Both teams' motivation (relegation battle / title race / playoff fight)
@@ -337,6 +339,11 @@ lineup, injuries, weather, motivation, and rest may be reported as evidence and 
 documented sensitivity scenario. When the executable model cannot consume that feature,
 keep the unadjusted baseline, show the scenario range separately, and downgrade a formal
 pick whose sign changes across the range.
+
+At lineup-check, Titan's empty lineup section does not end collection. Execute the fixture-bound
+official-site → ESPN → Sofascore fallback in [lineup-sources.md](lineup-sources.md). Treat a
+single-provider report, every predicted/probable XI, and every unresolved source conflict as
+`lineup_confirmed=false`; do not use them to unlock or change a lineup-dependent formal pick.
 
 ---
 
