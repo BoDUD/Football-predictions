@@ -1086,7 +1086,7 @@ class MemoryStoreTests(unittest.TestCase):
 
             self.assertTrue(card.rows[0].primary.startswith("◇ 模型首选："))
             self.assertNotEqual(card.rows[0].total_goals, "数据不足")
-            self.assertIn(len(card.rows[0].htft.splitlines()), {2, 3})
+            self.assertEqual(len(card.rows[0].htft.splitlines()), 2)
             self.assertEqual(
                 len(card.rows[0].htft.splitlines()),
                 len(card.rows[0].scores.splitlines()),

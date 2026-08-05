@@ -51,15 +51,14 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
    second-half goal counts. It must reproduce the canonical full-time exact-score marginal,
    the verified half-time marginal, and the HT/FT 3x3 matrix within declared tolerances. Store
    input hashes, construction version, convergence, normalization, and tail audits.
-8. Aggregate that path posterior to genuine `(HT/FT × full-time score)` joint events. Keep the
-   global joint Top 2 as an internal distribution audit. For public scenarios, take the
-   highest-probability half-time result as a common root, cover all three full-time outcomes
-   beneath it, and select the highest-probability genuine score path within each branch. Put
-   the continuity branch first, then enumerate the remaining full-time results in canonical
-   H/D/A order; report `P(FT result | selected HT result)` explicitly so this structural order
-   is not mistaken for probability ranking. Derive 1X2, total goals, goal range, and BTTS from the same posterior. Never
-   multiply HT/FT and score marginals, place their independent Top 2 lists side by side, or
-   replace a score to force terminal-result agreement.
+8. Aggregate that path posterior to genuine `(HT/FT × full-time score)` joint events. Freeze,
+   validate, and publicly display exactly the global joint Top 2 in descending joint-probability
+   order. Keep every event's HT/FT label, full-time score, and joint probability together. If
+   both events share an HT/FT label but have different scores, retain both rows and repeat the
+   label. Never display a third event or complete a branch set. Derive 1X2, total goals, goal
+   range, and BTTS from the same posterior. Never multiply HT/FT and score marginals, place
+   their independent Top 2 lists side by side, or replace a score to force terminal-result
+   agreement. Independent HT/FT and unconditional exact-score Top 2 lists remain internal.
 
 Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/full-time draw; `DA` = half-time draw/full-time away win.
 
@@ -69,7 +68,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
 - Hong Kong odds: `EV = probability * hk_odds - (1 - probability)`.
 - Settle quarter-goal first-half lines using their real half-win/half-loss components.
 - For mutually exclusive HT/FT selections sold as a two-selection ticket, calculate each leg separately. The combined hit probability is the sum of the selected outcome probabilities, but expected return depends on the stake allocated to each leg. Do not add the two EV values.
-- Recommend at most one first-half direction. A valid nine-outcome matrix may retain its own Top 2 for internal component diagnostics, but user-facing output comes from the unified path posterior as exactly three branches under the leading half-time result, one for each full-time outcome.
+- Recommend at most one first-half direction. A valid nine-outcome matrix may retain its own Top 2 for internal component diagnostics, but user-facing output comes only from the unified path posterior's frozen and validated global joint-event Top 2.
 - While the strict policy keeps these markets paused, label every first-half/HTFT direction as observation even when its price and heuristic EV look positive.
 - A future policy version may make first-half advice actionable only after a versioned model, current complete market, positive server-recalculated EV/edge, medium/high data quality, and lineup-time survival all pass.
 - A future HT/FT formal path additionally requires a normalized supported `league_key`, a complete current nine-outcome market from at least five bookmakers, verified row/column marginals, and adequate clean live-forward calibration. Changing the display/ranking heuristic alone cannot unlock it.
@@ -86,7 +85,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
   inspected during development, so do not carry their percentages into the expanded bundle
   or describe them as untouched end-to-end confirmation.
 - Conditional follow-through, state continuity, full-time coherence, and exact-score result
-  agreement remain visible HT/FT component audits but cannot replace a diagnostic probability
+  agreement remain machine-readable HT/FT component audits but cannot replace a diagnostic probability
   Top-2 cell. They also cannot create a user-facing joint event; that event must exist with its
   own probability in the validated path posterior.
 - For a model-only matrix, load `league_pair_gate_evidence` from the current model registry
@@ -109,7 +108,7 @@ Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/
   non-independent and ineligible.
 - Show the failed threshold for every observation candidate, for example `EV -2.5%` or `市场边际仅 +1.2pp`. An observation candidate is a probability match shape, not an actionable positive-EV bet.
 - If current HT/FT odds are missing, a validated model-only path posterior may still show its
-  three system-selected branch representatives as `赔率缺失，不可执行`, without market probability
+  frozen global joint-event Top 2 as `赔率缺失，不可执行`, without market probability
   or EV. If the unified artifact is missing or fails validation, show `数据不足` and no scenario rows. Do not fall
   back to separate HT/FT/score lists, old records, prose, or manual terminal-result pairing.
 
@@ -119,16 +118,15 @@ Add these sections after the full-time market analysis:
 
 1. `半场判断`: first-half 1X2 probabilities, likely half-time scores, current half-time Asian/total lines, and the best positive-EV direction.
 2. `半全场矩阵`: a compact 3x3 marginal matrix for HH through AA, with row/column checks against the unified path posterior; do not highlight an independent display Top 2.
-3. `联合比赛路径`: show exactly three rows beneath the highest-probability half-time result,
-   covering its full-time H, D, and A branches once each. Put the continuity branch first,
-   enumerate the remaining outcomes in H/D/A order, and pair each with the highest-probability
-   genuine full-time score path inside that branch. Every row includes HT/FT, the branch conditional probability, representative
-   full-time score, genuine path probability, posterior/artifact identity, status, and any
-   eligible market audit. Every displayed total, goal range, BTTS, or 1X2 label must be derived
+3. `联合比赛路径`: show exactly the frozen, validated global joint-event Top 2 in descending
+   joint-probability order. Every row includes its inseparable HT/FT label, full-time score,
+   genuine joint probability, posterior/artifact identity, status, and any eligible market
+   audit. Retain both rows when their HT/FT labels match but their scores differ, and never
+   expose a third event. Every displayed total, goal range, BTTS, or 1X2 label must be derived
    from the same path cells.
 4. `风险`: missing odds, small samples, lineup uncertainty, and high variance.
 
-Concise mode includes the best first-half direction plus the three system-selected branches and their representative unified joint paths. Keep `观察候选（未达标）` labels even in concise mode. If no valid path artifact exists, show only `数据不足` for the scenario section.
+Concise mode includes the best first-half direction plus the frozen, validated global joint-event Top 2 with each event's HT/FT-score pairing intact. Keep `观察候选（未达标）` labels even in concise mode. If no valid path artifact exists, show only `数据不足` for the scenario section.
 
 ## Supported-competition boundary
 

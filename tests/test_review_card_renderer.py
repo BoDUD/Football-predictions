@@ -21,7 +21,6 @@ def _display_item(
     htft: str,
     score: str,
     probability: float,
-    conditional_probability: float,
 ) -> dict:
     home, away = (int(value) for value in score.split("-"))
     return {
@@ -32,10 +31,7 @@ def _display_item(
         "away_goals": away,
         "probability": probability,
         "percentage": probability * 100.0,
-        "branch_probability": conditional_probability * 0.44,
-        "branch_percentage": conditional_probability * 44.0,
-        "conditional_probability": conditional_probability,
-        "conditional_percentage": conditional_probability * 100.0,
+        "selection_role": "global_joint_probability_top_two",
         "status": "high_variance_reference",
         "recommendation_eligible": False,
         "counts_toward_primary_record": False,
@@ -45,21 +41,20 @@ def _display_item(
     }
 
 
-def _outlook(count: int = 3) -> dict:
+def _outlook(count: int = 2) -> dict:
     items = [
-        _display_item(1, "DD", "1-1", 0.0562, 0.38),
-        _display_item(2, "DH", "1-0", 0.0431, 0.28),
-        _display_item(3, "DA", "0-1", 0.0366, 0.34),
+        _display_item(1, "DD", "1-1", 0.0562),
+        _display_item(2, "DH", "1-0", 0.0431),
     ][:count]
     return {
         "joint_scenarios": {
             "items": copy.deepcopy(items),
             "display_items": items,
             "display_count": len(items),
-            "display_reason": "complex_top_three" if count == 3 else "default_top_two",
-            "display_policy": "dominant_half_time_three_way_branches_v1",
-            "selected_half_time_result": "D",
-            "selected_half_time_probability": 0.44,
+            "display_reason": "global_joint_probability_top_two",
+            "display_policy": "global_joint_probability_top_two_v1",
+            "ranking_basis": "global_joint_event_probability_descending",
+            "pairing_basis": "same_validated_joint_event",
             "ranking_source": "validated_joint_paths",
             "status": "high_variance_reference",
             "recommendation_eligible": False,
@@ -144,7 +139,7 @@ class ReviewCardRendererTests(unittest.TestCase):
         builder = mock.patch.object(
             renderer.public_market_outlook,
             "build_public_market_outlook",
-            side_effect=lambda artifact: _outlook(3),
+            side_effect=lambda artifact: _outlook(2),
         )
         self.public_builder = builder.start()
         self.addCleanup(builder.stop)
@@ -158,15 +153,15 @@ class ReviewCardRendererTests(unittest.TestCase):
         )
         self.assertEqual(
             [(event.htft, event.score) for event in card.events],
-            [("DD", "1-1"), ("DH", "1-0"), ("DA", "0-1")],
+            [("DD", "1-1"), ("DH", "1-0")],
         )
         self.assertEqual(
             card.htft_reference.splitlines()[1:],
-            ["1. 平/平 5.6%", "2. 平/胜 4.3%", "3. 平/负 3.7%"],
+            ["1. 平/平 5.6%", "2. 平/胜 4.3%"],
         )
         self.assertEqual(
             card.score_reference.splitlines()[1:],
-            ["1. 1-1 5.6%", "2. 1-0 4.3%", "3. 0-1 3.7%"],
+            ["1. 1-1 5.6%", "2. 1-0 4.3%"],
         )
         visible = "\n".join(renderer.visible_text(card))
         self.assertNotIn("9-9", visible)
@@ -175,7 +170,7 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertNotIn("AA+", visible)
         self.assertNotIn("…", visible)
         self.assertNotIn("...", visible)
-        self.assertIn("联合参考来自结算依据绑定的冻结联合路径", visible)
+        self.assertIn("联合 Top 2 来自结算依据绑定的冻结联合路径", visible)
         self.public_builder.assert_called_once_with(_artifact())
 
     def test_formal_primary_and_result_are_read_only_from_settlement_basis(self) -> None:
@@ -218,13 +213,25 @@ class ReviewCardRendererTests(unittest.TestCase):
         visible = "\n".join(renderer.visible_text(card))
         self.assertNotIn("9-9", visible)
         self.assertIn("冻结结算依据未包含可验证联合路径", visible)
-        self.assertNotIn("联合参考来自结算依据绑定的冻结联合路径", visible)
+        self.assertNotIn("联合 Top 2 来自结算依据绑定的冻结联合路径", visible)
 
     def test_invalid_public_display_fails_closed_without_independent_fallback(self) -> None:
-        bad = _outlook(3)
+        bad = _outlook(2)
         bad["joint_scenarios"]["display_items"][1]["counts_as_primary"] = True
         self.public_builder.side_effect = lambda artifact: bad
         card = renderer.build_card(_record())
+        self.assertEqual(card.events, ())
+        self.assertEqual(card.joint_status, "data_insufficient")
+
+    def test_score_direction_conflicting_with_htft_fails_closed(self) -> None:
+        bad = _outlook(2)
+        bad["joint_scenarios"]["display_items"][1]["score"] = "0-1"
+        bad["joint_scenarios"]["display_items"][1]["home_goals"] = 0
+        bad["joint_scenarios"]["display_items"][1]["away_goals"] = 1
+        self.public_builder.side_effect = lambda artifact: bad
+
+        card = renderer.build_card(_record())
+
         self.assertEqual(card.events, ())
         self.assertEqual(card.joint_status, "data_insufficient")
 
@@ -244,25 +251,45 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertEqual(card.final_score, "2-1")
         self.assertIn("未取得", renderer.render_svg(card))
 
-    def test_svg_has_eight_columns_dynamic_three_events_and_no_ellipsis(self) -> None:
+    def test_svg_has_eight_columns_exactly_two_events_and_no_ellipsis(self) -> None:
         card = renderer.build_card(_record())
         svg = renderer.render_svg(card)
         root = ET.fromstring(svg)
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
         for heading in ("编号", "赛事", "比赛", "半场", "全场", "主推结算", "半全场参考", "波胆参考"):
             self.assertIn(heading, svg)
-        for value in ("平/平", "平/负", "平/胜", "1-1", "0-1", "1-0"):
+        for value in ("平/平", "平/胜", "1-1", "1-0"):
             self.assertIn(value, svg)
+        self.assertNotIn("平/负", svg)
+        self.assertNotIn("0-1", svg)
         self.assertIn("无正式推荐（不结算、不计战绩）", "".join(root.itertext()))
         self.assertNotIn("…", svg)
         self.assertNotIn("...", svg)
 
-    def test_incomplete_two_branch_public_output_fails_closed(self) -> None:
-        self.public_builder.side_effect = lambda artifact: _outlook(2)
+    def test_incomplete_one_event_public_output_fails_closed(self) -> None:
+        self.public_builder.side_effect = lambda artifact: _outlook(1)
         card = renderer.build_card(_record())
         self.assertEqual(card.events, ())
         self.assertEqual(card.htft_reference, "数据不足")
         self.assertEqual(card.score_reference, "数据不足")
+
+    def test_two_distinct_scores_with_same_htft_are_both_preserved(self) -> None:
+        outlook = _outlook(2)
+        outlook["joint_scenarios"]["items"] = [
+            _display_item(1, "DD", "0-0", 0.065),
+            _display_item(2, "DD", "1-1", 0.061),
+        ]
+        outlook["joint_scenarios"]["display_items"] = copy.deepcopy(
+            outlook["joint_scenarios"]["items"]
+        )
+        self.public_builder.side_effect = lambda artifact: outlook
+
+        card = renderer.build_card(_record())
+
+        self.assertEqual(
+            [(event.htft, event.score) for event in card.events],
+            [("DD", "0-0"), ("DD", "1-1")],
+        )
 
     def test_png_and_svg_files_are_generated(self) -> None:
         try:

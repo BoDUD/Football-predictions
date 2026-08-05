@@ -476,9 +476,8 @@ class PlainTextFormatterTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "联合情景：半场平后三路：平平38.6% / 平胜25.0% / 平负36.4%；"
-                "代表比分路径（高方差，不作推荐）：平平·1-1 5.8% / "
-                "平胜·1-0 2.0% / 平负·0-1 2.1%",
+                "联合情景：联合事件 Top 2（按联合概率排序，高方差，不作推荐）："
+                "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
                 text,
             )
             self.assertIn("纯模型（未混入过期盘口）", text)
@@ -890,17 +889,25 @@ class PlainTextFormatterTests(unittest.TestCase):
                 },
             })
             write_history(base, [record])
-            review_text = formatter.render(base, "42", "review")
+            with patch.object(
+                formatter.memory_store,
+                "validated_joint_scenario_audit",
+                return_value=joint_artifact(),
+            ):
+                review_text = formatter.render(base, "42", "review")
             self.assertIn("主推：无正式推荐（不结算、不计战绩）", review_text)
             self.assertIn(
                 "学习归档：无主推观察样本（只用于规则与数据质量复核）",
                 review_text,
             )
             self.assertIn(
-                "半全场观察诊断：实际平/主，Top1未命中、Top2命中"
-                "（不结算、不计战绩）",
+                "联合情景：联合事件 Top 2（按联合概率排序，高方差，不作推荐）："
+                "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
                 review_text,
             )
+            self.assertNotIn("半全场观察诊断", review_text)
+            self.assertNotIn("比分参考：", review_text)
+            self.assertNotIn("命中排名：", review_text)
             self.assertNotIn("无正式推荐＝未结算", review_text)
             self.assert_plain(review_text)
 

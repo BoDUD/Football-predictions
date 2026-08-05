@@ -106,7 +106,7 @@ COLORS = {
 }
 
 FOOTER_SOURCE_NOTE = (
-    "半全场仅列联合情景中不重复的结果；波胆保留各联合路径比分及概率。"
+    "半全场与波胆按冻结联合概率 Top 2 逐行配对；不展示独立榜单或第三项。"
 )
 
 
@@ -309,39 +309,47 @@ def _joint_artifact_display(
 
         scenario_block = public["joint_scenarios"]
         scenario_items = scenario_block["items"]
-        selected_half_time = str(scenario_block.get("selected_half_time_result") or "")
-        if not isinstance(scenario_items, list) or len(scenario_items) != 3:
-            raise ValueError("joint scenarios must contain three branch display items")
-        if selected_half_time not in HTFT_RESULT_LABELS:
-            raise ValueError("joint scenario half-time root is invalid")
-        expected_full_time_order = (
-            selected_half_time,
-            *(code for code in ("H", "D", "A") if code != selected_half_time),
-        )
+        if (
+            not isinstance(scenario_items, list)
+            or len(scenario_items) != 2
+            or scenario_block.get("display_count") != 2
+            or scenario_block.get("display_policy")
+            != public_market_outlook.JOINT_DISPLAY_POLICY
+        ):
+            raise ValueError("joint scenarios must contain the global joint Top 2")
         htft_lines: list[str] = []
-        seen_htft_codes: set[str] = set()
+        seen_events: set[tuple[str, str]] = set()
         score_lines: list[str] = []
+        previous_probability: float | None = None
         for rank, item in enumerate(scenario_items, start=1):
             if item.get("slot") != rank:
                 raise ValueError("invalid joint display slot")
             htft_code = str(item["htft"])
             if len(htft_code) != 2 or any(code not in HTFT_RESULT_LABELS for code in htft_code):
                 raise ValueError("invalid HT/FT display code")
-            if (
-                htft_code[0] != selected_half_time
-                or htft_code in seen_htft_codes
-                or htft_code[1] != expected_full_time_order[rank - 1]
-            ):
-                raise ValueError("joint scenarios must cover distinct branches of one half-time root")
-            seen_htft_codes.add(htft_code)
+            score = str(item["score"])
+            score_match = re.fullmatch(r"(\d+)-(\d+)", score)
+            if score_match is None:
+                raise ValueError("invalid joint display score")
+            home_goals = int(score_match.group(1))
+            away_goals = int(score_match.group(2))
+            full_result = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            if htft_code[1] != full_result:
+                raise ValueError("joint display score conflicts with HT/FT result")
+            event_identity = (htft_code, score)
+            if event_identity in seen_events:
+                raise ValueError("joint Top 2 events must be distinct")
+            seen_events.add(event_identity)
             percentage = float(item["percentage"])
             if not math.isfinite(percentage) or percentage <= 0.0:
                 raise ValueError("invalid joint display probability")
+            probability = percentage / 100.0
+            if previous_probability is not None and probability > previous_probability:
+                raise ValueError("joint Top 2 must be probability-ranked")
+            previous_probability = probability
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
             htft_lines.append(label)
-            score_lines.append(f"{item['score']} {percentage:.1f}%")
-        if {code[1] for code in seen_htft_codes} != {"H", "D", "A"}:
-            raise ValueError("joint scenarios must cover all full-time branches")
+            score_lines.append(f"{score} {percentage:.1f}%")
         return total_goals, "\n".join(htft_lines), "\n".join(score_lines), model_leader
     except (
         KeyError,

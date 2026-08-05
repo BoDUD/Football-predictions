@@ -23,7 +23,7 @@ Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
 - Best pick with probability and EV
-- The three system-selected full-time branches beneath the leading half-time result, each paired with its own genuine representative score path from one validated posterior
+- Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each event's HT/FT label, full-time score, and joint probability kept together
 
 ### Mode B: 可视化模式 (Visual/Detailed)
 Use one simple deterministic image plus analytical text. Initial and lineup-check images share
@@ -31,9 +31,9 @@ the same fixed eight columns: `编号`, `时间`, `赛事`, `主队 vs 客队`, 
 and `波胆`. The renderer derives the date, title, and stage subtitle from the bound archive;
 callers cannot supply them, mix stages/dates, or repeat one match. The stage does not change the table. In the image,
 show only the highest-probability goal range with its probability and lead over second place.
-Show HT/FT and exact score as a three-way branch tree from the same path posterior: use the
-leading half-time result as the root, cover every full-time result once, and pair each branch
-with its highest-probability genuine score path.
+Show HT/FT and exact score as exactly the frozen, validated global joint-event Top 2 from the
+same path posterior. Keep every event's HT/FT label, full-time score, and joint probability
+together; retain repeated HT/FT labels when their scores differ and never display a third item.
 
 Keep the full analysis in accompanying text or machine audit, in this stable order:
 
@@ -256,13 +256,11 @@ version, Hall audit, convergence and tail audit, and every recomputed marginal.
 
 Rank user-facing scenarios only after aggregating this distribution to genuine
 `(HT/FT × full-time score)` joint events. The joint probability is a sum of path cells, not the
-product of an HT/FT marginal and a score marginal. Preserve the global joint Top 2 as an
-internal audit. For public output, use the highest-probability half-time result as a common
-root, cover all three full-time outcomes, select the highest-probability score path within
-each HT/FT branch. Show the continuity branch first and the remaining full-time outcomes in
-canonical H/D/A order; report conditional probabilities explicitly instead of implying that
-the structural order is a probability ranking. Keep HT/FT and score in the same order so
-every displayed position remains one event.
+product of an HT/FT marginal and a score marginal. Freeze and validate the global joint Top 2,
+then publicly display exactly those two events in descending joint-probability order. Keep
+every event's HT/FT label, full-time score, and joint probability together. Retain both rows
+when their HT/FT labels match but their scores differ; never deduplicate them, expose a third
+event, or complete a branch set.
 Derive half-time, 1X2, total goals, goal range, and BTTS from the same artifact. Preserve legacy
 unconditional exact-score and HT/FT Top 2 fields only as machine-readable diagnostics; never
 place them side by side as user scenarios, reorder them for terminal-result agreement, or fill
@@ -344,7 +342,7 @@ pick whose sign changes across the range.
 
 ## Step 5: Win Probability & Betting Advice
 
-Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate every football-goal market and build the user-facing three-way branch tree from one validated match-path posterior. Use the leading half-time result as the root, cover all three full-time outcomes, and pair each branch with its own highest-probability score path. Keep standalone exact-score, global joint Top 2, and HT/FT rankings as internal diagnostics only. Calculate the independent corner markets from their own required distribution.
+Read [expanded-markets.md](expanded-markets.md), [exact-score.md](exact-score.md), and [half-time-full-time.md](half-time-full-time.md). Calculate every football-goal market and publicly display only the frozen, validated global joint-event Top 2 from one match-path posterior, in descending joint-probability order, with every HT/FT-score pair kept intact. Keep standalone exact-score and HT/FT Top 2 rankings as internal diagnostics only. Calculate the independent corner markets from their own required distribution.
 
 ### Win Probability Prediction
 Aggregate the validated unified path posterior; use a market-conditioned posterior only under the calibrated and provenance-safe rules above:
@@ -377,7 +375,7 @@ format. A caller-supplied value is only an assertion to audit; it is never autho
 ### Final Output
 1. Headline direction in archive-derived order: best threshold-qualified formal primary; otherwise the highest-ranked separately qualified observation as `◇ 观察/不下注`; otherwise the validated joint 1X2 Top-1 as `◇ 模型首选（不计主推、不计战绩）`; otherwise `数据不足`. Never show both non-primary fallbacks as competing headline directions.
 2. One highest-probability goal range plus its probability lead in the compact image; retain the complete goal-range distribution in text/audit
-3. Exactly three user-facing branches under the leading half-time result, each paired with its own highest-probability genuine full-time score path; if the artifact is unavailable, show `数据不足` and no fallback scenarios
+3. Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each HT/FT label, full-time score, and joint probability inseparably paired; if the artifact is unavailable, show `数据不足` and no fallback scenarios
 4. Confidence level for each recommendation and the best qualified first-half direction, or `无正EV建议`
 5. Complete half-time, 1X2 and BTTS distributions in text/audit, plus a 3x3 HT/FT marginal matrix when audit detail is useful. The legacy `probability_top2_v3_post_selection` HT/FT Top 2 may remain archived for component evaluation but is not a user-facing scenario list. Pass `league_key`, current model hash, and registry-issued evidence; historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Under `strict-oos-market-policy-v1`, HT/FT remains observation-only regardless of diagnostic gates.
 
@@ -396,7 +394,7 @@ Treat joint events and standalone exact-score diagnostics only as high-variance 
 记录至少包含：
 
 - 比赛 ID、联赛、带时区的开球时间
-- 主客队、绑定的后验 artifact/hash，以及领先半场状态下“延续结果优先、其余按 H/D/A 枚举”的三条全场分支；每条分支另列条件概率，并配对其联合概率最高的真实全场比分路径
+- 主客队、绑定的后验 artifact/hash，以及冻结且通过校验的全局联合事件 Top 2；严格按联合概率降序保存，每项的 HT/FT、全场比分与联合概率不可拆分，相同 HT/FT 但比分不同的两项不得去重
 - 亚盘选择方、盘口、赔率
 - 大小球方向、盘口、赔率
 - 合格的总进球区间、双方进球、角球大小或角球让球方向及其真实市场赔率
@@ -404,6 +402,6 @@ Treat joint events and standalone exact-score diagnostics only as high-variance 
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件比分 Top 2，仅作为机器可读的全场分布审计，并让 `--predicted-score` 等于无条件第一项；这些字段不得直接驱动卡片。面向用户的配对情景必须另行绑定通过校验的联合路径后验 artifact；展示层选择概率最高的半场状态，完整覆盖其后的全场胜、平、负三路，并为每一路配对该分支联合概率最高的真实比分路径。没有该 artifact 时显示 `数据不足`。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推，也不能与联合进球路径硬绑定。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆、联合情景和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件比分 Top 2，仅作为机器可读的全场分布审计，并让 `--predicted-score` 等于无条件第一项；这些字段不得直接驱动卡片。面向用户的配对情景必须另行绑定通过校验的联合路径后验 artifact；展示层只公开冻结且校验通过的全局联合事件 Top 2，严格按联合概率降序，并保持每项 HT/FT、全场比分与联合概率不可拆分。相同 HT/FT 但比分不同的两项必须同时保留，绝不公开第三项；独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。没有该 artifact 时显示 `数据不足`。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推，也不能与联合进球路径硬绑定。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆、联合情景和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

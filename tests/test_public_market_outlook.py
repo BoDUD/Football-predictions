@@ -223,7 +223,7 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(btts["display_count"], 2)
         self.assertEqual(btts["display_reason"], "binary_distribution")
 
-    def test_current_like_only_real_joint_events_expand_to_three(self):
+    def test_current_like_only_real_joint_events_display_global_top_two(self):
         artifact = self._artifact()
         artifact["htft_marginal"]["half_time_result_probabilities"] = {
             "H": 0.3371228490880407,
@@ -282,22 +282,20 @@ class PublicMarketOutlookTests(unittest.TestCase):
         )
         self.assertEqual(markets["btts"]["display_count"], 2)
         scenarios = result["joint_scenarios"]
-        self.assertEqual(scenarios["display_count"], 3)
+        self.assertEqual(scenarios["display_count"], 2)
         self.assertEqual(
             [(item["htft"], item["score"]) for item in scenarios["display_items"]],
-            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
-        )
-        self.assertEqual(
-            [item["conditional_probability"] for item in scenarios["display_items"]],
-            [
-                0.15 / 0.3865648771276534,
-                0.1105648771276534 / 0.3865648771276534,
-                0.126 / 0.3865648771276534,
-            ],
+            [("DD", "1-1"), ("HH", "2-1")],
         )
         self.assertEqual(scenarios["items"], scenarios["display_items"])
+        self.assertEqual(
+            scenarios["display_policy"],
+            "global_joint_probability_top_two_v1",
+        )
+        self.assertNotIn("third_probability", scenarios)
+        self.assertNotIn("top2_top3_gap_percentage_points", scenarios)
 
-    def test_duplicate_global_top_two_do_not_consume_public_branch_slots(self):
+    def test_global_top_two_with_same_htft_are_both_preserved(self):
         artifact = self._artifact()
         duplicate = {
             "htft": "DD",
@@ -355,10 +353,9 @@ class PublicMarketOutlookTests(unittest.TestCase):
 
         self.assertEqual(
             [(item["htft"], item["score"]) for item in scenarios["items"]],
-            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
+            [("DD", "1-1"), ("DD", "0-0")],
         )
-        self.assertEqual([item["slot"] for item in scenarios["items"]], [1, 2, 3])
-        self.assertEqual([item["raw_rank"] for item in scenarios["items"]], [1, 5, 4])
+        self.assertEqual([item["slot"] for item in scenarios["items"]], [1, 2])
         self.assertTrue(scenarios["artifact_top_two_exact_match"])
         self.assertEqual(
             scenarios["display_policy"],
@@ -418,7 +415,7 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(
             scenarios["warning"], public_market_outlook.JOINT_SCENARIO_WARNING
         )
-        self.assertEqual(scenarios["display_count"], 3)
+        self.assertEqual(scenarios["display_count"], 2)
         self.assertEqual(scenarios["ranking_source"], "legacy_joint_cells")
         self.assertTrue(scenarios["artifact_top_two_exact_match"])
         for item in scenarios["items"]:
@@ -456,10 +453,10 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(
             scenarios["ranking_source"], "validated_path_kernel_event_planes"
         )
-        self.assertEqual(scenarios["display_count"], 3)
+        self.assertEqual(scenarios["display_count"], 2)
         self.assertEqual(
             [(item["htft"], item["score"]) for item in scenarios["display_items"]],
-            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
+            [("DD", "1-1"), ("HH", "2-1")],
         )
 
     def test_reconstructed_top_two_must_exactly_match_frozen_artifact(self):
@@ -472,15 +469,16 @@ class PublicMarketOutlookTests(unittest.TestCase):
         ):
             self._build(artifact)
 
-    def test_incomplete_branch_marginal_fails_closed(self):
+    def test_public_joint_top_two_does_not_expose_independent_htft_ranking(self):
         artifact = self._artifact()
         artifact["htft_marginal"]["code_probabilities"].pop("DH")
 
-        with self.assertRaisesRegex(
-            public_market_outlook.PublicMarketOutlookError,
-            "all nine branches",
-        ):
-            self._build(artifact)
+        scenarios = self._build(artifact)["joint_scenarios"]
+
+        self.assertEqual(
+            [(item["htft"], item["score"]) for item in scenarios["items"]],
+            [("DD", "1-1"), ("HH", "2-1")],
+        )
 
     def test_each_joint_scenario_safety_field_is_mandatory(self):
         mutations = {
