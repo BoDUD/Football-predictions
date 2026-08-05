@@ -68,19 +68,15 @@ The compact cells follow these display rules:
 - `总进球` shows only the highest-probability goal range from the validated path posterior,
   together with its probability and lead over the second-ranked range. Do not show a second
   goal-range choice in the image.
-- `半全场` and `波胆` are compact projections of one three-branch scenario tree. Use the
-  highest-probability half-time result as the common root, then include its full-time H, D,
-  and A outcomes once each. Put the continuity branch first, then enumerate the remaining
-  full-time outcomes in canonical H/D/A order; retain `P(FT result | selected HT result)` as
-  explicit metadata instead of treating the structural order as a probability rank. In
-  `半全场`, list the three distinct HT/FT labels in that order without a rank prefix or
-  percentage. In `波胆`, pair each label with the
-  highest-probability genuine score path inside that branch and show that path's joint
-  probability. Never omit or repeat a branch, sum only the representative paths into a fake
-  HT/FT probability, or independently rank the two columns.
-- The artifact's globally ranked joint Top 2 remains an internal immutable audit and may
-  contain two scores from the same HT/FT branch. It does not occupy public display slots.
-  Callers and prose cannot request, suppress, reorder, or hand-pick the three public branches.
+- `半全场` and `波胆` are compact projections of exactly the frozen, validated global
+  joint-event Top 2. Display the two events in descending genuine joint-probability order and
+  keep each event's HT/FT label, full-time score, and joint probability inseparably aligned
+  across the two columns. If both events share an HT/FT label but have different scores,
+  retain both rows and repeat the label. Never display a third event, complete a branch set,
+  deduplicate a repeated HT/FT label, or independently rank the two columns.
+- The independent HT/FT Top 2 and independent unconditional exact-score Top 2 remain internal
+  immutable audits and do not occupy public display slots. Callers and prose cannot request,
+  suppress, reorder, or hand-pick the two public global joint events.
 
 The image is intentionally concise, but the analysis is not. Half-time marginals, full-time
 1X2, complete goal-range distribution, BTTS, market movement, EV/edge, evidence coverage, and
@@ -91,7 +87,7 @@ model or archive.
 ## Joint-path integrity
 
 The payload references the archived joint-posterior artifact, not caller-supplied HT/FT or
-score arrays. Every displayed branch representative must be aggregated from actual match paths. Never multiply an
+score arrays. Every displayed joint event must be aggregated from actual match paths. Never multiply an
 HT/FT marginal by a score marginal, replace a score to match a desired full-time direction,
 or fill a missing event from notes, an older revision, or user preference.
 
@@ -101,7 +97,7 @@ goal-range, and BTTS marginals. Market prices may condition the posterior only u
 versioned method supported by strict forward calibration. A price used for conditioning
 cannot also be claimed as independent EV evidence against that posterior. If the artifact or
 any required validation fails, render `数据不足` for the affected cells and no fabricated
-fallback branches. `数据不足` describes missing or invalid joint analysis; it must not be used
+fallback scenario rows. `数据不足` describes missing or invalid joint analysis; it must not be used
 merely because the formal recommendation gate rejected every direction. With a valid joint
 artifact, keep the genuine total and paired scenarios visible and label an eligible model
 choice `◇ 模型首选（不计战绩）` when no formal primary exists.

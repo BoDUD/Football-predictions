@@ -20,9 +20,9 @@ Show user-facing text as ordinary wrapped text, not a fenced code block.
 
 ## Required fields
 
-- Initial: match identity and kickoff, primary or explicit no-primary, probability and EV when applicable, non-settled secondary references, complete half-time, full-time 1X2, goal-range and BTTS distributions derived from the validated joint posterior, each field's Top-1/Top-2 gap and `较明确/分歧` status, and exactly three branches beneath the leading half-time result. For each branch, show its conditional probability, representative full-time score, and genuine path probability. Include structured evidence coverage and the analysis disclaimer. If the joint artifact is unavailable or invalid, show `数据不足` for every descriptive field and no scenario fallback.
-- Lineup check: match identity and check time, explicit maintained/changed/cancelled primary state, current primary or no-primary, non-settled secondary references, the same complete distributions/gaps, the same three-branch conditional tree reconstructed from the active lineup-check artifact, structured evidence coverage, and the analysis disclaimer. If validation fails, show `数据不足`; never reuse the initial version's scenarios manually.
-- Review: the verified final score and, when available, the verified half-time score; when a half-time score was not required for settlement and could not be verified, show `未取得` and leave the related observation ungraded. Also include the final active settlement basis, primary result or `主推：无正式推荐（不结算、不计战绩）`, learning scope, non-settled secondary references, the archived paired joint-event diagnostic in its original order, internal unconditional exact-score Top-1/Top-2 and HT/FT Top-1/Top-2 diagnostics when gradable, causal learning, league primary record, cumulative primary record, and the review disclaimer. The same information must support the deterministic review image without rewriting any pre-match direction.
+- Initial: match identity and kickoff, primary or explicit no-primary, probability and EV when applicable, non-settled secondary references, complete half-time, full-time 1X2, goal-range and BTTS distributions derived from the validated joint posterior, each field's Top-1/Top-2 gap and `较明确/分歧` status, and exactly the frozen, validated global joint-event Top 2 in descending joint-probability order. For each event, show its inseparable HT/FT label, full-time score, and genuine joint probability; preserve both rows when their HT/FT labels match but their scores differ. Include structured evidence coverage and the analysis disclaimer. If the joint artifact is unavailable or invalid, show `数据不足` for every descriptive field and no scenario fallback.
+- Lineup check: match identity and check time, explicit maintained/changed/cancelled primary state, current primary or no-primary, non-settled secondary references, the same complete distributions/gaps, and the active lineup-check artifact's frozen global joint-event Top 2 with each HT/FT-score pairing intact, structured evidence coverage, and the analysis disclaimer. If validation fails, show `数据不足`; never reuse the initial version's scenarios manually.
+- Review: the verified final score and, when available, the verified half-time score; when a half-time score was not required for settlement and could not be verified, show `未取得` and leave the related observation ungraded. Also include the final active settlement basis, primary result or `主推：无正式推荐（不结算、不计战绩）`, learning scope, non-settled secondary references, the frozen public joint-event Top 2 in its original order, causal learning, league primary record, cumulative primary record, and the review disclaimer. Keep independent unconditional exact-score and HT/FT Top-2 selections, hit ranks, and grading machine-only. The same information must support the deterministic review image without rewriting any pre-match direction.
 
 ## Headline-direction precedence
 
@@ -41,13 +41,14 @@ Never print both a qualified observation and the joint-model leader as competing
 directions. Omit the model-leader line when a formal primary or qualified observation already
 has priority, and do not emit an unlabelled standalone `无` placeholder.
 
-In initial and lineup output, never print the independent unconditional exact-score Top 2,
-legacy total-conditioned score pair, HT/FT Top 2, or hidden 0-0 audit. Those fields remain
-machine-readable and may be summarized only in the post-match diagnostic. Do not print
+In initial, lineup, and review output, never print the independent unconditional exact-score
+Top 2, legacy total-conditioned score pair, HT/FT Top 2, their hit ranks or grading, or the
+hidden 0-0 audit. Those fields remain machine-only and are not summarized publicly. Do not print
 free-form `recommendation` or `notes` as a betting direction: those strings cannot bypass
 formal-pick or observation gates. Initial/lineup output instead prints a fixed model-scope line
 and structured `data_quality`/guardrail evidence coverage. Review keeps its causal learning
-text after the existing review-specific sanitization. Never describe an observation or
+text after the existing review-specific sanitization and shows only the frozen public joint
+Top 2. Never describe an observation or
 secondary reference as won or lost.
 
 When an image is rendered, follow [image-output.md](image-output.md). Initial and lineup images

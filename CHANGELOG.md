@@ -1,5 +1,7 @@
 # Changelog
 
+Released-version entries below describe historical behavior and are superseded by newer entries when policies change.
+
 ## [Unreleased]
 
 ### Added
@@ -8,7 +10,7 @@
 - Added a real archive-to-card integration test for non-counting model leaders and paired joint scenarios.
 
 ### Changed
-- Replace global Top-2/3 public path display with a versioned three-way branch tree rooted at the leading half-time result. Each full-time branch appears exactly once, uses continuity-first structural order, and keeps its own highest-probability genuine score path; the global joint Top 2 remains an internal audit.
+- Public scenario output now shows only the frozen, validated global joint-event Top 2 in descending joint-probability order across initial, lineup, and review text/cards. Every row keeps its HT/FT label and exact score inseparably paired, repeated HT/FT labels remain visible when their scores differ, and neither a third-event field nor half-time-root branch completion is allowed. Independent HT/FT and unconditional exact-score Top 2 lists and hit ranks remain machine-only audits.
 - Render no-formal-primary matches with a non-counting `◇ 模型首选` from the validated joint 1X2 leader when complete analysis exists; reserve `数据不足` for missing or invalid joint artifacts.
 - Make review-card provenance wording reflect whether the frozen settlement version actually contains a validated joint path.
 - Derive card date/title/stage from the archive, reject mixed stages/dates and duplicate matches, and freeze competition identity into settlement/statistics.

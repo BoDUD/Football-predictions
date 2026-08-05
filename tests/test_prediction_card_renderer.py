@@ -665,8 +665,8 @@ class PredictionCardRendererTests(unittest.TestCase):
         card = renderer.validate_payload(_payload(), history)
         first = card.rows[0]
         self.assertEqual(first.total_goals, "2-3球 60.0%\n明确·领先40.0pp")
-        self.assertEqual(first.htft, "平平\n平胜\n平负")
-        self.assertEqual(first.scores, "1-1 5.8%\n1-0 2.0%\n0-1 2.1%")
+        self.assertEqual(first.htft, "平平\n负负")
+        self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
         self.assertEqual(self.validated_joint.call_count, 3)
 
         svg = renderer.render_svg(card)
@@ -674,12 +674,12 @@ class PredictionCardRendererTests(unittest.TestCase):
             self.assertIn(label, svg)
         self.assertIn("平平", svg)
         self.assertIn("1-1 5.8%", svg)
-        self.assertIn("平胜", svg)
+        self.assertIn("负负", svg)
         self.assertNotIn("胜平负", svg)
         self.assertNotIn("BTTS", svg)
         self.assertNotIn("9-9", svg)
 
-    def test_joint_distribution_displays_all_dominant_half_time_branches(self) -> None:
+    def test_joint_distribution_displays_only_frozen_global_top_two(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "1-1", 0.058),
@@ -690,10 +690,11 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
-        self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "1-0 2.0%", "1-2 4.0%"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜"])
+        self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "2-1 4.5%"])
+        self.assertNotIn("1-2 4.0%", row.scores)
 
-    def test_duplicate_global_paths_do_not_displace_a_full_time_branch(self) -> None:
+    def test_global_top_two_with_same_htft_are_not_deduplicated(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "0-0", 0.065),
@@ -703,17 +704,16 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "平平"])
         self.assertEqual(
             row.scores.splitlines(),
-            ["0-0 6.5%", "1-0 5.9%", "0-1 2.1%"],
+            ["0-0 6.5%", "1-1 6.1%"],
         )
-        self.assertEqual(row.htft.count("平平"), 1)
+        self.assertEqual(row.htft.count("平平"), 2)
         self.assertNotRegex(row.htft + row.scores, "[①②③]")
-        self.assertNotIn("12.6%", row.htft)
-        self.assertNotIn("15.2%", row.htft)
+        self.assertNotIn("1-0 5.9%", row.scores)
 
-    def test_mixed_global_paths_do_not_change_the_dominant_half_time_root(self) -> None:
+    def test_mixed_global_top_two_remain_probability_ranked(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "0-0", 0.065),
@@ -723,10 +723,10 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜"])
         self.assertEqual(
             row.scores.splitlines(),
-            ["0-0 6.5%", "1-0 2.0%", "0-1 2.1%"],
+            ["0-0 6.5%", "1-0 6.1%"],
         )
 
     def test_duplicate_public_branch_output_fails_closed(self) -> None:
@@ -837,9 +837,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         footnote = next(
             node
             for node in root.findall("svg:text", namespace)
-            if "半全场仅列联合情景中不重复的结果" in (node.text or "")
+            if "半全场与波胆按冻结联合概率 Top 2" in (node.text or "")
         )
-        self.assertIn("波胆保留各联合路径比分及概率", footnote.text or "")
+        self.assertIn("不展示独立榜单或第三项", footnote.text or "")
         panel_bottom = int(panel.attrib["y"]) + int(panel.attrib["height"])
         self.assertGreaterEqual(panel_bottom - int(footnote.attrib["y"]), 30)
 
