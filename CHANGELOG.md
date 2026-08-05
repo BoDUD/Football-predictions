@@ -5,11 +5,13 @@ Released-version entries below describe historical behavior and are superseded b
 ## [Unreleased]
 
 ### Added
+- Added a fixture-bound lineup fallback contract that checks official competition/club sources, public ESPN lineup pages, and exact-event Sofascore pages when Titan lacks either starting XI, while keeping predicted, non-official, or conflicting lineups out of `lineup_confirmed` evidence.
 - Added live-fetched, page-hash-bound Titan competition metadata so the user-facing Chinese tournament name is separated from an internal proxy-model league key.
 - Added a complete-analysis archive guard for normal initial and lineup-check predictions.
 - Added a real archive-to-card integration test for non-counting model leaders and paired joint scenarios.
 
 ### Changed
+- Missing Titan lineup data now triggers one bounded multi-source fallback pass instead of an immediate "unavailable" conclusion; a still-unconfirmed lineup completes the scheduled check with lineup-dependent gates closed rather than causing a retry or fabricated XI.
 - Public scenario output now shows only the frozen, validated global joint-event Top 2 in descending joint-probability order across initial, lineup, and review text/cards. Every row keeps its HT/FT label and exact score inseparably paired, repeated HT/FT labels remain visible when their scores differ, and neither a third-event field nor half-time-root branch completion is allowed. Independent HT/FT and unconditional exact-score Top 2 lists and hit ranks remain machine-only audits.
 - Render no-formal-primary matches with a non-counting `◇ 模型首选` from the validated joint 1X2 leader when complete analysis exists; reserve `数据不足` for missing or invalid joint artifacts.
 - Make review-card provenance wording reflect whether the frozen settlement version actually contains a validated joint path.

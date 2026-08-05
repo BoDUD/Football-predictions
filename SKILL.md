@@ -59,6 +59,7 @@ Read [references/model-validation.md](references/model-validation.md), [referenc
 - If some visual fields are unavailable, keep the section visible and mark them `数据未取得` or `待公布`; never invent values to fill the layout.
 - Use current pre-match odds for final calculations and opening odds only for movement analysis. Market evidence is valid for at most 60 minutes at the initial archive and 30 minutes at lineup-check; stale evidence fails closed and must not be relabelled as current.
 - Handle quarter lines with their real half-win/half-loss settlement; do not reduce them to a binary outcome.
+- At lineup-check, Titan is the fixture/status/odds source but not the only lineup source. If Titan lacks both starting XIs, read [references/lineup-sources.md](references/lineup-sources.md) and complete its official-site → ESPN → Sofascore fallback in the same claimed attempt. Use only visible public pages and stable event IDs; never call undocumented/private APIs or automate a source whose terms prohibit it. Never treat a predicted, probable, expected, or stale lineup as confirmed. Pass `--lineup-confirmed` only when the fallback evidence contract is satisfied; otherwise state which sources were checked, keep the lineup unconfirmed, and fail closed on lineup-dependent formal gates.
 - State when lineups are unconfirmed or data is incomplete.
 
 ### Provisional recommendation gate
