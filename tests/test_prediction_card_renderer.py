@@ -618,7 +618,7 @@ class PredictionCardRendererTests(unittest.TestCase):
         )
         card = renderer.validate_payload(payload, history)
         self.assertEqual(card.rows[0].primary, "小2.5 @0.92")
-        self.assertIn("平平 5.8%", card.rows[0].htft)
+        self.assertIn("平平", card.rows[0].htft)
         self.assertIn("1-1 5.8%", card.rows[0].scores)
         self.assertNotIn("胜胜", card.rows[0].htft)
         self.assertNotIn("2-0", card.rows[0].scores)
@@ -643,14 +643,14 @@ class PredictionCardRendererTests(unittest.TestCase):
         card = renderer.validate_payload(_payload(), history)
         first = card.rows[0]
         self.assertEqual(first.total_goals, "2-3球 60.0%\n明确·领先40.0pp")
-        self.assertEqual(first.htft, "平平 5.8%\n负负 4.5%")
+        self.assertEqual(first.htft, "平平\n负负")
         self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
         self.assertEqual(self.validated_joint.call_count, 3)
 
         svg = renderer.render_svg(card)
         for label in ("主推", "总进球", "半全场", "波胆"):
             self.assertIn(label, svg)
-        self.assertIn("平平 5.8%", svg)
+        self.assertIn("平平", svg)
         self.assertIn("1-1 5.8%", svg)
         self.assertNotIn("胜平负", svg)
         self.assertNotIn("BTTS", svg)
@@ -667,8 +667,44 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平 5.8%", "胜胜 4.5%", "平负 4.0%"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜", "平负"])
         self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "2-1 4.5%", "1-2 4.0%"])
+
+    def test_duplicate_htft_paths_are_deduplicated_without_probability_summing(self) -> None:
+        history = _history_index()
+        history["9001"]["_validated_joint_artifact"] = _joint_artifact(
+            first=("DD", "0-0", 0.065),
+            second=("DD", "1-1", 0.061),
+            third=("DH", "1-0", 0.059),
+        )
+        payload = _payload()
+        _rebind_row(payload, 0, history)
+        row = renderer.validate_payload(payload, history).rows[0]
+        self.assertEqual(row.htft.splitlines(), ["平平", "平胜"])
+        self.assertEqual(
+            row.scores.splitlines(),
+            ["0-0 6.5%", "1-1 6.1%", "1-0 5.9%"],
+        )
+        self.assertEqual(row.htft.count("平平"), 1)
+        self.assertNotRegex(row.htft + row.scores, "[①②③]")
+        self.assertNotIn("12.6%", row.htft)
+        self.assertNotIn("15.2%", row.htft)
+
+    def test_nonconsecutive_duplicate_htft_paths_are_deduplicated_in_first_appearance_order(self) -> None:
+        history = _history_index()
+        history["9001"]["_validated_joint_artifact"] = _joint_artifact(
+            first=("DD", "0-0", 0.065),
+            second=("HH", "1-0", 0.061),
+            third=("DD", "1-1", 0.059),
+        )
+        payload = _payload()
+        _rebind_row(payload, 0, history)
+        row = renderer.validate_payload(payload, history).rows[0]
+        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜"])
+        self.assertEqual(
+            row.scores.splitlines(),
+            ["0-0 6.5%", "1-0 6.1%", "1-1 5.9%"],
+        )
 
     def test_missing_or_malformed_joint_artifact_fails_closed(self) -> None:
         for malformed in (None, {}, {"joint_top_two": []}):
@@ -763,10 +799,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         footnote = next(
             node
             for node in root.findall("svg:text", namespace)
-            if "半全场与波胆按同序联合事件配对" in (node.text or "")
+            if "半全场仅列联合情景中不重复的结果" in (node.text or "")
         )
-        self.assertIn("总进球只显示最高概率区间", footnote.text or "")
-        self.assertIn("联合路径概率", footnote.text or "")
+        self.assertIn("波胆保留各联合路径比分及概率", footnote.text or "")
         panel_bottom = int(panel.attrib["y"]) + int(panel.attrib["height"])
         self.assertGreaterEqual(panel_bottom - int(footnote.attrib["y"]), 30)
 
