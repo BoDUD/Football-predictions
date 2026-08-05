@@ -83,8 +83,15 @@ class PublicMarketOutlookTests(unittest.TestCase):
                 "away_goals": 2,
                 "probability": 0.036,
             },
+            {
+                "htft": "DH",
+                "score": "1-0",
+                "home_goals": 1,
+                "away_goals": 0,
+                "probability": 0.035,
+            },
         ]
-        filler_probability = (1.0 - 0.056 - 0.043 - 0.036) / 40.0
+        filler_probability = (1.0 - 0.056 - 0.043 - 0.036 - 0.035) / 40.0
         joint_cells.extend(
             {
                 "htft": "HH",
@@ -103,14 +110,25 @@ class PublicMarketOutlookTests(unittest.TestCase):
             "formal_eligible": False,
             "htft_marginal": {
                 "half_time_result_probabilities": {
-                    "H": 0.45,
-                    "D": 0.35,
+                    "H": 0.35,
+                    "D": 0.45,
                     "A": 0.20,
                 },
                 "full_time_result_probabilities": {
                     "H": 0.36,
                     "D": 0.24,
                     "A": 0.40,
+                },
+                "code_probabilities": {
+                    "HH": 0.126,
+                    "HD": 0.084,
+                    "HA": 0.140,
+                    "DH": 0.162,
+                    "DD": 0.108,
+                    "DA": 0.180,
+                    "AH": 0.072,
+                    "AD": 0.048,
+                    "AA": 0.080,
                 },
             },
             "derived": {
@@ -135,52 +153,6 @@ class PublicMarketOutlookTests(unittest.TestCase):
             result = public_market_outlook.build_public_market_outlook(artifact)
         validator.assert_called_once_with(artifact)
         return result
-
-    @staticmethod
-    def _set_legacy_joint_probabilities(artifact, probabilities):
-        identities = (("DD", 1, 1), ("HH", 2, 1), ("DA", 1, 2))
-        cells = []
-        for (htft, home_goals, away_goals), probability in zip(
-            identities[: len(probabilities)], probabilities, strict=True
-        ):
-            cells.append(
-                {
-                    "htft": htft,
-                    "score": f"{home_goals}-{away_goals}",
-                    "home_goals": home_goals,
-                    "away_goals": away_goals,
-                    "probability": probability,
-                }
-            )
-        remainder = 1.0 - sum(probabilities)
-        if remainder > 1e-12:
-            filler_probability = remainder / 40.0
-            cells.extend(
-                {
-                    "htft": "HH",
-                    "score": f"{home_goals}-0",
-                    "home_goals": home_goals,
-                    "away_goals": 0,
-                    "probability": filler_probability,
-                }
-                for home_goals in range(3, 43)
-            )
-        artifact["joint_cells"] = cells
-        artifact["joint_top_two"] = [
-            {
-                "slot": slot,
-                "htft": identities[slot - 1][0],
-                "score": f"{identities[slot - 1][1]}-{identities[slot - 1][2]}",
-                "home_goals": identities[slot - 1][1],
-                "away_goals": identities[slot - 1][2],
-                "probability": probabilities[slot - 1],
-                "status": "high_variance_reference",
-                "recommendation_eligible": False,
-                "counts_toward_primary_record": False,
-                "odds_available": False,
-            }
-            for slot in (1, 2)
-        ]
 
     def test_builds_one_complete_ranked_structure_without_mutating_input(self):
         artifact = self._artifact()
@@ -220,7 +192,7 @@ class PublicMarketOutlookTests(unittest.TestCase):
             )
 
         half = result["markets"]["half_time"]
-        self.assertEqual((half["top1"]["code"], half["top2"]["code"]), ("H", "D"))
+        self.assertEqual((half["top1"]["code"], half["top2"]["code"]), ("D", "H"))
         self.assertAlmostEqual(half["gap_percentage_points"], 10.0)
         self.assertEqual(half["clarity"], "clear")
         self.assertEqual(half["display_count"], 2)
@@ -263,6 +235,17 @@ class PublicMarketOutlookTests(unittest.TestCase):
             "D": 0.22555141620120955,
             "A": 0.41971028532640564,
         }
+        artifact["htft_marginal"]["code_probabilities"] = {
+            "HH": 0.1200000000000000,
+            "HD": 0.0800000000000000,
+            "HA": 0.1371228490880407,
+            "DH": 0.1105648771276534,
+            "DD": 0.1500000000000000,
+            "DA": 0.1260000000000000,
+            "AH": 0.0700000000000000,
+            "AD": 0.0500000000000000,
+            "AA": 0.1563122737843061,
+        }
         artifact["derived"]["one_x_two"] = {
             "home": 0.354738298472385,
             "draw": 0.22555141620120955,
@@ -302,61 +285,103 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(scenarios["display_count"], 3)
         self.assertEqual(
             [(item["htft"], item["score"]) for item in scenarios["display_items"]],
-            [("DD", "1-1"), ("HH", "2-1"), ("DA", "1-2")],
+            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
+        )
+        self.assertEqual(
+            [item["conditional_probability"] for item in scenarios["display_items"]],
+            [
+                0.15 / 0.3865648771276534,
+                0.1105648771276534 / 0.3865648771276534,
+                0.126 / 0.3865648771276534,
+            ],
         )
         self.assertEqual(scenarios["items"], scenarios["display_items"])
 
-    def test_display_three_thresholds_are_inclusive_and_just_outside_stays_two(self):
-        boundary = self._artifact()
-        self._set_legacy_joint_probabilities(boundary, (0.065, 0.045, 0.03))
-        boundary_joint = self._build(boundary)["joint_scenarios"]
-        self.assertEqual(boundary_joint["display_count"], 3)
-        self.assertEqual(
-            [(item["htft"], item["score"]) for item in boundary_joint["display_items"]],
-            [("DD", "1-1"), ("HH", "2-1"), ("DA", "1-2")],
-        )
-        self.assertEqual(
-            boundary_joint["display_reason"], "three_close_material_joint_events"
-        )
-        self.assertAlmostEqual(boundary_joint["top1_top2_gap_percentage_points"], 2.0)
-        self.assertAlmostEqual(boundary_joint["top2_top3_gap_percentage_points"], 1.5)
-        self.assertAlmostEqual(boundary_joint["third_probability"], 0.03)
+    def test_duplicate_global_top_two_do_not_consume_public_branch_slots(self):
+        artifact = self._artifact()
+        duplicate = {
+            "htft": "DD",
+            "score": "0-0",
+            "home_goals": 0,
+            "away_goals": 0,
+            "probability": 0.052,
+        }
+        filler_cells = [
+            item
+            for item in artifact["joint_cells"]
+            if item["htft"] == "HH" and item["home_goals"] >= 3
+        ]
+        for item in filler_cells:
+            item["probability"] -= 0.052 / len(filler_cells)
+        artifact["joint_cells"].append(duplicate)
+        artifact["joint_top_two"][1] = {
+            "slot": 2,
+            **duplicate,
+            "status": "high_variance_reference",
+            "recommendation_eligible": False,
+            "counts_toward_primary_record": False,
+            "odds_available": False,
+        }
+        artifact["htft_marginal"] = {
+            "half_time_result_probabilities": {
+                "H": 0.32910261,
+                "D": 0.41423911,
+                "A": 0.25665828,
+            },
+            "full_time_result_probabilities": {
+                "H": 0.39305642,
+                "D": 0.24467945,
+                "A": 0.36226413,
+            },
+            "code_probabilities": {
+                "HH": 0.24957969,
+                "HD": 0.04817649,
+                "HA": 0.03134643,
+                "DH": 0.12353129,
+                "DD": 0.15567954,
+                "DA": 0.13502828,
+                "AH": 0.01994544,
+                "AD": 0.04082342,
+                "AA": 0.19588942,
+            },
+        }
+        artifact["derived"]["one_x_two"] = {
+            "home": 0.39305642,
+            "draw": 0.24467945,
+            "away": 0.36226413,
+        }
 
-        below_probability = self._artifact()
-        self._set_legacy_joint_probabilities(
-            below_probability, (0.064999, 0.044999, 0.029999)
-        )
-        below_joint = self._build(below_probability)["joint_scenarios"]
-        self.assertEqual(below_joint["display_count"], 2)
-        self.assertEqual(
-            below_joint["display_reason"], "third_probability_below_3_percent"
-        )
+        scenarios = self._build(artifact)["joint_scenarios"]
 
-        above_gap = self._artifact()
-        self._set_legacy_joint_probabilities(above_gap, (0.065001, 0.045, 0.03))
-        above_gap_joint = self._build(above_gap)["joint_scenarios"]
-        self.assertEqual(above_gap_joint["display_count"], 2)
         self.assertEqual(
-            above_gap_joint["display_reason"], "top1_top2_gap_above_2pp"
+            [(item["htft"], item["score"]) for item in scenarios["items"]],
+            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
         )
-
-        above_second_gap = self._artifact()
-        self._set_legacy_joint_probabilities(
-            above_second_gap, (0.065001, 0.045001, 0.03)
-        )
-        above_second_gap_joint = self._build(above_second_gap)["joint_scenarios"]
-        self.assertEqual(above_second_gap_joint["display_count"], 2)
+        self.assertEqual([item["slot"] for item in scenarios["items"]], [1, 2, 3])
+        self.assertEqual([item["raw_rank"] for item in scenarios["items"]], [1, 5, 4])
+        self.assertTrue(scenarios["artifact_top_two_exact_match"])
         self.assertEqual(
-            above_second_gap_joint["display_reason"],
-            "top2_top3_gap_above_1_5pp",
+            scenarios["display_policy"],
+            public_market_outlook.JOINT_DISPLAY_POLICY,
         )
 
     def test_clarity_thresholds_are_inclusive_and_ties_use_source_order(self):
         artifact = self._artifact()
         artifact["htft_marginal"]["half_time_result_probabilities"] = {
-            "H": 0.40,
-            "D": 0.32,
+            "H": 0.32,
+            "D": 0.40,
             "A": 0.28,
+        }
+        artifact["htft_marginal"]["code_probabilities"] = {
+            "HH": 0.12,
+            "HD": 0.08,
+            "HA": 0.12,
+            "DH": 0.16,
+            "DD": 0.10,
+            "DA": 0.14,
+            "AH": 0.08,
+            "AD": 0.06,
+            "AA": 0.14,
         }
         artifact["derived"]["goal_ranges"] = {
             "0-1": 0.21,
@@ -434,7 +459,7 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(scenarios["display_count"], 3)
         self.assertEqual(
             [(item["htft"], item["score"]) for item in scenarios["display_items"]],
-            [("DD", "1-1"), ("HH", "2-1"), ("DA", "1-2")],
+            [("DD", "1-1"), ("DH", "1-0"), ("DA", "1-2")],
         )
 
     def test_reconstructed_top_two_must_exactly_match_frozen_artifact(self):
@@ -447,20 +472,15 @@ class PublicMarketOutlookTests(unittest.TestCase):
         ):
             self._build(artifact)
 
-    def test_missing_third_event_safely_falls_back_to_validated_top_two(self):
+    def test_incomplete_branch_marginal_fails_closed(self):
         artifact = self._artifact()
-        self._set_legacy_joint_probabilities(artifact, (0.60, 0.40))
+        artifact["htft_marginal"]["code_probabilities"].pop("DH")
 
-        scenarios = self._build(artifact)["joint_scenarios"]
-
-        self.assertEqual(scenarios["display_count"], 2)
-        self.assertEqual(len(scenarios["items"]), 2)
-        self.assertEqual(
-            scenarios["display_reason"],
-            "third_event_unavailable_validated_top_two",
-        )
-        self.assertIsNone(scenarios["top2_top3_gap_percentage_points"])
-        self.assertIsNone(scenarios["third_probability"])
+        with self.assertRaisesRegex(
+            public_market_outlook.PublicMarketOutlookError,
+            "all nine branches",
+        ):
+            self._build(artifact)
 
     def test_each_joint_scenario_safety_field_is_mandatory(self):
         mutations = {

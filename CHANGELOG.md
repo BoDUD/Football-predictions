@@ -8,6 +8,7 @@
 - Added a real archive-to-card integration test for non-counting model leaders and paired joint scenarios.
 
 ### Changed
+- Replace global Top-2/3 public path display with a versioned three-way branch tree rooted at the leading half-time result. Each full-time branch appears exactly once, uses continuity-first structural order, and keeps its own highest-probability genuine score path; the global joint Top 2 remains an internal audit.
 - Render no-formal-primary matches with a non-counting `◇ 模型首选` from the validated joint 1X2 leader when complete analysis exists; reserve `数据不足` for missing or invalid joint artifacts.
 - Make review-card provenance wording reflect whether the frozen settlement version actually contains a validated joint path.
 - Derive card date/title/stage from the archive, reject mixed stages/dates and duplicate matches, and freeze competition identity into settlement/statistics.

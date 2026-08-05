@@ -102,7 +102,12 @@ def joint_artifact() -> dict:
         ("DD", "1-1", 0.058),
         ("AA", "1-2", 0.045),
     ]
-    used = {(htft, score) for htft, score, _probability in leading}
+    branch_support = [
+        ("DA", "0-1", 0.021),
+        ("DH", "1-0", 0.020),
+    ]
+    all_values = leading + branch_support
+    used = {(htft, score) for htft, score, _probability in all_values}
     fillers: list[tuple[str, str]] = []
     for home_goals in range(7):
         for away_goals in range(7):
@@ -116,9 +121,9 @@ def joint_artifact() -> dict:
                 break
         if len(fillers) >= 60:
             break
-    filler_probability = (1.0 - sum(item[2] for item in leading)) / len(fillers)
+    filler_probability = (1.0 - sum(item[2] for item in all_values)) / len(fillers)
     joint_cells = []
-    for htft, score, probability_value in leading:
+    for htft, score, probability_value in all_values:
         home_goals, away_goals = (int(item) for item in score.split("-"))
         joint_cells.append(
             {
@@ -150,6 +155,17 @@ def joint_artifact() -> dict:
         "htft_marginal": {
             "half_time_result_probabilities": {"H": 0.31, "D": 0.44, "A": 0.25},
             "full_time_result_probabilities": {"H": 0.29, "D": 0.25, "A": 0.46},
+            "code_probabilities": {
+                "HH": 0.11,
+                "HD": 0.04,
+                "HA": 0.16,
+                "DH": 0.11,
+                "DD": 0.17,
+                "DA": 0.16,
+                "AH": 0.07,
+                "AD": 0.04,
+                "AA": 0.14,
+            },
         },
         "derived": {
             "one_x_two": {"home": 0.29, "draw": 0.25, "away": 0.46},
@@ -460,7 +476,9 @@ class PlainTextFormatterTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "联合情景：高方差参考（不作推荐）：平平·1-1 5.8% / 负负·1-2 4.5%",
+                "联合情景：半场平后三路：平平38.6% / 平胜25.0% / 平负36.4%；"
+                "代表比分路径（高方差，不作推荐）：平平·1-1 5.8% / "
+                "平胜·1-0 2.0% / 平负·0-1 2.1%",
                 text,
             )
             self.assertIn("纯模型（未混入过期盘口）", text)

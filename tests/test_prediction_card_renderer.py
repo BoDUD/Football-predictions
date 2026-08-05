@@ -109,6 +109,17 @@ def _joint_artifact(
 
     ranked_values = [first, second] + ([third] if third is not None else [])
     used = {(value[0], value[1]) for value in ranked_values}
+    branch_support = [
+        value
+        for value in (
+            ("DD", "0-0", 0.018),
+            ("DA", "0-1", 0.021),
+            ("DH", "1-0", 0.020),
+        )
+        if (value[0], value[1]) not in used
+    ]
+    all_values = ranked_values + branch_support
+    used = {(value[0], value[1]) for value in all_values}
     filler_keys: list[tuple[str, str]] = []
     for home_goals in range(7):
         for away_goals in range(7):
@@ -122,13 +133,13 @@ def _joint_artifact(
                 break
         if len(filler_keys) >= 60:
             break
-    remainder = 1.0 - sum(value[2] for value in ranked_values)
+    remainder = 1.0 - sum(value[2] for value in all_values)
     assert remainder > 0.0
     filler_probability = remainder / len(filler_keys)
     assert filler_probability < second[2]
 
     joint_cells = []
-    for value in ranked_values:
+    for value in all_values:
         home_goals, away_goals = (int(item) for item in value[1].split("-"))
         joint_cells.append(
             {
@@ -165,8 +176,19 @@ def _joint_artifact(
         "joint_top_two": [event(1, first), event(2, second)],
         "joint_cells": joint_cells,
         "htft_marginal": {
-            "half_time_result_probabilities": {"H": 0.40, "D": 0.35, "A": 0.25},
+            "half_time_result_probabilities": {"H": 0.35, "D": 0.40, "A": 0.25},
             "full_time_result_probabilities": {"H": 0.42, "D": 0.31, "A": 0.27},
+            "code_probabilities": {
+                "HH": 0.20,
+                "HD": 0.10,
+                "HA": 0.05,
+                "DH": 0.11,
+                "DD": 0.16,
+                "DA": 0.13,
+                "AH": 0.11,
+                "AD": 0.05,
+                "AA": 0.09,
+            },
         },
         "derived": {
             "one_x_two": {"home": 0.42, "draw": 0.31, "away": 0.27},
@@ -643,8 +665,8 @@ class PredictionCardRendererTests(unittest.TestCase):
         card = renderer.validate_payload(_payload(), history)
         first = card.rows[0]
         self.assertEqual(first.total_goals, "2-3球 60.0%\n明确·领先40.0pp")
-        self.assertEqual(first.htft, "平平\n负负")
-        self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
+        self.assertEqual(first.htft, "平平\n平胜\n平负")
+        self.assertEqual(first.scores, "1-1 5.8%\n1-0 2.0%\n0-1 2.1%")
         self.assertEqual(self.validated_joint.call_count, 3)
 
         svg = renderer.render_svg(card)
@@ -652,11 +674,12 @@ class PredictionCardRendererTests(unittest.TestCase):
             self.assertIn(label, svg)
         self.assertIn("平平", svg)
         self.assertIn("1-1 5.8%", svg)
+        self.assertIn("平胜", svg)
         self.assertNotIn("胜平负", svg)
         self.assertNotIn("BTTS", svg)
         self.assertNotIn("9-9", svg)
 
-    def test_complex_joint_distribution_displays_three_paired_items(self) -> None:
+    def test_joint_distribution_displays_all_dominant_half_time_branches(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "1-1", 0.058),
@@ -667,10 +690,10 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜", "平负"])
-        self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "2-1 4.5%", "1-2 4.0%"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
+        self.assertEqual(row.scores.splitlines(), ["1-1 5.8%", "1-0 2.0%", "1-2 4.0%"])
 
-    def test_duplicate_htft_paths_are_deduplicated_without_probability_summing(self) -> None:
+    def test_duplicate_global_paths_do_not_displace_a_full_time_branch(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "0-0", 0.065),
@@ -680,17 +703,17 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "平胜"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
         self.assertEqual(
             row.scores.splitlines(),
-            ["0-0 6.5%", "1-1 6.1%", "1-0 5.9%"],
+            ["0-0 6.5%", "1-0 5.9%", "0-1 2.1%"],
         )
         self.assertEqual(row.htft.count("平平"), 1)
         self.assertNotRegex(row.htft + row.scores, "[①②③]")
         self.assertNotIn("12.6%", row.htft)
         self.assertNotIn("15.2%", row.htft)
 
-    def test_nonconsecutive_duplicate_htft_paths_are_deduplicated_in_first_appearance_order(self) -> None:
+    def test_mixed_global_paths_do_not_change_the_dominant_half_time_root(self) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "0-0", 0.065),
@@ -700,11 +723,26 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         _rebind_row(payload, 0, history)
         row = renderer.validate_payload(payload, history).rows[0]
-        self.assertEqual(row.htft.splitlines(), ["平平", "胜胜"])
+        self.assertEqual(row.htft.splitlines(), ["平平", "平胜", "平负"])
         self.assertEqual(
             row.scores.splitlines(),
-            ["0-0 6.5%", "1-0 6.1%", "1-1 5.9%"],
+            ["0-0 6.5%", "1-0 2.0%", "0-1 2.1%"],
         )
+
+    def test_duplicate_public_branch_output_fails_closed(self) -> None:
+        public = renderer.public_market_outlook.build_public_market_outlook(
+            _joint_artifact()
+        )
+        public["joint_scenarios"]["items"][1]["htft"] = "DD"
+        with mock.patch.object(
+            renderer.public_market_outlook,
+            "build_public_market_outlook",
+            return_value=public,
+        ):
+            row = renderer.validate_payload(_payload(), _history_index()).rows[0]
+        self.assertEqual(row.total_goals, "数据不足")
+        self.assertEqual(row.htft, "数据不足")
+        self.assertEqual(row.scores, "数据不足")
 
     def test_missing_or_malformed_joint_artifact_fails_closed(self) -> None:
         for malformed in (None, {}, {"joint_top_two": []}):
