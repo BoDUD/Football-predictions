@@ -298,19 +298,26 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
         block = outlook["joint_scenarios"]
         raw_items = block["display_items"]
         display_count = block["display_count"]
+        selected_half_time = str(block.get("selected_half_time_result") or "")
         if (
             not isinstance(block, Mapping)
             or block.get("status") != "high_variance_reference"
             or block.get("recommendation_eligible") is not False
             or block.get("counts_as_primary") is not False
             or not isinstance(raw_items, list)
-            or len(raw_items) not in {2, 3}
+            or len(raw_items) != 3
             or display_count != len(raw_items)
+            or selected_half_time not in {"H", "D", "A"}
         ):
             raise ReviewCardError("public joint display policy is invalid")
 
         events: list[JointEvent] = []
-        previous_probability: float | None = None
+        expected_full_time_order = (
+            selected_half_time,
+            *(code for code in ("H", "D", "A") if code != selected_half_time),
+        )
+        conditional_probabilities: list[float] = []
+        full_time_branches: set[str] = set()
         for rank, item in enumerate(raw_items, start=1):
             if not isinstance(item, Mapping):
                 raise ReviewCardError("public joint display item is invalid")
@@ -326,6 +333,13 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
             if item.get("slot") != rank:
                 raise ReviewCardError("public joint display order is not canonical")
             if (
+                htft[0] != selected_half_time
+                or htft[1] in full_time_branches
+                or htft[1] != expected_full_time_order[rank - 1]
+            ):
+                raise ReviewCardError("public joint display branches are inconsistent")
+            full_time_branches.add(htft[1])
+            if (
                 item.get("status") != "high_variance_reference"
                 or item.get("recommendation_eligible") is not False
                 or item.get("counts_toward_primary_record") is not False
@@ -339,9 +353,11 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
             if item.get("home_goals") != home_goals or item.get("away_goals") != away_goals:
                 raise ReviewCardError("public joint display score fields conflict")
             probability = _probability(item.get("probability"), f"joint event {rank}")
-            if previous_probability is not None and probability > previous_probability + 1e-12:
-                raise ReviewCardError("public joint display events are not ranked")
-            previous_probability = probability
+            conditional_probability = _probability(
+                item.get("conditional_probability"),
+                f"joint branch {rank} conditional probability",
+            )
+            conditional_probabilities.append(conditional_probability)
             events.append(
                 JointEvent(
                     rank=rank,
@@ -351,6 +367,10 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                     probability=probability,
                 )
             )
+        if full_time_branches != {"H", "D", "A"}:
+            raise ReviewCardError("public joint display does not cover all branches")
+        if abs(math.fsum(conditional_probabilities) - 1.0) > 1e-9:
+            raise ReviewCardError("public joint branch probabilities do not sum to one")
         return tuple(events)
     except (
         KeyError,

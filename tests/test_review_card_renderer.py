@@ -16,7 +16,13 @@ def _artifact() -> dict:
     return {"artifact_type": "test-validated-joint", "prediction_hash": "sha256:" + "a" * 64}
 
 
-def _display_item(rank: int, htft: str, score: str, probability: float) -> dict:
+def _display_item(
+    rank: int,
+    htft: str,
+    score: str,
+    probability: float,
+    conditional_probability: float,
+) -> dict:
     home, away = (int(value) for value in score.split("-"))
     return {
         "slot": rank,
@@ -26,6 +32,10 @@ def _display_item(rank: int, htft: str, score: str, probability: float) -> dict:
         "away_goals": away,
         "probability": probability,
         "percentage": probability * 100.0,
+        "branch_probability": conditional_probability * 0.44,
+        "branch_percentage": conditional_probability * 44.0,
+        "conditional_probability": conditional_probability,
+        "conditional_percentage": conditional_probability * 100.0,
         "status": "high_variance_reference",
         "recommendation_eligible": False,
         "counts_toward_primary_record": False,
@@ -37,9 +47,9 @@ def _display_item(rank: int, htft: str, score: str, probability: float) -> dict:
 
 def _outlook(count: int = 3) -> dict:
     items = [
-        _display_item(1, "DD", "1-1", 0.0562),
-        _display_item(2, "HH", "2-1", 0.0431),
-        _display_item(3, "DA", "1-2", 0.0366),
+        _display_item(1, "DD", "1-1", 0.0562, 0.38),
+        _display_item(2, "DH", "1-0", 0.0431, 0.28),
+        _display_item(3, "DA", "0-1", 0.0366, 0.34),
     ][:count]
     return {
         "joint_scenarios": {
@@ -47,6 +57,9 @@ def _outlook(count: int = 3) -> dict:
             "display_items": items,
             "display_count": len(items),
             "display_reason": "complex_top_three" if count == 3 else "default_top_two",
+            "display_policy": "dominant_half_time_three_way_branches_v1",
+            "selected_half_time_result": "D",
+            "selected_half_time_probability": 0.44,
             "ranking_source": "validated_joint_paths",
             "status": "high_variance_reference",
             "recommendation_eligible": False,
@@ -145,15 +158,15 @@ class ReviewCardRendererTests(unittest.TestCase):
         )
         self.assertEqual(
             [(event.htft, event.score) for event in card.events],
-            [("DD", "1-1"), ("HH", "2-1"), ("DA", "1-2")],
+            [("DD", "1-1"), ("DH", "1-0"), ("DA", "0-1")],
         )
         self.assertEqual(
             card.htft_reference.splitlines()[1:],
-            ["1. 平/平 5.6%", "2. 胜/胜 4.3%", "3. 平/负 3.7%"],
+            ["1. 平/平 5.6%", "2. 平/胜 4.3%", "3. 平/负 3.7%"],
         )
         self.assertEqual(
             card.score_reference.splitlines()[1:],
-            ["1. 1-1 5.6%", "2. 2-1 4.3%", "3. 1-2 3.7%"],
+            ["1. 1-1 5.6%", "2. 1-0 4.3%", "3. 0-1 3.7%"],
         )
         visible = "\n".join(renderer.visible_text(card))
         self.assertNotIn("9-9", visible)
@@ -238,18 +251,18 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
         for heading in ("编号", "赛事", "比赛", "半场", "全场", "主推结算", "半全场参考", "波胆参考"):
             self.assertIn(heading, svg)
-        for value in ("平/平", "胜/胜", "平/负", "1-1", "2-1", "1-2"):
+        for value in ("平/平", "平/负", "平/胜", "1-1", "0-1", "1-0"):
             self.assertIn(value, svg)
         self.assertIn("无正式推荐（不结算、不计战绩）", "".join(root.itertext()))
         self.assertNotIn("…", svg)
         self.assertNotIn("...", svg)
 
-    def test_dynamic_two_events_are_rendered_without_a_fixed_top_three(self) -> None:
+    def test_incomplete_two_branch_public_output_fails_closed(self) -> None:
         self.public_builder.side_effect = lambda artifact: _outlook(2)
         card = renderer.build_card(_record())
-        self.assertEqual(len(card.events), 2)
-        self.assertNotIn("平/负", card.htft_reference)
-        self.assertNotIn("1-2", card.score_reference)
+        self.assertEqual(card.events, ())
+        self.assertEqual(card.htft_reference, "数据不足")
+        self.assertEqual(card.score_reference, "数据不足")
 
     def test_png_and_svg_files_are_generated(self) -> None:
         try:

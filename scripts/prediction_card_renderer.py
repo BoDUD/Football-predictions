@@ -307,11 +307,19 @@ def _joint_artifact_display(
             f"{one_x_two_percentage:.1f}%\n（不计主推、不计战绩）"
         )
 
-        scenario_items = public["joint_scenarios"]["items"]
-        if not isinstance(scenario_items, list) or len(scenario_items) not in {2, 3}:
-            raise ValueError("joint scenarios must contain two or three display items")
+        scenario_block = public["joint_scenarios"]
+        scenario_items = scenario_block["items"]
+        selected_half_time = str(scenario_block.get("selected_half_time_result") or "")
+        if not isinstance(scenario_items, list) or len(scenario_items) != 3:
+            raise ValueError("joint scenarios must contain three branch display items")
+        if selected_half_time not in HTFT_RESULT_LABELS:
+            raise ValueError("joint scenario half-time root is invalid")
+        expected_full_time_order = (
+            selected_half_time,
+            *(code for code in ("H", "D", "A") if code != selected_half_time),
+        )
         htft_lines: list[str] = []
-        seen_htft_labels: set[str] = set()
+        seen_htft_codes: set[str] = set()
         score_lines: list[str] = []
         for rank, item in enumerate(scenario_items, start=1):
             if item.get("slot") != rank:
@@ -319,14 +327,21 @@ def _joint_artifact_display(
             htft_code = str(item["htft"])
             if len(htft_code) != 2 or any(code not in HTFT_RESULT_LABELS for code in htft_code):
                 raise ValueError("invalid HT/FT display code")
+            if (
+                htft_code[0] != selected_half_time
+                or htft_code in seen_htft_codes
+                or htft_code[1] != expected_full_time_order[rank - 1]
+            ):
+                raise ValueError("joint scenarios must cover distinct branches of one half-time root")
+            seen_htft_codes.add(htft_code)
             percentage = float(item["percentage"])
             if not math.isfinite(percentage) or percentage <= 0.0:
                 raise ValueError("invalid joint display probability")
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
-            if label not in seen_htft_labels:
-                seen_htft_labels.add(label)
-                htft_lines.append(label)
+            htft_lines.append(label)
             score_lines.append(f"{item['score']} {percentage:.1f}%")
+        if {code[1] for code in seen_htft_codes} != {"H", "D", "A"}:
+            raise ValueError("joint scenarios must cover all full-time branches")
         return total_goals, "\n".join(htft_lines), "\n".join(score_lines), model_leader
     except (
         KeyError,

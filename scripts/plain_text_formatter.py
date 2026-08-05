@@ -337,7 +337,13 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
         markets = public["markets"]
         scenarios = public["joint_scenarios"]
         scenario_items = scenarios["items"]
-        scenario_text = " / ".join(
+        selected_half_time = str(scenarios["selected_half_time_result"])
+        branch_text = " / ".join(
+            f"{''.join(HTFT_SCENARIO_LABELS[char] for char in item['htft'])}"
+            f"{percentage(item['conditional_probability'])}"
+            for item in scenario_items
+        )
+        path_text = " / ".join(
             f"{''.join(HTFT_SCENARIO_LABELS[char] for char in item['htft'])}·"
             f"{item['score']} {percentage(item['probability'])}"
             for item in scenario_items
@@ -360,7 +366,10 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
             ),
             "goal_range": _format_public_market(markets["goal_ranges"]),
             "btts": _format_public_market(markets["btts"]),
-            "scenarios": f"高方差参考（不作推荐）：{scenario_text}",
+            "scenarios": (
+                f"半场{HTFT_SCENARIO_LABELS[selected_half_time]}后三路：{branch_text}；"
+                f"代表比分路径（高方差，不作推荐）：{path_text}"
+            ),
             "source": source,
         }
     except (KeyError, TypeError, ValueError, public_market_outlook.PublicMarketOutlookError):

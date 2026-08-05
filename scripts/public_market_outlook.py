@@ -23,16 +23,13 @@ except ImportError:  # Invoked directly from the ``scripts`` directory.
 
 
 ARTIFACT_TYPE = "soccer_public_market_outlook"
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 PROBABILITY_TOLERANCE = 1e-9
 THREE_WAY_CLARITY_GAP_PP = 8.0
 GOAL_RANGE_CLARITY_GAP_PP = 8.0
 BTTS_CLARITY_GAP_PP = 10.0
-JOINT_DISPLAY_DEFAULT_COUNT = 2
-JOINT_DISPLAY_EXPANDED_COUNT = 3
-JOINT_DISPLAY_TOP1_TOP2_MAX_GAP_PP = 2.0
-JOINT_DISPLAY_TOP2_TOP3_MAX_GAP_PP = 1.5
-JOINT_DISPLAY_THIRD_MIN_PROBABILITY = 0.03
+JOINT_DISPLAY_COUNT = 3
+JOINT_DISPLAY_POLICY = "dominant_half_time_three_way_branches_v1"
 JOINT_SCENARIO_WARNING = (
     "联合情景属于高方差概率参考，不构成主推或正式推荐。"
 )
@@ -466,6 +463,7 @@ def _safe_joint_scenarios(
     *,
     audits: Any,
     probability_mode: str,
+    half_time_market: Mapping[str, Any],
 ) -> dict[str, Any]:
     if not isinstance(audits, Mapping):
         raise PublicMarketOutlookError("derived_field_audits is missing")
@@ -490,42 +488,125 @@ def _safe_joint_scenarios(
             "reconstructed joint Top2 does not exactly match artifact joint_top_two"
         )
 
-    display_count = JOINT_DISPLAY_DEFAULT_COUNT
+    half_time_top1 = half_time_market.get("top1")
+    if not isinstance(half_time_top1, Mapping):
+        raise PublicMarketOutlookError("half-time public leader is missing")
+    selected_half_time = str(half_time_top1.get("code") or "")
+    if selected_half_time not in ("H", "D", "A"):
+        raise PublicMarketOutlookError("half-time public leader is invalid")
+    selected_half_time_probability = _finite_probability(
+        half_time_top1.get("probability"), "half_time.top1.probability"
+    )
+    if selected_half_time_probability <= 0.0:
+        raise PublicMarketOutlookError("half-time public leader must have positive mass")
+
+    htft_payload = joint_artifact.get("htft_marginal")
+    if not isinstance(htft_payload, Mapping):
+        raise PublicMarketOutlookError("htft_marginal is missing")
+    raw_code_probabilities = htft_payload.get("code_probabilities")
+    if not isinstance(raw_code_probabilities, Mapping) or set(
+        raw_code_probabilities
+    ) != set(_HTFT_ORDER):
+        raise PublicMarketOutlookError(
+            "htft_marginal.code_probabilities must contain all nine branches"
+        )
+    code_probabilities = {
+        code: _finite_probability(
+            raw_code_probabilities[code], f"htft_marginal.code_probabilities.{code}"
+        )
+        for code in _HTFT_ORDER
+    }
+    selected_row_probability = math.fsum(
+        code_probabilities[selected_half_time + full] for full in ("H", "D", "A")
+    )
+    if not _probabilities_match(
+        selected_row_probability, selected_half_time_probability
+    ):
+        raise PublicMarketOutlookError(
+            "selected HT/FT row does not match the half-time public leader"
+        )
+
+    representatives: dict[str, dict[str, Any]] = {}
+    for item in reconstructed:
+        htft = str(item["htft"])
+        if htft[0] == selected_half_time and htft[1] not in representatives:
+            representatives[htft[1]] = dict(item)
+    if set(representatives) != {"H", "D", "A"}:
+        raise PublicMarketOutlookError(
+            "selected half-time state does not have all three full-time branches"
+        )
+
+    # Enumerate one coherent three-way tree: continuity first, then the other
+    # full-time H/D/A outcomes in canonical order.  Conditional probabilities
+    # remain explicit, so the stable structural order is never mistaken for a
+    # probability ranking.  The archived global joint Top 2 remains an
+    # immutable component audit and is not reused as the public scenario list.
+    full_result_order = {code: index for index, code in enumerate(("H", "D", "A"))}
+    probability_ranked_full_results = sorted(
+        ("H", "D", "A"),
+        key=lambda full: (
+            -code_probabilities[selected_half_time + full],
+            full_result_order[full],
+        ),
+    )
+    probability_rank = {
+        full: rank
+        for rank, full in enumerate(probability_ranked_full_results, start=1)
+    }
+    display_full_results = (
+        selected_half_time,
+        *(full for full in ("H", "D", "A") if full != selected_half_time),
+    )
+    display_items: list[dict[str, Any]] = []
+    for slot, full_result in enumerate(display_full_results, start=1):
+        code = selected_half_time + full_result
+        representative = _public_scenario_item(representatives[full_result])
+        representative["raw_rank"] = representative["slot"]
+        representative["slot"] = slot
+        representative["branch_probability"] = code_probabilities[code]
+        representative["branch_percentage"] = code_probabilities[code] * 100.0
+        representative["conditional_probability"] = (
+            code_probabilities[code] / selected_half_time_probability
+        )
+        representative["conditional_percentage"] = (
+            representative["conditional_probability"] * 100.0
+        )
+        representative["branch_probability_rank"] = probability_rank[full_result]
+        representative["selection_role"] = (
+            "highest_joint_score_path_within_htft_branch"
+        )
+        display_items.append(representative)
+
     top_one_top_two_gap_pp = (
         reconstructed[0]["probability"] - reconstructed[1]["probability"]
     ) * 100.0
-    top_two_top_three_gap_pp: float | None = None
-    third_probability: float | None = None
-    if len(reconstructed) < JOINT_DISPLAY_EXPANDED_COUNT:
-        display_reason = "third_event_unavailable_validated_top_two"
-    else:
-        third_probability = float(reconstructed[2]["probability"])
-        top_two_top_three_gap_pp = (
-            reconstructed[1]["probability"] - third_probability
-        ) * 100.0
-        if (
-            top_one_top_two_gap_pp
-            > JOINT_DISPLAY_TOP1_TOP2_MAX_GAP_PP + 1e-12
-        ):
-            display_reason = "top1_top2_gap_above_2pp"
-        elif (
-            top_two_top_three_gap_pp
-            > JOINT_DISPLAY_TOP2_TOP3_MAX_GAP_PP + 1e-12
-        ):
-            display_reason = "top2_top3_gap_above_1_5pp"
-        elif third_probability < JOINT_DISPLAY_THIRD_MIN_PROBABILITY - 1e-12:
-            display_reason = "third_probability_below_3_percent"
-        else:
-            display_count = JOINT_DISPLAY_EXPANDED_COUNT
-            display_reason = "three_close_material_joint_events"
-    display_items = [
-        _public_scenario_item(item) for item in reconstructed[:display_count]
-    ]
+    top_two_top_three_gap_pp = (
+        (reconstructed[1]["probability"] - reconstructed[2]["probability"])
+        * 100.0
+        if len(reconstructed) >= 3
+        else None
+    )
+    third_probability = (
+        float(reconstructed[2]["probability"])
+        if len(reconstructed) >= 3
+        else None
+    )
     return {
         "items": display_items,
-        "display_count": display_count,
+        "display_count": JOINT_DISPLAY_COUNT,
         "display_items": [dict(item) for item in display_items],
-        "display_reason": display_reason,
+        "display_reason": (
+            "dominant_half_time_three_way_branch_coverage_continuity_first"
+        ),
+        "display_policy": JOINT_DISPLAY_POLICY,
+        "selected_half_time_result": selected_half_time,
+        "selected_half_time_probability": selected_half_time_probability,
+        "branch_order_basis": "continuity_first_then_canonical_full_result_order",
+        "branch_order_is_probability_ranked": False,
+        "branch_probability_basis": "conditional_full_time_given_selected_half_time",
+        "representative_score_basis": (
+            "highest_joint_probability_score_path_within_each_htft_branch"
+        ),
         "ranking_source": ranking_source,
         "reconstructed_positive_event_count": len(reconstructed),
         "artifact_top_two_exact_match": True,
@@ -612,6 +693,7 @@ def build_public_market_outlook(joint_artifact: Mapping[str, Any]) -> dict[str, 
         joint_artifact,
         audits=audits,
         probability_mode=str(probability_mode),
+        half_time_market=half_time,
     )
 
     return {
@@ -635,11 +717,8 @@ __all__ = [
     "ARTIFACT_TYPE",
     "BTTS_CLARITY_GAP_PP",
     "GOAL_RANGE_CLARITY_GAP_PP",
-    "JOINT_DISPLAY_DEFAULT_COUNT",
-    "JOINT_DISPLAY_EXPANDED_COUNT",
-    "JOINT_DISPLAY_THIRD_MIN_PROBABILITY",
-    "JOINT_DISPLAY_TOP1_TOP2_MAX_GAP_PP",
-    "JOINT_DISPLAY_TOP2_TOP3_MAX_GAP_PP",
+    "JOINT_DISPLAY_COUNT",
+    "JOINT_DISPLAY_POLICY",
     "JOINT_SCENARIO_WARNING",
     "PublicMarketOutlookError",
     "SCHEMA_VERSION",
