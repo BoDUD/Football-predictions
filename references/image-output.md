@@ -68,9 +68,11 @@ The compact cells follow these display rules:
 - `总进球` shows only the highest-probability goal range from the validated path posterior,
   together with its probability and lead over the second-ranked range. Do not show a second
   goal-range choice in the image.
-- `半全场` and `波胆` are two views of the same ranked joint path events. Items at the same
-  position are one inseparable `(HT/FT × full-time score)` event and share its genuine joint
-  probability. Never display independently ranked HT/FT and score lists next to each other.
+- `半全场` and `波胆` are compact projections of the same ranked joint path events. In
+  `半全场`, list every distinct HT/FT label once in first-appearance order without a rank
+  prefix or percentage. In `波胆`, retain every selected path's full-time score and genuine
+  joint probability in ranked order. Never repeat an HT/FT label, sum only the displayed
+  paths into a fake HT/FT probability, or independently rank the two columns.
 - Normally display the top two paired joint events. Display three only when the versioned
   distribution-complexity rule identifies a genuinely divided top cluster. The system makes
   this choice from probabilities; callers and prose cannot request, suppress, reorder, or

@@ -106,7 +106,7 @@ COLORS = {
 }
 
 FOOTER_SOURCE_NOTE = (
-    "总进球只显示最高概率区间；半全场与波胆按同序联合事件配对，所示概率为联合路径概率。"
+    "半全场仅列联合情景中不重复的结果；波胆保留各联合路径比分及概率。"
 )
 
 
@@ -311,8 +311,11 @@ def _joint_artifact_display(
         if not isinstance(scenario_items, list) or len(scenario_items) not in {2, 3}:
             raise ValueError("joint scenarios must contain two or three display items")
         htft_lines: list[str] = []
+        seen_htft_labels: set[str] = set()
         score_lines: list[str] = []
-        for item in scenario_items:
+        for rank, item in enumerate(scenario_items, start=1):
+            if item.get("slot") != rank:
+                raise ValueError("invalid joint display slot")
             htft_code = str(item["htft"])
             if len(htft_code) != 2 or any(code not in HTFT_RESULT_LABELS for code in htft_code):
                 raise ValueError("invalid HT/FT display code")
@@ -320,7 +323,9 @@ def _joint_artifact_display(
             if not math.isfinite(percentage) or percentage <= 0.0:
                 raise ValueError("invalid joint display probability")
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
-            htft_lines.append(f"{label} {percentage:.1f}%")
+            if label not in seen_htft_labels:
+                seen_htft_labels.add(label)
+                htft_lines.append(label)
             score_lines.append(f"{item['score']} {percentage:.1f}%")
         return total_goals, "\n".join(htft_lines), "\n".join(score_lines), model_leader
     except (
