@@ -391,9 +391,17 @@ def build_policy_manifest(
     return manifest
 
 
-def validate_policy_manifest(
-    manifest: Mapping[str, Any], *, repo_root: str | Path | None = None
-) -> dict[str, Any]:
+def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an immutable policy snapshot without consulting the current runtime.
+
+    Historical policies must remain replayable after ``soccer-predict`` is upgraded.  This
+    validator therefore checks the content-addressed identity, schema, semantic package
+    version, and all internal lineage links, but deliberately does not require the frozen
+    package version or files to equal the currently installed checkout.  Creation and active
+    cohort paths use :func:`validate_active_runtime_policy_manifest` for those additional
+    checks.
+    """
+
     value = deepcopy(dict(manifest))
     schema_version = value.get("schema_version")
     if schema_version not in {LEGACY_POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION}:
@@ -434,13 +442,9 @@ def validate_policy_manifest(
             or software.get("version_source") != "soccer_predict.__version__"
         ):
             raise ForwardPolicyError("forward policy software binding is invalid")
-        package_version = _require_package_version(
+        _require_package_version(
             software.get("package_version"), "forward policy package_version"
         )
-        if package_version != SOCCER_PREDICT_VERSION:
-            raise ForwardPolicyError(
-                "forward policy package_version does not match soccer_predict.__version__"
-            )
     protected = code.get("protected_files")
     if not isinstance(protected, Mapping) or not protected:
         raise ForwardPolicyError("forward policy protected_files are missing")
@@ -528,30 +532,56 @@ def validate_policy_manifest(
     requirements = confirmation.get("promotion_requirements")
     if not isinstance(requirements, list) or not requirements:
         raise ForwardPolicyError("forward policy promotion requirements are missing")
-    if repo_root is not None:
-        root = Path(repo_root).resolve()
-        for relative, expected in protected.items():
-            path = root / str(relative)
-            if not path.is_file() or _hash_file(path) != expected:
-                raise ForwardPolicyError(
-                    f"prediction-affecting file differs from frozen policy: {relative}"
-                )
-        for section, path_field, hash_field in (
-            ("data", "manifest_path", "file_sha256"),
-            ("models", "registry_path", "file_sha256"),
+    return value
+
+
+def validate_active_runtime_policy_manifest(
+    manifest: Mapping[str, Any], *, repo_root: str | Path
+) -> dict[str, Any]:
+    """Validate a policy for creation/use by the current installed runtime.
+
+    Unlike historical replay, an active cohort may only use the current package version and
+    the exact frozen checkout, dataset, and model-registry files.
+    """
+
+    value = validate_policy_manifest(manifest)
+    if value.get("schema_version") != POLICY_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "legacy forward policies cannot be activated by the current runtime"
+        )
+    package_version = _require_package_version(
+        value["software"]["package_version"], "forward policy package_version"
+    )
+    current_version = _require_package_version(
+        SOCCER_PREDICT_VERSION, "soccer_predict.__version__"
+    )
+    if package_version != current_version:
+        raise ForwardPolicyError(
+            "forward policy package_version does not match soccer_predict.__version__"
+        )
+
+    root = Path(repo_root).resolve()
+    protected = value["code"]["protected_files"]
+    for relative, expected in protected.items():
+        path = root / str(relative)
+        if not path.is_file() or _hash_file(path) != expected:
+            raise ForwardPolicyError(
+                f"prediction-affecting file differs from frozen policy: {relative}"
+            )
+    for section, path_field, hash_field in (
+        ("data", "manifest_path", "file_sha256"),
+        ("models", "registry_path", "file_sha256"),
+    ):
+        block = value[section]
+        artifact_path = Path(str(block.get(path_field) or ""))
+        if not artifact_path.is_absolute():
+            artifact_path = root / artifact_path
+        if not artifact_path.is_file() or _hash_file(artifact_path) != block.get(
+            hash_field
         ):
-            block = value.get(section)
-            if not isinstance(block, dict):
-                raise ForwardPolicyError(f"forward policy {section} binding is missing")
-            artifact_path = Path(str(block.get(path_field) or ""))
-            if not artifact_path.is_absolute():
-                artifact_path = root / artifact_path
-            if not artifact_path.is_file() or _hash_file(artifact_path) != block.get(
-                hash_field
-            ):
-                raise ForwardPolicyError(
-                    f"frozen {section} artifact is missing or changed: {artifact_path}"
-                )
+            raise ForwardPolicyError(
+                f"frozen {section} artifact is missing or changed: {artifact_path}"
+            )
     return value
 
 
@@ -694,16 +724,21 @@ def freeze_policy(
         raise ForwardPolicyError(
             "refusing to freeze an uncommitted policy; commit the reviewed code first"
         )
-    manifest = build_policy_manifest(
+    manifest = validate_active_runtime_policy_manifest(
+        build_policy_manifest(
+            repo_root=root,
+            dataset_manifest=dataset_manifest,
+            model_registry=model_registry,
+            expected_final_merge_commit=expected_commit,
+            code_commit=head_commit,
+        ),
         repo_root=root,
-        dataset_manifest=dataset_manifest,
-        model_registry=model_registry,
-        expected_final_merge_commit=expected_commit,
-        code_commit=head_commit,
     )
     path = policy_directory(base_dir) / f"{manifest['policy_id']}.json"
     if path.exists():
-        existing = validate_policy_manifest(_read_json(path, "existing policy"))
+        existing = validate_active_runtime_policy_manifest(
+            _read_json(path, "existing policy"), repo_root=root
+        )
         if existing != manifest:
             raise ForwardPolicyError("policy ID collision with different content")
         return path, existing
@@ -738,7 +773,7 @@ def start_cohort(
             "cohort_id must be a non-empty token without whitespace"
         )
     policy_path = Path(policy_file).resolve()
-    policy = validate_policy_manifest(
+    policy = validate_active_runtime_policy_manifest(
         _read_json(policy_path, "policy file"), repo_root=root
     )
     if policy.get("schema_version") != POLICY_SCHEMA_VERSION:
@@ -905,7 +940,7 @@ def load_active_binding(
     if cohort["status"] != "active":
         return None
     policy_file = Path(str(cohort.get("policy_file") or ""))
-    policy = validate_policy_manifest(
+    policy = validate_active_runtime_policy_manifest(
         _read_json(policy_file, "active cohort policy"), repo_root=repo_root
     )
     if policy.get("schema_version") != POLICY_SCHEMA_VERSION:

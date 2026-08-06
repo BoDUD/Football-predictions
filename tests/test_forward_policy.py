@@ -66,11 +66,13 @@ class ForwardPolicyTests(unittest.TestCase):
     def test_policy_freezes_data_model_selector_gates_and_display(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             policy = self._policy(Path(temporary))
-            validated = forward_policy.validate_policy_manifest(
+            validated = forward_policy.validate_policy_manifest(policy)
+            active = forward_policy.validate_active_runtime_policy_manifest(
                 policy, repo_root=self.repo_root
             )
 
         self.assertEqual(validated["policy_hash"], policy["policy_hash"])
+        self.assertEqual(active, validated)
         self.assertEqual(
             validated["software"]["package_version"],
             forward_policy.SOCCER_PREDICT_VERSION,
@@ -130,11 +132,15 @@ class ForwardPolicyTests(unittest.TestCase):
                 "untouched-live-forward-"
                 + resealed_version["policy_hash"].split(":", 1)[1][:16]
             )
+            historical = forward_policy.validate_policy_manifest(resealed_version)
+            self.assertEqual(historical["software"]["package_version"], "9.9.9")
             with self.assertRaisesRegex(
                 forward_policy.ForwardPolicyError,
                 "does not match soccer_predict.__version__",
             ):
-                forward_policy.validate_policy_manifest(resealed_version)
+                forward_policy.validate_active_runtime_policy_manifest(
+                    resealed_version, repo_root=self.repo_root
+                )
 
             unlinked_registry = self._policy(Path(temporary))
             unlinked_registry["models"]["dataset_manifest_hash"] = None
@@ -335,6 +341,98 @@ class ForwardPolicyTests(unittest.TestCase):
                     forward_policy.ForwardPolicyError, "does not reproduce"
                 ):
                     forward_policy.validate_record_binding(tampered)
+
+    def test_previous_package_policy_and_binding_remain_historically_replayable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            with mock.patch.object(forward_policy, "SOCCER_PREDICT_VERSION", "3.4.0"):
+                policy = self._policy(base)
+                policy_file = base / "policy.json"
+                policy_file.write_text(
+                    json.dumps(policy, ensure_ascii=False), encoding="utf-8"
+                )
+                start = datetime(2026, 8, 6, 2, tzinfo=timezone.utc)
+                with mock.patch.object(
+                    forward_policy, "_git", side_effect=self._clean_final_head
+                ):
+                    forward_policy.start_cohort(
+                        base_dir=base / "active",
+                        policy_file=policy_file,
+                        cohort_id="historical-3-4",
+                        starts_at=start,
+                        repo_root=self.repo_root,
+                    )
+                    binding = forward_policy.load_active_binding(
+                        base_dir=base / "active",
+                        repo_root=self.repo_root,
+                        archived_at=start + timedelta(seconds=1),
+                        observation_commitment_hash="sha256:" + "9" * 64,
+                    )
+            assert binding is not None
+
+            with mock.patch.object(forward_policy, "SOCCER_PREDICT_VERSION", "3.5.0"):
+                historical_policy = forward_policy.validate_policy_manifest(policy)
+                historical_binding = forward_policy.validate_record_binding(binding)
+                self.assertEqual(
+                    historical_policy["software"]["package_version"], "3.4.0"
+                )
+                assert historical_binding is not None
+                self.assertEqual(
+                    historical_binding["provenance_binding"]["package_version"],
+                    "3.4.0",
+                )
+
+                with self.assertRaisesRegex(
+                    forward_policy.ForwardPolicyError,
+                    "does not match soccer_predict.__version__",
+                ):
+                    forward_policy.validate_active_runtime_policy_manifest(
+                        policy, repo_root=self.repo_root
+                    )
+                with self.assertRaisesRegex(
+                    forward_policy.ForwardPolicyError,
+                    "does not match soccer_predict.__version__",
+                ):
+                    forward_policy.load_active_binding(
+                        base_dir=base / "active",
+                        repo_root=self.repo_root,
+                        archived_at=start + timedelta(seconds=2),
+                    )
+                with mock.patch.object(
+                    forward_policy, "_git", side_effect=self._clean_final_head
+                ):
+                    with self.assertRaisesRegex(
+                        forward_policy.ForwardPolicyError,
+                        "does not match soccer_predict.__version__",
+                    ):
+                        forward_policy.start_cohort(
+                            base_dir=base / "new",
+                            policy_file=policy_file,
+                            cohort_id="must-not-reactivate-3-4",
+                            starts_at=start,
+                            repo_root=self.repo_root,
+                        )
+
+            resealed = deepcopy(binding)
+            snapshot = resealed["policy_snapshot"]
+            snapshot["software"]["package_version"] = "3.3.0"
+            snapshot.pop("policy_hash")
+            snapshot.pop("policy_id")
+            snapshot["policy_hash"] = forward_policy._hash_json(snapshot)
+            snapshot["policy_id"] = (
+                "untouched-live-forward-"
+                + snapshot["policy_hash"].split(":", 1)[1][:16]
+            )
+            resealed["policy_hash"] = snapshot["policy_hash"]
+            resealed["policy_id"] = snapshot["policy_id"]
+            resealed.pop("binding_hash")
+            resealed["binding_hash"] = forward_policy._hash_json(resealed)
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError, "does not reproduce"
+            ):
+                forward_policy.validate_record_binding(resealed)
 
     def test_freeze_requires_caller_confirmed_clean_final_merge_head(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
