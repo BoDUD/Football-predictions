@@ -26,10 +26,27 @@ python scripts/score_model.py fit --input history.csv --output model.json \
 ```
 
 The model uses time-decayed team attack/defence strengths, home advantage, and a
-Dixon-Coles low-score correction. Its JSON artifact contains the training window,
-configuration, fitted parameters, data hash, schema/model version, and deterministic model
-hash. A new cutoff or configuration creates a new artifact; never overwrite the provenance
-of an archived prediction.
+Dixon-Coles low-score correction. The current fitter jointly optimizes attack, defence, home
+advantage, and rho with deterministic bounded updates; it does not silently clip the
+log-rate while differentiating an unclipped objective. Its JSON artifact contains the
+training window, configuration, fitted parameters, data hash, schema/model version,
+deterministic model hash, convergence status, completed iterations, initial/final objective,
+projected-gradient norm, boundary warnings, an independent full-parameter
+projected-gradient/Armijo-backtracking fit from the same deterministic baseline, and
+conditional-rho plus legacy-grid audits. The artifact records the second path's objective,
+iteration/backtracking counts, gradient norm, rho/parameter distance from the primary path,
+and whether its lower objective was safely adopted. A second-path improvement must exceed
+the artifact's fixed `adoption_minimum_objective_improvement`; sub-tolerance numerical gains
+remain an audit and cannot replace the primary vector. The second path must also independently
+meet its projected-gradient convergence tolerance before adoption; a lower objective from an
+unfinished short run is diagnostic only. `converged` is recomputed only from the
+final selected parameter vector; a true value from an earlier Adam vector cannot survive a
+later rho or full-parameter replacement by inheritance.
+Treat `converged=false` or a material boundary warning as model-review evidence, not as a
+reason to hide the diagnostic. Frozen artifacts from the earlier
+`deterministic_adam_then_rho_grid` fitter remain readable but are not retroactively given
+diagnostics they never recorded. A new cutoff or configuration creates a new artifact; never
+overwrite the provenance of an archived prediction.
 
 ## Prediction contract
 
@@ -111,12 +128,20 @@ untouched forward sample without a material data-quality regression.
 
 The registered HT/FT model is fitted chronologically, not from the reviewed betting ledger.
 The fixed model configuration uses a 730-day half-time decay, 365-day full-time decay,
-Jeffreys-smoothed historical HT/FT association, and IPF calibration back to the
+uniform-weight Jeffreys-smoothed historical HT/FT association, and IPF calibration back to the
 fixture-specific row and column marginals. Season 2025 is valid fixed model-component
 evidence, but 2025 and partial 2026 were subsequently inspected while the final two-scenario
 selector was developed. Neither may be described as untouched confirmation of
 `probability_top2_v3_post_selection`; future clean live-forward evidence is required for an
 end-to-end claim.
+
+The association estimator can run a separately declared exponential half-life experiment
+with `--association-half-life-days`. Its artifact records raw counts, weighted counts,
+effective sample weight, reference date, formula, and half-life, and the prediction repeats
+that weighting audit. Omitting the option intentionally preserves the historically validated
+uniform-weight association; do not silently relabel a decay experiment as the fixed promoted
+configuration. Compare uniform weighting, the full-time half-life, and other predeclared
+half-lives chronologically before changing the registered default.
 
 Run the versioned evaluator against the importer's hash-verified local bundle:
 
@@ -263,6 +288,134 @@ selection cohort and a release-blocker funnel separately from primary performanc
 graded shadow selections in one market is only a manual model/policy validation trigger;
 `parameter_change_authorized` remains false, market status is unchanged, and no automatic
 release, threshold change, or historical rewrite is permitted.
+
+## Untouched live-forward confirmation
+
+Historical holdouts and the candidate/shadow ledger are development evidence; neither is the
+final confirmation sample. Before the first fixture in a confirmation run, commit the reviewed
+code and freeze one complete `forward-policy/2.0.0` manifest. The manifest binds the Git commit
+and hashes of every prediction-affecting source file, the dataset manifest and its declared hash,
+the model registry and training configuration, market statuses, candidate selector, release
+thresholds, evidence freshness, and public display policy. `freeze` requires the caller to name
+the reviewed final merge commit, verifies that it is the current clean `HEAD`, and refuses an
+intermediate feature-branch commit or dirty worktree. Start a `live-forward-cohort/1.0.0` only
+after that final policy exists; do not start a cohort on the review branch:
+
+```bash
+python scripts/forward_policy.py --base-dir <workspace> --repo-root <repo> freeze \
+  --dataset-manifest <dataset-manifest.json> \
+  --model-registry <registry.json> \
+  --expected-final-merge-commit <final-merge-git-sha>
+
+python scripts/forward_policy.py --base-dir <workspace> --repo-root <repo> start \
+  --policy-file <forward-policy.json> \
+  --cohort-id <stable-cohort-id>
+
+python scripts/forward_policy.py --base-dir <workspace> close \
+  --closed-at <timezone-aware-ISO>
+```
+
+Every record in an active cohort must be archived after `starts_at` and receives the complete
+policy snapshot and cohort hash. Its structured provenance binds `package_version` (derived from
+`soccer_predict.__version__`), `git_commit_sha`, `policy_hash`, `validation_config_hash`,
+`dataset_manifest_hash`, `model_registry_hash`, `renderer_policy_hash`, and `cohort_id`. The
+renderer identity covers the display policy plus the public-outlook, prediction-card,
+review-card, and plain-text formatter source hashes. Prediction-affecting code, data, model, selector, threshold,
+market-status, or display-policy changes invalidate the frozen binding and require a new cohort;
+close the old cohort explicitly, preserve its immutable manifest and closure artifact, and never
+rewrite it. Non-predictions, abstentions, and unavailable markets are all part of the denominator.
+Old fixtures and the previous 25 selections remain useful quarantined history, but cannot be
+inserted into this untouched cohort.
+
+An active cohort also requires `source-evidence/1.0.0`. Export the visible pre-kickoff page state
+to JSON, including fixture identity, exact kickoff, source URL, collection time, HTTP metadata,
+and complete per-company outcome prices. Build and replay the bundle with:
+
+```bash
+python scripts/source_evidence.py build \
+  --source-file <visible-page-export.json> \
+  --output-dir <workspace>/.codex/soccer-predict/source-evidence
+
+python scripts/source_evidence.py verify \
+  --evidence <workspace>/.codex/soccer-predict/source-evidence/<match-id>-source-evidence.json
+```
+
+The synthetic, explicitly non-evidence contract example is
+[`analysis/fixtures/visible_market_snapshot.json`](../analysis/fixtures/visible_market_snapshot.json).
+It documents the adapter input shape but must never be copied into a real cohort.
+
+The builder keeps each raw JSON response under a content-addressed path, records its byte hash,
+HTTP metadata and parser version, and derives median/consensus prices only from complete firm
+rows. `memory_store.py record --source-evidence-file ...` replays that raw evidence and requires
+each candidate's market, timestamp, odds format, complete outcome prices, price basis, and firm
+count to reproduce. A derivative-only JSON file, edited raw response, incomplete market,
+mismatched fixture, or post-kickoff timestamp fails closed. These local hashes provide a durable
+audit boundary; an external trusted timestamp remains an optional future anchor and must not be
+claimed until an external service is actually configured.
+
+If the visible source contains no market table, archive a source snapshot with
+`availability_status=unavailable`, an empty market list, and at least one concrete reason. This
+keeps the fixture in the cohort denominator without inventing prices; the candidate manifest must
+then mark the affected markets unavailable rather than silently dropping the match.
+
+New confirmation evidence uses `forward-observations/2.0.0`; v1 remains readable only as
+`legacy_uncommitted_read_only` and can never receive a statistical green light. V2 has three
+separate layers. First freeze a complete eligibility queue containing each unique
+`(cohort_id, fixture_id, market)` before any listed kickoff. Then archive one canonical pre-match
+prediction payload for every queue key, including predicted, abstained and unavailable states,
+and bind its hash into provenance-complete `forward-policy-binding/2.1.0`. The prediction payload
+contains no result. An active-cohort `memory_store.py record` must receive this already validated,
+all-pending micro-ledger with `--forward-validation-ledger`; the record operation atomically
+archives its content hash, market-specific commitments, canonical record-prediction payload,
+v2.1 binding, and archive-version hash. It never reconstructs missing baselines or a queue from
+post-match history. Initial and lineup-check versions therefore receive distinct commitments.
+Finally add a separate settlement that binds the commitment hash and contains the verified result
+and optional closing snapshot. The evaluator requires exact queue coverage, one commitment and one
+explicit settled-or-pending settlement per key; caller-chosen duplicate observation IDs,
+retrospective generation, late market snapshots and post-result edits to model probabilities fail
+closed. Close the cohort with the separate closure receipt while preserving the original active
+cohort manifest and hash; a rewritten closed pointer is not a substitute for that pair.
+
+Public v2 evaluation also requires a `memory-forward-history-ledger-binding/1.0.0` produced by
+replaying the archived record. It binds the pre-match ledger hash, archive-version hash, record
+commitment hash, and exact market commitments. Deleting, copying, reordering, truncating, or
+retrofitting commitments fails closed even if the attacker recomputes the wrapper hash. Legacy
+v1 and uncommitted v2.0 base bindings remain readable for quarantine only and cannot enter the
+untouched confirmation summary or promotion gate. Local content hashes still cannot prove wall
+clock time against an attacker who can reseal the entire local chain, so the external timestamp
+promotion blocker remains mandatory.
+
+Each market now declares its own outcome schema, so 1X2, HT/FT and five-state return distributions
+cannot accidentally share one top-level outcome list. Model baselines carry generated time,
+training cutoff and artifact hash inside the pre-match commitment. Same-time bookmaker
+probabilities are only an assertion: the validator reopens the content-addressed source-evidence
+bundle, reproduces the complete decimal prices, and recomputes multiplicative no-vig probabilities
+as `(1 / odds_i) / sum(1 / odds)`. The snapshot must be no later than the binding archive time and
+within the policy-frozen decision-time tolerance. Executable entry and closing snapshots retain
+complete markets; CLV uses their no-vig selection probabilities, and returns use win, half-win,
+push, half-loss and loss settlement states rather than a hit/miss shortcut.
+
+The validation protocol itself is frozen in the policy: bootstrap seed and repetitions, minimum
+paired samples, minimum independent ISO-week clusters, segment requirements, same-time tolerance
+and calibration threshold. CLI overrides are explicitly experimental and block the gate. Generate
+the report with:
+
+```bash
+python scripts/forward_validation.py \
+  --input <forward-observations.json> \
+  --output <forward-validation.json>
+```
+
+The report calculates paired log loss and multiclass Brier deltas, pooled and per-outcome
+calibration/ECE, selection coverage, model availability, abstention and unavailable rates,
+league/market/lead-time segments, five-state flat-stake and actual stake-weighted ROI, no-vig CLV,
+and kickoff-ISO-week clustered bootstrap intervals. It reports missing outcome, baseline and
+execution IDs instead of silently dropping them, and a single-week bootstrap can never satisfy the
+minimum-cluster gate. Local content hashes are tamper-evident workflow controls, not a third-party
+timestamp. Until a real external timestamp anchor is configured, the report keeps
+`external_timestamp_anchor_not_configured` as a blocker. The executable always emits
+`promotion_eligible=false` and `parameter_change_authorized=false`; it never changes model
+parameters, thresholds, market policy, or old archives.
 
 When rebuilding all fourteen leagues, train them sequentially into one registry and run one
 final `inspect`; concurrent `train` commands must not write the same `registry.json`. The

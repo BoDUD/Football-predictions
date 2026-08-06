@@ -1,6 +1,5 @@
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -10,7 +9,10 @@ class LineupSourceContractTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("references/lineup-sources.md", skill)
         self.assertIn("official-site → ESPN → Sofascore", skill)
-        self.assertIn("Never treat a predicted, probable, expected, or stale lineup as confirmed", skill)
+        self.assertIn(
+            "Never treat a predicted, probable, expected, or stale lineup as confirmed",
+            skill,
+        )
 
     def test_reference_requires_fixture_binding_and_two_complete_xis(self):
         reference = (ROOT / "references" / "lineup-sources.md").read_text(
@@ -32,7 +34,10 @@ class LineupSourceContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("do not stop after an empty Titan lineup section", collection)
-        self.assertIn("An empty Titan lineup section is not a retryable execution failure", scheduling)
+        self.assertIn(
+            "An empty Titan lineup section is not a retryable execution failure",
+            scheduling,
+        )
         self.assertIn("Never call `release` solely", scheduling)
 
     def test_prediction_framework_keeps_unconfirmed_lineups_out_of_gates(self):
