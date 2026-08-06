@@ -55,10 +55,14 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
    validate, and publicly display exactly the global joint Top 2 in descending joint-probability
    order. Keep every event's HT/FT label, full-time score, and joint probability together. If
    both events share an HT/FT label but have different scores, retain both rows and repeat the
-   label. Never display a third event or complete a branch set. Derive 1X2, total goals, goal
-   range, and BTTS from the same posterior. Never multiply HT/FT and score marginals, place
-   their independent Top 2 lists side by side, or replace a score to force terminal-result
-   agreement. Independent HT/FT and unconditional exact-score Top 2 lists remain internal.
+   label. Never display a third event or complete a branch set. Map both frozen scores to
+   goal-range bands for internal consistency validation, but publicly show only the Rank 1
+   event's range as the single `总进球` value. Derive 1X2, total goals, the complete goal-range
+   marginal, and BTTS from the same posterior as audit distributions. Never multiply HT/FT and
+   score marginals, place their independent Top 2 lists side by side, replace the single public
+   range with the marginal goal-range leader, or replace a score to force terminal-result
+   agreement. Independent 1X2/goal-range ranks, HT/FT Top 2, and unconditional exact-score Top
+   2 lists remain internal.
 
 Use `H`, `D`, and `A` for home, draw, and away. Examples: `DD` = half-time draw/full-time draw; `DA` = half-time draw/full-time away win.
 
@@ -118,15 +122,17 @@ Add these sections after the full-time market analysis:
 
 1. `半场判断`: first-half 1X2 probabilities, likely half-time scores, current half-time Asian/total lines, and the best positive-EV direction.
 2. `半全场矩阵`: a compact 3x3 marginal matrix for HH through AA, with row/column checks against the unified path posterior; do not highlight an independent display Top 2.
-3. `联合比赛路径`: show exactly the frozen, validated global joint-event Top 2 in descending
-   joint-probability order. Every row includes its inseparable HT/FT label, full-time score,
-   genuine joint probability, posterior/artifact identity, status, and any eligible market
-   audit. Retain both rows when their HT/FT labels match but their scores differ, and never
-   expose a third event. Every displayed total, goal range, BTTS, or 1X2 label must be derived
-   from the same path cells.
+3. `联合比赛路径`: show one goal range mapped from the frozen joint Rank 1 score, followed by
+   exactly the frozen, validated global joint-event Top 2 in descending joint-probability
+   order. Every event row includes its inseparable HT/FT label, full-time score, genuine joint
+   probability, posterior/artifact identity, status, and any eligible market audit. Retain both
+   rows when their HT/FT labels match but their scores differ, and never expose a third event.
+   Validate Rank 2's score-derived range internally but do not repeat it in image or normal
+   text. Independent total/goal-range, BTTS, or 1X2 marginal leaders cannot replace these
+   public projections.
 4. `风险`: missing odds, small samples, lineup uncertainty, and high variance.
 
-Concise mode includes the best first-half direction plus the frozen, validated global joint-event Top 2 with each event's HT/FT-score pairing intact. Keep `观察候选（未达标）` labels even in concise mode. If no valid path artifact exists, show only `数据不足` for the scenario section.
+Concise mode includes the formal primary or explicit no-primary state, the one Rank-1-score-derived range, and the frozen, validated global joint-event Top 2 with each event's HT/FT-score pairing intact. Keep any separately qualified observation explicitly non-primary and outside the public projection cells. If no valid path artifact exists, show only `数据不足` for the public projections.
 
 ## Supported-competition boundary
 

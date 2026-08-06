@@ -60,29 +60,32 @@ valid artifact before kickoff means the workflow fails closed and reports `数�
 The compact cells follow these display rules:
 
 - `主推` shows the single archived formal primary that ranked highest after all active gates,
-  with the archive-derived `★`. If complete joint analysis is valid but no formal direction
-  qualifies, it may instead show the validated joint artifact's `one_x_two.top1` as
-  `◇ 模型首选（不计战绩）`. This renderer-derived reference never enters a formal pick field:
-  assign no stake and exclude it from win/loss, profit, and ROI. Do not manufacture an
-  observation merely to fill the cell.
-- `总进球` shows only the highest-probability goal range from the validated path posterior,
-  together with its probability and lead over the second-ranked range. Do not show a second
-  goal-range choice in the image.
+  with the archive-derived `★`. If no formal direction qualifies, show exactly
+  `无正式主推`. Never fill this cell from a marginal 1X2 or goal-range leader. A separately
+  qualified observation may appear once as `◇` in the accompanying text or audit, explicitly
+  outside the card primary and joint-event rows; it never receives a stake or settlement.
+- `总进球` shows exactly one range, deterministically mapped from the frozen global joint-event
+  Rank 1 score total. Do not show Rank 2's range and do not substitute the independent
+  goal-range marginal Top-1.
 - `半全场` and `波胆` are compact projections of exactly the frozen, validated global
   joint-event Top 2. Display the two events in descending genuine joint-probability order and
-  keep each event's HT/FT label, full-time score, and joint probability inseparably aligned
-  across the two columns. If both events share an HT/FT label but have different scores,
-  retain both rows and repeat the label. Never display a third event, complete a branch set,
-  deduplicate a repeated HT/FT label, or independently rank the two columns.
-- The independent HT/FT Top 2 and independent unconditional exact-score Top 2 remain internal
-  immutable audits and do not occupy public display slots. Callers and prose cannot request,
-  suppress, reorder, or hand-pick the two public global joint events.
+  keep each HT/FT label, score, and joint probability inseparably aligned across those two
+  columns. Each internal joint item still carries its score-derived range for validation, but
+  the image and normal text do not repeat two range labels.
+- If both events share an HT/FT label, retain both rows and repeat the label. Never display a
+  third event, complete a branch set, deduplicate a repeated label, or independently rank the
+  paired columns.
+- Independent 1X2 and goal-range rankings, independent HT/FT Top 2, and independent
+  unconditional exact-score Top 2 remain immutable audit distributions and do not occupy
+  public display slots. Callers and prose cannot request, suppress, reorder, or hand-pick the
+  two public global joint events.
 
 The image is intentionally concise, but the analysis is not. Half-time marginals, full-time
 1X2, complete goal-range distribution, BTTS, market movement, EV/edge, evidence coverage, and
 other supported markets remain fully calculated and available in accompanying text or the
-machine-readable audit. Omitting them from the eight-column image must not omit them from the
-model or archive.
+machine-readable audit. Their marginal Top-1 ranks are descriptive and cannot fill the card's
+primary or joint-event cells. Omitting them from the eight-column image must not omit them from
+the model or archive.
 
 ## Joint-path integrity
 
@@ -96,17 +99,23 @@ cutoff, normalization, tail quality, and agreement between its score, HT/FT, 1X2
 goal-range, and BTTS marginals. Market prices may condition the posterior only under a
 versioned method supported by strict forward calibration. A price used for conditioning
 cannot also be claimed as independent EV evidence against that posterior. If the artifact or
-any required validation fails, render `数据不足` for the affected cells and no fabricated
-fallback scenario rows. `数据不足` describes missing or invalid joint analysis; it must not be used
-merely because the formal recommendation gate rejected every direction. With a valid joint
-artifact, keep the genuine total and paired scenarios visible and label an eligible model
-choice `◇ 模型首选（不计战绩）` when no formal primary exists.
+any required validation fails, render `数据不足` as one fail-closed state across `总进球`,
+`半全场`, and `波胆`, with no fabricated fallback value or rows. `数据不足` describes missing or invalid
+joint analysis; it does not replace the primary state. A record with no formal primary still
+shows `无正式主推` whether its joint projections are valid or unavailable.
 
 For an immutable historical initial or lineup revision that lacks an accepted joint artifact,
 keep `数据不足`. Never reconstruct, backfill, or rewrite its joint scenarios from independent
 HT/FT and exact-score lists, notes, another revision, the final score, or any post-match
 evidence. A newer renderer may change presentation, but it must not invent analysis that was
 not frozen before kickoff.
+
+An immutable historical revision with a valid frozen joint artifact may be rerendered under
+the current presentation. Computing the one visible goal-range label from its already-frozen
+Rank 1 score is a deterministic projection, not a new prediction: do not modify the archive,
+joint artifact, `archive_version_hash`, probabilities, order, or settlement basis. Internal
+Rank 2 range derivation may be validated but is not displayed. Save the rerender under a new
+filename and preserve the original image as historical output.
 
 ## Historical archives and old Codex tasks
 
@@ -121,7 +130,10 @@ before kickoff.
 Apply these archive-state rules:
 
 - A historical `initial` or `lineup-check` revision without a validated joint artifact may be
-  rerendered only as `数据不足`. Do not attach or synthesize a joint artifact later.
+  rerendered only with all three joint projection cells as `数据不足`. Do not attach or
+  synthesize a joint artifact later. A valid historical artifact may supply only its frozen
+  Top 2 and the deterministic Rank-1-score-to-range projection; it cannot be reranked or
+  rewritten.
 - A pending legacy `initial` revision is immutable. The archive does not allow
   `initial -> initial` replacement. If the match is still pre-kickoff, the only normal upgrade
   is a fresh, complete `initial -> lineup-check` transition inside the verified T-30 window,
@@ -232,14 +244,14 @@ python scripts/review_card_renderer.py \
 - `★` means one unique archived, policy-enabled formal primary passed every active model,
   market, data-quality, evidence, and timing gate. A slate may have multiple starred matches,
   but never more than one starred direction per match.
-- `◇` means either a separately archived, diagnostically qualified observation or the
-  renderer-derived 1X2 leader from an accepted joint artifact. Display the latter as
-  `模型首选（不计战绩）`; both remain non-primary, have no stake or settlement, and must not
-  be described as a bet.
-- `无正式推荐` means no executable direction qualified. It never receives a star. When a valid
-  `◇` model choice is shown, retain the explicit no-formal-primary and non-counting status.
+- `◇` means a separately archived, diagnostically qualified observation shown only in
+  accompanying text or audit. It remains non-primary, has no stake or settlement, and must not
+  be described as a bet or occupy the card's `主推` cell.
+- `无正式主推` means no executable direction qualified for the card. It never receives a star
+  and must not be replaced by a marginal 1X2 or goal-range leader.
 - `数据不足` means the required joint artifact is absent or invalid. It is not a synonym for
-  no formal recommendation.
+  no formal recommendation and applies to the three public projection cells (`总进球`,
+  `半全场`, and `波胆`) as one fail-closed unit.
 - Reject caller-supplied markers, formal rows without an archived primary, and observations
   that failed their diagnostic qualification.
 

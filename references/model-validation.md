@@ -214,6 +214,56 @@ abstentions, calibration, settlement, and model/market hashes before either form
 be enabled. Until then, corner output is a `◇` observation even when diagnostic EV is
 positive and the current two-way market is complete.
 
+## Forward candidate-evaluation cohort
+
+New normal initial and lineup-check archives must not discard a market merely because its
+release policy is paused or because no formal primary is ultimately selected. Build one
+fixture-bound `soccer_candidate_evaluation` artifact with schema
+`candidate-evaluation/2.0.0`, pass it with `--candidate-evaluation-file`, and add
+`--require-candidate-evaluations`. The complete manifest covers `asian`, `total`,
+`half_time`, `htft`, `goal_range`, `btts`, `corner_total`, and `corner_handicap`; mark each
+market either `evaluated` with at least one candidate or `unavailable` with a concrete reason.
+The opt-in flag preserves compatibility for already frozen historical calls, but the Skill's
+forward workflow must use it. Never construct this artifact after kickoff or backfill it into
+an old archive.
+
+For each evaluated candidate, include its market identity, executable price and odds format,
+complete mutually exclusive current market, source and timezone-aware collection time,
+consensus/median basis, bookmaker count, market-signal class, canonical five-state settlement
+distribution, and probability. Optional EV, no-vig market probability, and edge values are
+assertions only: `memory_store.py` recalculates them. Football probabilities are reopened from
+the validated joint scenario; corner probabilities require a matching validated corner
+observation. Fixture, cutoff, freshness, probability, complete-market, and artifact hashes are
+validated before archive. Artifact generation must be no earlier than every market snapshot
+and every joint/corner model or ranker generation time it consumes; an impossible timeline is
+rejected rather than downgraded to a failed gate.
+
+Candidate gates are separated into `integrity`, `value`, `risk`, and `release`. A candidate is
+`counterfactual_eligible` only when every non-release gate passes. Release-policy failures do
+not remove it from the shadow cohort, which breaks the former circular dependency where a
+paused market could never accumulate the forward evidence needed for review. At most one
+counterfactual candidate per match and market is deterministically marked `shadow_selected`;
+it remains an observation with no stake, monetary settlement, primary result, accuracy, or
+ROI. `formal_eligible` still requires every gate, including release gates, and the evaluation
+artifact never creates or promotes a formal primary by itself.
+
+The archive freezes the original source payload, its canonical hash, and an active-version
+binding covering fixture, stage, archive time, joint/score lineage, data quality, and guardrail
+evidence. The reviewed settlement basis freezes the same evaluation context. Before review or
+statistics, the validator replays canonical distributions, no-vig values, five-state EV/edge,
+all gates, confidence components, ranks, and shadow selections from those inputs and requires
+an exact match. It also recomputes the post-match diagnostic from the verified result. Rewriting
+derived fields and recalculating the audit's self-hash is therefore invalid. Aggregate shadow
+statistics deduplicate by frozen match and market, not artifact byte hash, so whitespace or key
+ordering cannot manufacture additional samples.
+
+Post-match review settles the frozen shadow selection against verified regulation-time,
+half-time, or corner results as applicable. `stats` and `calibrate` expose the per-market shadow
+selection cohort and a release-blocker funnel separately from primary performance. Twenty
+graded shadow selections in one market is only a manual model/policy validation trigger;
+`parameter_change_authorized` remains false, market status is unchanged, and no automatic
+release, threshold change, or historical rewrite is permitted.
+
 When rebuilding all fourteen leagues, train them sequentially into one registry and run one
 final `inspect`; concurrent `train` commands must not write the same `registry.json`. The
 source-normalization, collection, dataset, and handoff commands are in

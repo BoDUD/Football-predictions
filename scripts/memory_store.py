@@ -112,6 +112,17 @@ PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
 HTFT_OUTCOMES = tuple(f"{half}{full}" for half in "HDA" for full in "HDA")
 OBSERVATION_SCHEMA_VERSION = "candidate-observation/1.0.0"
+CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/2.0.0"
+CANDIDATE_EVALUATION_ARTIFACT_TYPE = "soccer_candidate_evaluation"
+CANDIDATE_EVALUATION_KIND = "multi_market_candidate_evaluation"
+CANDIDATE_GATE_CATEGORIES = ("integrity", "value", "risk", "release")
+CANDIDATE_SETTLEMENT_STATES = (
+    "full_win",
+    "half_win",
+    "push",
+    "half_loss",
+    "loss",
+)
 JOINT_SCENARIO_AUDIT_SCHEMA_VERSION = "joint-scenario-audit/1.0.0"
 MARKET_EVIDENCE_MAX_AGE_MINUTES_BY_STAGE = {
     "initial": 60,
@@ -742,6 +753,41 @@ def matrix_settlement_distribution(
                 raise ValueError(f"Cannot derive settlement distribution for {market}")
             values[result_to_state[str(result)]] += probability
     return values
+
+
+def effective_settlement_win_probability(
+    distribution: dict[str, Any], label: str
+) -> float | None:
+    """Return the stake-weighted win probability for five-state markets.
+
+    A half win/loss contributes half a stake, while pushes contribute no active
+    stake.  This is the only probability that is comparable with a two-sided
+    no-vig market probability on quarter/integer Asian-style lines.
+    """
+
+    if not isinstance(distribution, dict) or set(distribution) != set(
+        CANDIDATE_SETTLEMENT_STATES
+    ):
+        raise ValueError(f"{label} must contain exactly the five settlement states")
+    values: dict[str, float] = {}
+    for state in CANDIDATE_SETTLEMENT_STATES:
+        raw = distribution.get(state)
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw))
+            or not 0.0 <= float(raw) <= 1.0
+        ):
+            raise ValueError(f"{label}.{state} must be finite and between 0 and 1")
+        values[state] = float(raw)
+    if abs(math.fsum(values.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError(f"{label} must sum to 1")
+    win_mass = values["full_win"] + values["half_win"] / 2.0
+    loss_mass = values["loss"] + values["half_loss"] / 2.0
+    active_mass = win_mass + loss_mass
+    if active_mass <= PROBABILITY_AUDIT_TOLERANCE:
+        return None
+    return win_mass / active_mass
 
 
 def validate_probability_close(actual: Any, expected: float, label: str) -> None:
@@ -2976,6 +3022,913 @@ def load_corner_observation_audit(
     return audit
 
 
+def calculate_candidate_evaluation_audit_hash(audit: dict[str, Any]) -> str:
+    value = deepcopy(audit)
+    value.pop("audit_hash", None)
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("candidate evaluation audit contains non-canonical values") from exc
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def calculate_candidate_evaluation_source_hash(payload: dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "candidate evaluation source contains non-canonical values"
+        ) from exc
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _candidate_gate(
+    name: str,
+    category: str,
+    passed: bool,
+    reasons: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    if category not in CANDIDATE_GATE_CATEGORIES:
+        raise ValueError(f"unsupported candidate gate category: {category}")
+    normalized = [str(item).strip() for item in reasons or [] if str(item).strip()]
+    return {
+        "gate": name,
+        "category": category,
+        "passed": bool(passed),
+        "reasons": [] if passed else normalized,
+    }
+
+
+def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    market = str(raw.get("market") or "").strip().lower()
+    if market not in PRIMARY_MARKETS:
+        raise ValueError(f"candidate evaluation market must be one of {', '.join(PRIMARY_MARKETS)}")
+    candidate: dict[str, Any] = {"market": market}
+    if market in {"asian", "total", "corner_total", "corner_handicap"}:
+        allowed = {
+            "asian": {"home", "away"},
+            "total": {"over", "under"},
+            "corner_total": {"over", "under"},
+            "corner_handicap": {"home", "away"},
+        }[market]
+        side = str(raw.get("side") or "").strip().lower()
+        line = raw.get("line")
+        if side not in allowed or isinstance(line, bool) or not isinstance(line, (int, float)):
+            raise ValueError(f"candidate evaluation {market} side or line is invalid")
+        if not math.isfinite(float(line)):
+            raise ValueError(f"candidate evaluation {market} line must be finite")
+        split_line(float(line))
+        candidate.update({"side": side, "line": float(line)})
+        identity = f"{market}:{side}:{float(line):.12g}"
+    elif market == "half_time":
+        submarket = str(raw.get("submarket") or "").strip().lower()
+        allowed = {
+            "1x2": {"home", "draw", "away"},
+            "asian": {"home", "away"},
+            "total": {"over", "under"},
+        }
+        side = str(raw.get("side") or "").strip().lower()
+        if submarket not in allowed or side not in allowed[submarket]:
+            raise ValueError("candidate evaluation half_time submarket or side is invalid")
+        line = raw.get("line")
+        if submarket == "1x2":
+            if line is not None:
+                raise ValueError("candidate evaluation half_time 1x2 cannot carry a line")
+        else:
+            if isinstance(line, bool) or not isinstance(line, (int, float)):
+                raise ValueError("candidate evaluation half_time asian/total requires a line")
+            if not math.isfinite(float(line)):
+                raise ValueError("candidate evaluation half_time line must be finite")
+            split_line(float(line))
+            line = float(line)
+        candidate.update({"submarket": submarket, "side": side, "line": line})
+        identity = f"{market}:{submarket}:{side}:{'' if line is None else f'{line:.12g}'}"
+    elif market == "htft":
+        selection = str(raw.get("selection") or "").strip().upper()
+        if selection not in HTFT_OUTCOMES:
+            raise ValueError("candidate evaluation HT/FT selection is invalid")
+        candidate["selection"] = selection
+        identity = f"{market}:{selection}"
+    elif market == "goal_range":
+        parsed = parse_goal_range_selection(str(raw.get("selection") or ""))
+        candidate.update(parsed)
+        identity = f"{market}:{parsed['selection']}"
+    else:
+        side = str(raw.get("side") or "").strip().lower()
+        if side not in {"yes", "no"}:
+            raise ValueError("candidate evaluation BTTS side must be yes or no")
+        candidate["side"] = side
+        identity = f"{market}:{side}"
+    candidate["identity"] = identity
+    return candidate, identity
+
+
+def _candidate_pick(candidate: dict[str, Any]) -> dict[str, Any]:
+    pick = deepcopy(candidate)
+    if candidate["market"] == "half_time":
+        pick["market"] = candidate["submarket"]
+    return pick
+
+
+def _normalize_candidate_distribution(value: Any, label: str) -> dict[str, float]:
+    if not isinstance(value, dict) or set(value) != set(CANDIDATE_SETTLEMENT_STATES):
+        raise ValueError(f"{label} must contain exactly the five settlement states")
+    normalized: dict[str, float] = {}
+    for state in CANDIDATE_SETTLEMENT_STATES:
+        raw = value.get(state)
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw))
+            or not 0.0 <= float(raw) <= 1.0
+        ):
+            raise ValueError(f"{label}.{state} must be finite and between 0 and 1")
+        normalized[state] = float(raw)
+    if abs(math.fsum(normalized.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
+        raise ValueError(f"{label} must sum to 1")
+    return normalized
+
+
+def _matching_corner_candidate(
+    record: dict[str, Any], candidate: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    basis = record.get("settlement_basis")
+    raw_audits = (
+        basis.get("candidate_audits", [])
+        if isinstance(basis, dict) and "candidate_audits" in basis
+        else record.get("candidate_audits", [])
+    )
+    for audit in raw_audits:
+        if not isinstance(audit, dict) or audit.get("kind") != CORNER_OBSERVATION_KIND:
+            continue
+        if not validated_observation_audit(audit, record):
+            continue
+        for item in audit.get("candidates", []):
+            if not isinstance(item, dict):
+                continue
+            if (
+                item.get("market") == candidate["market"]
+                and item.get("side") == candidate.get("side")
+                and math.isclose(
+                    float(item.get("line")), float(candidate.get("line")), abs_tol=1e-12
+                )
+            ):
+                return item, audit
+    return None
+
+
+def _canonical_candidate_distribution(
+    record: dict[str, Any], candidate: dict[str, Any]
+) -> tuple[dict[str, float], dict[str, Any]]:
+    market = candidate["market"]
+    if market in CORNER_MARKETS:
+        match = _matching_corner_candidate(record, candidate)
+        if match is None:
+            raise ValueError(
+                f"candidate evaluation {market} requires a matching validated corner observation"
+            )
+        source, source_audit = match
+        distribution = _normalize_candidate_distribution(
+            source.get("settlement_probabilities"),
+            f"candidate evaluation {market} canonical distribution",
+        )
+        model = source_audit.get("model")
+        ranker = source_audit.get("ranker")
+        if not isinstance(model, dict) or not isinstance(ranker, dict):
+            raise ValueError("candidate evaluation corner model timing is missing")
+        prediction_generated_at = parse_aware_datetime(
+            str(model.get("generated_at") or ""),
+            "candidate evaluation corner prediction generated_at",
+        )
+        ranking_generated_at = parse_aware_datetime(
+            str(ranker.get("generated_at") or ""),
+            "candidate evaluation corner ranking generated_at",
+        )
+        upstream_generated_at = max(
+            prediction_generated_at.astimezone(timezone.utc),
+            ranking_generated_at.astimezone(timezone.utc),
+        )
+        return distribution, {
+            "source": "validated_corner_observation",
+            "candidate_id": source.get("candidate_id"),
+            "observation_id": source_audit.get("observation_id"),
+            "prediction_hash": model.get("prediction_hash"),
+            "ranking_hash": ranker.get("ranking_hash"),
+            "prediction_generated_at": prediction_generated_at.isoformat(),
+            "ranking_generated_at": ranking_generated_at.isoformat(),
+            "upstream_generated_at": upstream_generated_at.isoformat(),
+            "upstream_formal_eligible": source.get("upstream_formal_eligible") is True,
+        }
+
+    snapshot = validated_joint_scenario_audit(record)
+    if not isinstance(snapshot, dict):
+        raise ValueError(
+            f"candidate evaluation {market} requires a validated joint scenario audit"
+        )
+    joint_audit = record.get("joint_scenario_audit")
+    pick = _candidate_pick(candidate)
+    if market == "htft":
+        htft = snapshot.get("htft_marginal")
+        if not isinstance(htft, dict):
+            raise ValueError("candidate evaluation HT/FT marginal is missing")
+        matrix = validate_htft_matrix(
+            htft.get("code_probabilities"), "candidate evaluation HT/FT matrix"
+        )
+        probability = matrix[candidate["selection"]]
+        distribution = {
+            "full_win": probability,
+            "half_win": 0.0,
+            "push": 0.0,
+            "half_loss": 0.0,
+            "loss": 1.0 - probability,
+        }
+    else:
+        matrix_key = (
+            "half_time_score_marginal" if market == "half_time" else "full_time_score_marginal"
+        )
+        matrix_block = snapshot.get(matrix_key)
+        if not isinstance(matrix_block, dict):
+            raise ValueError(f"candidate evaluation {matrix_key} is missing")
+        matrix = validate_probability_matrix(
+            matrix_block.get("probabilities"), f"candidate evaluation {matrix_key}"
+        )
+        if market in {"asian", "total", "half_time"}:
+            distribution = matrix_settlement_distribution(matrix, market, pick)
+        else:
+            probability = 0.0
+            for home, row in enumerate(matrix):
+                for away, cell_probability in enumerate(row):
+                    result = (
+                        settle_goal_range(pick, home, away)
+                        if market == "goal_range"
+                        else settle_btts(pick, home, away)
+                    )
+                    if result == "win":
+                        probability += cell_probability
+            distribution = {
+                "full_win": probability,
+                "half_win": 0.0,
+                "push": 0.0,
+                "half_loss": 0.0,
+                "loss": 1.0 - probability,
+            }
+    return distribution, {
+        "source": "validated_joint_scenario",
+        "joint_scenario_audit_hash": (
+            joint_audit.get("audit_hash") if isinstance(joint_audit, dict) else None
+        ),
+        "joint_prediction_hash": snapshot.get("prediction_hash"),
+        "upstream_generated_at": parse_aware_datetime(
+            str(snapshot.get("generated_at") or ""),
+            "candidate evaluation joint scenario generated_at",
+        ).isoformat(),
+    }
+
+
+def _evaluate_candidate(
+    record: dict[str, Any],
+    raw: dict[str, Any],
+    observation_id: str,
+    index: int,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    candidate, identity = _normalize_candidate_identity(raw)
+    market = candidate["market"]
+    canonical_distribution, model_binding = _canonical_candidate_distribution(record, candidate)
+    upstream_generated_at = parse_aware_datetime(
+        str(model_binding.get("upstream_generated_at") or ""),
+        f"candidate evaluation {identity} upstream generated_at",
+    )
+    if generated_at.astimezone(timezone.utc) < upstream_generated_at.astimezone(
+        timezone.utc
+    ):
+        raise ValueError(
+            f"candidate evaluation {identity} generated_at cannot precede its upstream model"
+        )
+    supplied_distribution = _normalize_candidate_distribution(
+        raw.get("settlement_probabilities"),
+        f"candidate evaluation {identity} settlement_probabilities",
+    )
+    for state in CANDIDATE_SETTLEMENT_STATES:
+        if abs(supplied_distribution[state] - canonical_distribution[state]) > PROBABILITY_AUDIT_TOLERANCE:
+            raise ValueError(
+                f"candidate evaluation {identity} {state} probability does not match the canonical model"
+            )
+    probability = canonical_distribution["full_win"] + canonical_distribution["half_win"]
+    validate_probability_close(raw.get("probability"), probability, f"candidate evaluation {identity}")
+    candidate.update(
+        {
+            "candidate_id": "sha256:"
+            + hashlib.sha256(
+                f"{observation_id}:{index}:{identity}".encode("utf-8")
+            ).hexdigest(),
+            "source_index": index,
+            "probability": probability,
+            "settlement_probabilities": canonical_distribution,
+            "model_binding": model_binding,
+            "odds": raw.get("odds"),
+            "odds_format": raw.get("odds_format"),
+            "market_complete": raw.get("market_complete") is True,
+            "complete_market_odds": deepcopy(raw.get("complete_market_odds")),
+            "market_source": raw.get("market_source"),
+            "market_collected_at": raw.get("market_collected_at"),
+            "price_basis": raw.get("price_basis"),
+            "firm_count": raw.get("firm_count"),
+            "market_signal": str(raw.get("market_signal") or "unknown").lower(),
+            "data_quality": record.get("data_quality", "unknown"),
+            "counts_toward_primary_record": False,
+            "monetary_scope": "none",
+            "status": "observation",
+        }
+    )
+    pick = _candidate_pick(candidate)
+    gates: list[dict[str, Any]] = [
+        _candidate_gate("canonical_model_binding", "integrity", True)
+    ]
+
+    price_error: str | None = None
+    try:
+        validate_odds_format(pick, market)
+    except (TypeError, ValueError) as exc:
+        price_error = str(exc)
+    provenance_errors: list[str] = []
+    source = str(candidate.get("market_source") or "").strip()
+    if not source:
+        provenance_errors.append("market_source_missing")
+    if candidate.get("price_basis") not in {"consensus", "median"}:
+        provenance_errors.append("price_basis_missing_or_invalid")
+    collected_at = str(candidate.get("market_collected_at") or "").strip()
+    if not collected_at:
+        provenance_errors.append("market_collected_at_missing")
+    else:
+        try:
+            collected_time = validate_market_evidence_freshness(
+                record, collected_at, f"candidate evaluation {identity} market_collected_at"
+            )
+            if collected_time > generated_at.astimezone(timezone.utc):
+                raise ValueError(
+                    f"candidate evaluation {identity} generated_at cannot precede market_collected_at"
+                )
+        except (TypeError, ValueError) as exc:
+            if "cannot precede market_collected_at" in str(exc):
+                raise
+            provenance_errors.append(str(exc))
+    if price_error:
+        provenance_errors.append(price_error)
+    gates.append(
+        _candidate_gate(
+            "odds_provenance", "integrity", not provenance_errors, provenance_errors
+        )
+    )
+
+    no_vig_probability: float | None = None
+    complete_market_probabilities: dict[str, float] | None = None
+    complete_error: str | None = None
+    if candidate["market_complete"] and price_error is None:
+        try:
+            no_vig_probability, complete_market_probabilities = calculate_complete_market_no_vig(
+                pick, market
+            )
+        except (TypeError, ValueError) as exc:
+            complete_error = str(exc)
+    elif not candidate["market_complete"]:
+        complete_error = "market_complete_false"
+    else:
+        complete_error = price_error
+    gates.append(
+        _candidate_gate(
+            "complete_current_market",
+            "integrity",
+            complete_error is None,
+            [complete_error] if complete_error else [],
+        )
+    )
+
+    calculated_ev: float | None = None
+    if price_error is None:
+        win_profit = audited_win_profit(pick)
+        calculated_ev = (
+            canonical_distribution["full_win"] * win_profit
+            + canonical_distribution["half_win"] * win_profit / 2.0
+            - canonical_distribution["half_loss"] / 2.0
+            - canonical_distribution["loss"]
+        )
+    supplied_ev = raw.get("ev")
+    if supplied_ev is not None:
+        if calculated_ev is None or not math.isfinite(float(supplied_ev)):
+            raise ValueError(f"candidate evaluation {identity} EV requires valid odds")
+        if abs(float(supplied_ev) - calculated_ev) > EV_AUDIT_TOLERANCE:
+            raise ValueError(f"candidate evaluation {identity} EV does not reproduce")
+    gates.append(
+        _candidate_gate(
+            "positive_ev",
+            "value",
+            calculated_ev is not None and calculated_ev > 0.0,
+            ["positive_current_ev_unavailable"]
+            if calculated_ev is None
+            else ["current_ev_not_positive"],
+        )
+    )
+
+    calculated_edge: float | None = None
+    edge_probability = effective_settlement_win_probability(
+        canonical_distribution,
+        f"candidate evaluation {identity} canonical distribution",
+    )
+    if no_vig_probability is not None:
+        if edge_probability is not None:
+            calculated_edge = (edge_probability - no_vig_probability) * 100.0
+    supplied_market_probability = raw.get("market_probability")
+    if supplied_market_probability is not None:
+        if no_vig_probability is None or not math.isfinite(float(supplied_market_probability)):
+            raise ValueError(
+                f"candidate evaluation {identity} market_probability requires a complete market"
+            )
+        if abs(float(supplied_market_probability) - no_vig_probability) > PROBABILITY_AUDIT_TOLERANCE:
+            raise ValueError(f"candidate evaluation {identity} market_probability does not reproduce")
+    supplied_edge = raw.get("edge_pp")
+    if supplied_edge is not None:
+        if calculated_edge is None or not math.isfinite(float(supplied_edge)):
+            raise ValueError(f"candidate evaluation {identity} edge requires a complete market")
+        if abs(float(supplied_edge) - calculated_edge) > EDGE_AUDIT_TOLERANCE_PP:
+            raise ValueError(f"candidate evaluation {identity} edge does not reproduce")
+    gates.append(
+        _candidate_gate(
+            "positive_edge",
+            "value",
+            calculated_edge is not None and calculated_edge > 0.0,
+            ["positive_model_market_edge_unavailable"]
+            if calculated_edge is None
+            else ["model_market_edge_not_positive"],
+        )
+    )
+
+    firm_count = candidate.get("firm_count")
+    if firm_count is not None and (
+        isinstance(firm_count, bool)
+        or not isinstance(firm_count, (int, float))
+        or not math.isfinite(float(firm_count))
+        or int(float(firm_count)) != float(firm_count)
+        or int(float(firm_count)) < 0
+    ):
+        raise ValueError(f"candidate evaluation {identity} firm_count is invalid")
+    minimum_firms = (
+        PROVISIONAL_CORNER_MIN_FIRMS
+        if market in CORNER_MARKETS
+        else PROVISIONAL_MIN_FIRMS
+        if market in {"total", "htft"}
+        else 1
+    )
+    depth_passed = firm_count is not None and int(float(firm_count)) >= minimum_firms
+    gates.append(
+        _candidate_gate(
+            "bookmaker_depth",
+            "risk",
+            depth_passed,
+            [f"bookmaker_count_below_{minimum_firms}"],
+        )
+    )
+    quality_passed = record.get("data_quality") in {"medium", "high"}
+    gates.append(
+        _candidate_gate(
+            "data_quality", "risk", quality_passed, ["medium_or_high_data_quality_required"]
+        )
+    )
+    signal = candidate["market_signal"]
+    signal_passed = signal in {"aligned", "neutral", "against", "conflicting"}
+    gates.append(
+        _candidate_gate(
+            "market_signal_classified",
+            "risk",
+            signal_passed,
+            ["market_signal_unclassified"],
+        )
+    )
+    evidence = record.get("guardrail_evidence", {})
+    adverse_passed = True
+    adverse_reasons: list[str] = []
+    if signal in ADVERSE_MARKET_SIGNALS:
+        adverse_passed = bool(
+            calculated_ev is not None
+            and calculated_ev >= ADVERSE_FORMAL_MIN_EV
+            and calculated_edge is not None
+            and calculated_edge >= ADVERSE_FORMAL_MIN_EDGE_PP
+            and firm_count is not None
+            and int(float(firm_count)) >= PROVISIONAL_MIN_FIRMS
+            and (evidence.get("lineup_confirmed") or evidence.get("fundamental_supported"))
+        )
+        if not adverse_passed:
+            adverse_reasons.append("adverse_market_safety_thresholds_not_met")
+    gates.append(
+        _candidate_gate("adverse_signal_gate", "risk", adverse_passed, adverse_reasons)
+    )
+    market_specific_passed = True
+    market_specific_reasons: list[str] = []
+    if market in {"total", "goal_range", "btts"}:
+        market_specific_passed = bool(
+            evidence.get("chance_quality_supported")
+            or (
+                evidence.get("lineup_confirmed")
+                and evidence.get("attack_configuration_supported")
+            )
+        )
+        if not market_specific_passed:
+            market_specific_reasons.append("attacking_or_chance_quality_evidence_required")
+    elif market in CORNER_MARKETS:
+        market_specific_passed = bool(evidence.get("corner_profile_supported"))
+        if not market_specific_passed:
+            market_specific_reasons.append("corner_profile_evidence_required")
+    elif market == "asian" and float(candidate.get("line", 0.0)) <= DEEP_FAVORITE_LINE:
+        market_specific_passed = bool(
+            record.get("data_quality") == "high"
+            and evidence.get("lineup_confirmed")
+            and evidence.get("opponent_tail_risk_checked")
+            and raw.get("cover_distribution_validated") is True
+            and (
+                evidence.get("chance_quality_supported")
+                or (
+                    signal == "aligned"
+                    and firm_count is not None
+                    and int(float(firm_count)) >= PROVISIONAL_MIN_FIRMS
+                    and evidence.get("fundamental_supported")
+                    and evidence.get("attack_configuration_supported")
+                )
+            )
+        )
+        if not market_specific_passed:
+            market_specific_reasons.append("deep_favorite_safety_evidence_required")
+    gates.append(
+        _candidate_gate(
+            "market_specific_evidence",
+            "risk",
+            market_specific_passed,
+            market_specific_reasons,
+        )
+    )
+
+    policy_enabled = market not in STRICT_OOS_MARKET_STATUS
+    gates.append(
+        _candidate_gate(
+            "market_policy_enabled",
+            "release",
+            policy_enabled,
+            ["market_observation_only_under_active_policy"],
+        )
+    )
+    if market in {"half_time", "htft"}:
+        league_forward = False
+        if market == "htft":
+            htft_audit = next(
+                (
+                    item
+                    for item in record.get("candidate_audits", [])
+                    if isinstance(item, dict) and item.get("market") == "htft"
+                ),
+                None,
+            )
+            league_evidence = (
+                htft_audit.get("league_gate_evidence")
+                if isinstance(htft_audit, dict)
+                else None
+            )
+            league_forward = bool(
+                isinstance(league_evidence, dict)
+                and league_evidence.get("production_confidence_eligible") is True
+            )
+        gates.append(
+            _candidate_gate(
+                "league_forward_evidence",
+                "release",
+                league_forward,
+                ["league_forward_release_evidence_unavailable"],
+            )
+        )
+    if market in CORNER_MARKETS:
+        upstream_enabled = model_binding.get("upstream_formal_eligible") is True
+        gates.append(
+            _candidate_gate(
+                "upstream_formal_policy",
+                "release",
+                upstream_enabled,
+                ["upstream_corner_model_remains_non_formal"],
+            )
+        )
+
+    counterfactual_eligible = all(
+        gate["passed"] for gate in gates if gate["category"] != "release"
+    )
+    formal_eligible = all(gate["passed"] for gate in gates)
+    candidate.update(
+        {
+            "market_probability": no_vig_probability,
+            "edge_probability": edge_probability,
+            "edge_basis": "five_state_effective_win_probability_vs_complete_market_no_vig",
+            "complete_market_probabilities": complete_market_probabilities,
+            "ev": calculated_ev,
+            "edge_pp": calculated_edge,
+            "gates": gates,
+            "counterfactual_eligible": counterfactual_eligible,
+            "formal_eligible": formal_eligible,
+            "release_blockers": [
+                gate["gate"]
+                for gate in gates
+                if gate["category"] == "release" and not gate["passed"]
+            ],
+            "rejection_codes": [
+                f"{gate['category']}:{gate['gate']}"
+                for gate in gates
+                if not gate["passed"]
+            ],
+            "shadow_rank": None,
+            "shadow_selected": False,
+        }
+    )
+    return candidate
+
+
+def _rank_candidate_shadow_selections(
+    record: dict[str, Any], candidates: list[dict[str, Any]]
+) -> dict[str, str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        grouped.setdefault(str(candidate["market"]), []).append(candidate)
+    shadow_selections: dict[str, str] = {}
+    for market, market_candidates in grouped.items():
+        eligible = [item for item in market_candidates if item["counterfactual_eligible"]]
+        for item in eligible:
+            item["shadow_confidence"] = confidence_components(record, market, item)
+        eligible.sort(
+            key=lambda item: (
+                -float(item["shadow_confidence"]["score"]),
+                -float(item["shadow_confidence"]["settlement_safety_probability"]),
+                -float(item["shadow_confidence"]["firm_count"]),
+                item["identity"],
+            )
+        )
+        for rank, item in enumerate(eligible, start=1):
+            item["shadow_rank"] = rank
+            item["shadow_selected"] = rank == 1
+            if rank == 1:
+                shadow_selections[market] = str(item["candidate_id"])
+    return shadow_selections
+
+
+def _candidate_evaluation_record_context(record: dict[str, Any]) -> dict[str, Any]:
+    basis = record.get("settlement_basis")
+    if not isinstance(basis, dict):
+        return record
+    context = deepcopy(basis)
+    context["status"] = "pending"
+    context["updated_at"] = basis.get(
+        "version_archived_at", basis.get("archived_at")
+    )
+    context["created_at"] = context.get("updated_at")
+    return context
+
+
+def _candidate_evaluation_model_binding(record: dict[str, Any]) -> dict[str, Any]:
+    context = _candidate_evaluation_record_context(record)
+    joint = validated_joint_scenario_audit(context)
+    joint_audit = context.get("joint_scenario_audit")
+    score_provenance = context.get("score_model_provenance")
+    return {
+        "joint_scenario_audit_hash": (
+            joint_audit.get("audit_hash") if isinstance(joint_audit, dict) else None
+        ),
+        "joint_prediction_hash": (
+            joint.get("prediction_hash") if isinstance(joint, dict) else None
+        ),
+        "score_model_hash": (
+            score_provenance.get("model_hash")
+            if isinstance(score_provenance, dict)
+            else None
+        ),
+    }
+
+
+def _candidate_evaluation_active_version_binding(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    context = _candidate_evaluation_record_context(record)
+    archived_value = context.get("version_archived_at")
+    if archived_value is None:
+        archived_value = context.get("archived_at")
+    if archived_value is None:
+        archived_value = context.get("updated_at", context.get("created_at"))
+    archived_at = parse_aware_datetime(
+        str(archived_value or ""), "candidate evaluation active version archived_at"
+    ).astimezone(timezone.utc)
+    fixture_id = str(
+        context.get("fixture_id", context.get("match_id")) or ""
+    ).strip()
+    if not fixture_id:
+        raise ValueError("candidate evaluation active version fixture_id is required")
+    model = _candidate_evaluation_model_binding(context)
+    context_hash = calculate_candidate_evaluation_source_hash(
+        {
+            "data_quality": context.get("data_quality", "unknown"),
+            "guardrail_evidence": context.get("guardrail_evidence", {}),
+        }
+    )
+    return {
+        "analysis_stage": str(context.get("analysis_stage") or "initial"),
+        "version_archived_at": archived_at.isoformat(),
+        "fixture_id": fixture_id,
+        **model,
+        "evaluation_context_hash": context_hash,
+    }
+
+
+def _candidate_evaluation_observation_id(
+    source_payload_hash: str, active_version_binding: dict[str, Any]
+) -> str:
+    return calculate_candidate_evaluation_source_hash(
+        {
+            "source_payload_hash": source_payload_hash,
+            "active_version_binding": active_version_binding,
+        }
+    )
+
+
+def load_candidate_evaluation_audit(
+    args: argparse.Namespace, record: dict[str, Any]
+) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "candidate_evaluation_file", "") or "").strip()
+    required = bool(getattr(args, "require_candidate_evaluations", False))
+    if not supplied:
+        if required:
+            raise ValueError(
+                "--require-candidate-evaluations requires --candidate-evaluation-file"
+            )
+        return None
+    path, raw_bytes, payload = load_observation_json(
+        args, supplied, "candidate evaluation file"
+    )
+    if (
+        payload.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
+        or payload.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "candidate evaluation file must use soccer_candidate_evaluation "
+            "candidate-evaluation/2.0.0"
+        )
+    if payload.get("policy_version") != STRICT_OOS_POLICY_VERSION:
+        raise ValueError("candidate evaluation policy_version does not match the active policy")
+    if payload.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION:
+        raise ValueError(
+            "candidate evaluation selection_policy_version does not match the active selector"
+        )
+    fixture = payload.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("candidate evaluation fixture is required")
+    if str(fixture.get("match_id") or "") != str(record.get("match_id") or ""):
+        raise ValueError("candidate evaluation fixture match_id does not match the record")
+    if str(fixture.get("home_team") or "") != str(record.get("home_team") or ""):
+        raise ValueError("candidate evaluation fixture home_team does not match the record")
+    if str(fixture.get("away_team") or "") != str(record.get("away_team") or ""):
+        raise ValueError("candidate evaluation fixture away_team does not match the record")
+    fixture_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "candidate evaluation fixture kickoff"
+    )
+    record_kickoff = parse_aware_datetime(str(record.get("kickoff") or ""), "record kickoff")
+    if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(timezone.utc):
+        raise ValueError("candidate evaluation fixture kickoff does not match the record")
+    generated_at = parse_aware_datetime(
+        str(payload.get("generated_at") or ""), "candidate evaluation generated_at"
+    )
+    archived_at = parse_aware_datetime(
+        str(record.get("updated_at") or ""), "candidate evaluation archive time"
+    )
+    if generated_at >= record_kickoff:
+        raise ValueError("candidate evaluation must be generated strictly before kickoff")
+    if generated_at > archived_at:
+        raise ValueError("candidate evaluation cannot be generated after archive time")
+
+    manifest_raw = payload.get("market_manifest")
+    if not isinstance(manifest_raw, list) or not manifest_raw:
+        raise ValueError("candidate evaluation market_manifest must be a non-empty list")
+    manifest: dict[str, dict[str, Any]] = {}
+    for item in manifest_raw:
+        if not isinstance(item, dict):
+            raise ValueError("candidate evaluation market_manifest entries must be objects")
+        market = str(item.get("market") or "").strip().lower()
+        status = str(item.get("status") or "").strip().lower()
+        if market not in PRIMARY_MARKETS or market in manifest:
+            raise ValueError("candidate evaluation market_manifest markets must be unique and supported")
+        if status not in {"evaluated", "unavailable"}:
+            raise ValueError("candidate evaluation manifest status must be evaluated or unavailable")
+        reasons = [
+            str(reason).strip()
+            for reason in item.get("reasons", [])
+            if str(reason).strip()
+        ] if isinstance(item.get("reasons", []), list) else []
+        if status == "unavailable" and not reasons:
+            raise ValueError("unavailable candidate evaluation markets require reasons")
+        manifest[market] = {"market": market, "status": status, "reasons": reasons}
+    if set(manifest) != set(PRIMARY_MARKETS):
+        raise ValueError(
+            "candidate-evaluation/2.0.0 requires every supported market in market_manifest"
+        )
+
+    candidates_raw = payload.get("candidates")
+    if not isinstance(candidates_raw, list):
+        raise ValueError("candidate evaluation candidates must be a list")
+    raw_artifact_sha256 = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
+    source_payload_hash = calculate_candidate_evaluation_source_hash(payload)
+    active_version_binding = _candidate_evaluation_active_version_binding(record)
+    observation_id = _candidate_evaluation_observation_id(
+        source_payload_hash, active_version_binding
+    )
+    candidates: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for index, raw_candidate in enumerate(candidates_raw, start=1):
+        if not isinstance(raw_candidate, dict):
+            raise ValueError("candidate evaluation candidates must be objects")
+        candidate = _evaluate_candidate(
+            record, raw_candidate, observation_id, index, generated_at
+        )
+        market = candidate["market"]
+        if market not in manifest or manifest[market]["status"] != "evaluated":
+            raise ValueError("candidate evaluation candidate is absent from an evaluated manifest market")
+        if candidate["identity"] in identities:
+            raise ValueError("candidate evaluation candidate identities must be unique")
+        identities.add(candidate["identity"])
+        candidates.append(candidate)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate["market"], []).append(candidate)
+    for market, entry in manifest.items():
+        count = len(grouped.get(market, []))
+        if entry["status"] == "evaluated" and count == 0:
+            raise ValueError(f"evaluated candidate market {market} has no candidates")
+        if entry["status"] == "unavailable" and count:
+            raise ValueError(f"unavailable candidate market {market} cannot contain candidates")
+        entry["candidate_count"] = count
+
+    shadow_selections = _rank_candidate_shadow_selections(record, candidates)
+
+    model_binding = _candidate_evaluation_model_binding(record)
+    audit = {
+        "schema_version": CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        "kind": CANDIDATE_EVALUATION_KIND,
+        "observation_id": observation_id,
+        "status": "observation_only",
+        "archived_at": record.get("updated_at"),
+        "counts_toward_primary_record": False,
+        "monetary_scope": "none",
+        "fixture": {
+            "match_id": str(record.get("match_id")),
+            "home_team": record.get("home_team"),
+            "away_team": record.get("away_team"),
+            "kickoff": record_kickoff.isoformat(),
+        },
+        "model": model_binding,
+        "active_version_binding": active_version_binding,
+        "artifact": {
+            "artifact_type": payload.get("artifact_type"),
+            "schema_version": payload.get("schema_version"),
+            "artifact_sha256": source_payload_hash,
+            "raw_artifact_sha256": raw_artifact_sha256,
+            "artifact_filename": path.name,
+            "generated_at": generated_at.isoformat(),
+            "source_payload_hash": source_payload_hash,
+            "source_payload": deepcopy(payload),
+        },
+        "policy": {
+            "market_policy_version": STRICT_OOS_POLICY_VERSION,
+            "selection_policy_version": CONFIDENCE_POLICY_VERSION,
+            "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
+            "automatic_release_allowed": False,
+        },
+        "market_manifest": [manifest[market] for market in PRIMARY_MARKETS if market in manifest],
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "shadow_selections": shadow_selections,
+        "provenance": {
+            "strict_forward_oos": True,
+            "fixture_validated": True,
+            "generated_before_kickoff": True,
+            "training_cutoff_before_kickoff": True,
+            "canonical_probabilities_reproduced": True,
+            "market_values_recalculated": True,
+        },
+    }
+    audit["audit_hash"] = calculate_candidate_evaluation_audit_hash(audit)
+    return audit
+
+
 def validate_score_model_consistency(
     record: dict[str, Any],
     provenance: dict[str, Any] | None,
@@ -3830,7 +4783,7 @@ def calculate_complete_market_no_vig(
     return no_vig[selected], no_vig
 
 
-def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float:
+def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float | None:
     market_probability = pick.get("market_probability")
     if (
         market_probability is None
@@ -3866,6 +4819,11 @@ def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float:
             f"{market} market_probability does not match server-calculated no-vig probability"
         )
     pick["market_probability"] = round(calculated_market_probability, 12)
+    if isinstance(pick.get("settlement_probabilities"), dict):
+        # Split-settlement markets are checked after their five-state
+        # distribution has been validated, so half wins/losses are weighted by
+        # half a stake instead of being treated as binary outcomes.
+        return None
     expected_edge = (
         float(pick["probability"]) - calculated_market_probability
     ) * 100.0
@@ -3877,6 +4835,34 @@ def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float:
     require_strictly_positive(
         expected_edge,
         f"{market} recalculated model-versus-market edge (pp)",
+    )
+    pick["edge_pp"] = round(expected_edge, 12)
+    return expected_edge
+
+
+def validate_five_state_market_edge(pick: dict[str, Any], market: str) -> float:
+    edge_probability = effective_settlement_win_probability(
+        pick.get("settlement_probabilities"),
+        f"{market} settlement probabilities",
+    )
+    if edge_probability is None:
+        raise ValueError(
+            f"{market} five-state edge is unavailable when every outcome is a push"
+        )
+    expected_edge = (
+        edge_probability - float(pick["market_probability"])
+    ) * 100.0
+    if abs(float(pick["edge_pp"]) - expected_edge) > EDGE_AUDIT_TOLERANCE_PP:
+        raise ValueError(
+            f"{market} edge_pp must use the stake-weighted five-state win probability"
+        )
+    require_strictly_positive(
+        expected_edge,
+        f"{market} recalculated model-versus-market edge (pp)",
+    )
+    pick["edge_probability"] = round(edge_probability, 12)
+    pick["edge_basis"] = (
+        "five_state_effective_win_probability_vs_complete_market_no_vig"
     )
     pick["edge_pp"] = round(expected_edge, 12)
     return expected_edge
@@ -4032,6 +5018,7 @@ def validate_core_formal_pick(
             raise ValueError("Half-time formal pick requires a complete 1x2/asian/total market")
     else:
         raise ValueError(f"Unsupported core formal market: {market}")
+    validate_five_state_market_edge(pick, market)
     require_strictly_positive(calculated, f"{market} recalculated EV")
 
 
@@ -4123,6 +5110,7 @@ def validate_new_formal_pick(
         )
     if market in CORNER_MARKETS:
         calculated_ev = validate_corner_distribution(pick, market)
+        validate_five_state_market_edge(pick, market)
         require_strictly_positive(
             calculated_ev,
             f"{market} recalculated EV",
@@ -4816,6 +5804,8 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "league_key": record.get("league_key"),
         "competition_evidence": deepcopy(record.get("competition_evidence")),
         "lineup_rechecked_at": record.get("lineup_rechecked_at"),
+        "data_quality": record.get("data_quality", "unknown"),
+        "guardrail_evidence": deepcopy(record.get("guardrail_evidence", {})),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
@@ -5286,6 +6276,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "complete analysis requires a valid --joint-scenario-file; "
             "the initial/lineup card was not archived"
         )
+    candidate_evaluation = load_candidate_evaluation_audit(args, record)
+    if candidate_evaluation is not None:
+        record["candidate_audits"].append(candidate_evaluation)
     validate_market_collection_times(record, current)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     if getattr(args, "primary_htft_edge_pp", None) is not None:
@@ -5690,6 +6683,85 @@ def settle_candidate_observations(
     for audit in candidate_audits:
         if not isinstance(audit, dict):
             continue
+        if audit.get("kind") == CANDIDATE_EVALUATION_KIND:
+            candidate_results: list[dict[str, Any]] = []
+            shadow_results: dict[str, str | None] = {}
+            for candidate in audit.get("candidates", []):
+                if not isinstance(candidate, dict):
+                    continue
+                market = candidate.get("market")
+                pick = _candidate_pick(candidate)
+                raw_result: str | None
+                if market == "asian":
+                    raw_result = settle_asian(pick, home, away)
+                elif market == "total":
+                    raw_result = settle_total(pick, home, away)
+                elif market == "half_time":
+                    raw_result = (
+                        settle_half_time(pick, half_home, half_away)
+                        if half_home is not None and half_away is not None
+                        else None
+                    )
+                elif market == "htft":
+                    raw_result = (
+                        settle_htft([pick], half_home, half_away, home, away)[0]
+                        if half_home is not None and half_away is not None
+                        else None
+                    )
+                elif market == "goal_range":
+                    raw_result = settle_goal_range(pick, home, away)
+                elif market == "btts":
+                    raw_result = settle_btts(pick, home, away)
+                elif market == "corner_total":
+                    raw_result = (
+                        settle_corner_total(pick, home_corners, away_corners)
+                        if home_corners is not None and away_corners is not None
+                        else None
+                    )
+                elif market == "corner_handicap":
+                    raw_result = (
+                        settle_corner_handicap(pick, home_corners, away_corners)
+                        if home_corners is not None and away_corners is not None
+                        else None
+                    )
+                else:
+                    raw_result = None
+                settlement_result = "full_win" if raw_result == "win" else raw_result
+                item = {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "market": market,
+                    "settlement_result": settlement_result,
+                    "counterfactual_eligible": candidate.get("counterfactual_eligible") is True,
+                    "formal_eligible": candidate.get("formal_eligible") is True,
+                    "shadow_selected": candidate.get("shadow_selected") is True,
+                    "counts_toward_primary_record": False,
+                    "monetary_scope": "none",
+                }
+                candidate_results.append(item)
+                if item["shadow_selected"]:
+                    shadow_results[str(market)] = settlement_result
+            graded = sum(item["settlement_result"] is not None for item in candidate_results)
+            if graded == len(candidate_results) and candidate_results:
+                status = "graded_observation"
+            elif graded:
+                status = "partially_graded_observation"
+            else:
+                status = "ungraded_missing_required_result"
+            diagnostics.append(
+                {
+                    "observation_id": audit.get("observation_id"),
+                    "kind": CANDIDATE_EVALUATION_KIND,
+                    "market": "multi_market",
+                    "status": status,
+                    "candidate_results": candidate_results,
+                    "shadow_selection_results": shadow_results,
+                    "graded_candidates": graded,
+                    "ungraded_candidates": len(candidate_results) - graded,
+                    "counts_toward_primary_record": False,
+                    "monetary_scope": "none",
+                }
+            )
+            continue
         if audit.get("kind") == CORNER_OBSERVATION_KIND:
             candidates = [
                 item
@@ -5999,6 +7071,14 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         for audit in settlement_basis.get("candidate_audits", [])
         if isinstance(audit, dict)
     ]
+    if any(
+        audit.get("kind") == CANDIDATE_EVALUATION_KIND
+        and not validated_candidate_evaluation_audit(audit, record)
+        for audit in candidate_audits
+    ):
+        raise ValueError(
+            "Review refused: archived candidate evaluation cannot be replayed from its frozen inputs"
+        )
     observation_diagnostics = settle_candidate_observations(
         candidate_audits,
         half_home=half_home,
@@ -6650,7 +7730,412 @@ def frozen_observation_diagnostics(
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
-def validated_observation_audit(audit: dict[str, Any]) -> bool:
+def _replay_candidate_evaluation_audit(
+    audit: dict[str, Any], record: dict[str, Any]
+) -> bool:
+    context = _candidate_evaluation_record_context(record)
+    artifact = audit.get("artifact")
+    if not isinstance(artifact, dict):
+        return False
+    source = artifact.get("source_payload")
+    if not isinstance(source, dict):
+        return False
+    try:
+        calculated_source_hash = calculate_candidate_evaluation_source_hash(source)
+        if artifact.get("source_payload_hash") != calculated_source_hash:
+            return False
+        if (
+            source.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
+            or source.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+            or source.get("policy_version") != STRICT_OOS_POLICY_VERSION
+            or source.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION
+        ):
+            return False
+        fixture = source.get("fixture")
+        if not isinstance(fixture, dict):
+            return False
+        source_kickoff = parse_aware_datetime(
+            str(fixture.get("kickoff") or ""),
+            "candidate evaluation source fixture kickoff",
+        )
+        context_kickoff = parse_aware_datetime(
+            str(context.get("kickoff") or ""),
+            "candidate evaluation frozen fixture kickoff",
+        )
+        if (
+            str(fixture.get("match_id") or "")
+            != str(context.get("match_id") or context.get("fixture_id") or "")
+            or fixture.get("home_team") != context.get("home_team")
+            or fixture.get("away_team") != context.get("away_team")
+            or source_kickoff.astimezone(timezone.utc)
+            != context_kickoff.astimezone(timezone.utc)
+        ):
+            return False
+        generated_at = parse_aware_datetime(
+            str(source.get("generated_at") or ""),
+            "candidate evaluation source generated_at",
+        )
+        active_binding = _candidate_evaluation_active_version_binding(context)
+        expected_observation_id = _candidate_evaluation_observation_id(
+            calculated_source_hash, active_binding
+        )
+        if audit.get("observation_id") != expected_observation_id:
+            return False
+        archived_at = parse_aware_datetime(
+            str(active_binding["version_archived_at"]),
+            "candidate evaluation frozen archive time",
+        )
+        if (
+            generated_at >= context_kickoff
+            or generated_at.astimezone(timezone.utc)
+            > archived_at.astimezone(timezone.utc)
+        ):
+            return False
+        if (
+            parse_aware_datetime(
+                str(audit.get("archived_at") or ""),
+                "candidate evaluation archived_at",
+            ).astimezone(timezone.utc)
+            != archived_at.astimezone(timezone.utc)
+        ):
+            return False
+        if artifact.get("generated_at") != generated_at.isoformat():
+            return False
+
+        manifest_raw = source.get("market_manifest")
+        if not isinstance(manifest_raw, list) or not manifest_raw:
+            return False
+        manifest: dict[str, dict[str, Any]] = {}
+        for raw_entry in manifest_raw:
+            if not isinstance(raw_entry, dict):
+                return False
+            market = str(raw_entry.get("market") or "").strip().lower()
+            status = str(raw_entry.get("status") or "").strip().lower()
+            if market not in PRIMARY_MARKETS or market in manifest:
+                return False
+            if status not in {"evaluated", "unavailable"}:
+                return False
+            raw_reasons = raw_entry.get("reasons", [])
+            reasons = (
+                [
+                    str(reason).strip()
+                    for reason in raw_reasons
+                    if str(reason).strip()
+                ]
+                if isinstance(raw_reasons, list)
+                else []
+            )
+            if status == "unavailable" and not reasons:
+                return False
+            manifest[market] = {
+                "market": market,
+                "status": status,
+                "reasons": reasons,
+            }
+        if set(manifest) != set(PRIMARY_MARKETS):
+            return False
+
+        raw_candidates = source.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return False
+        if artifact.get("artifact_sha256") != calculated_source_hash:
+            return False
+        replayed: list[dict[str, Any]] = []
+        identities: set[str] = set()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for index, raw_candidate in enumerate(raw_candidates, start=1):
+            if not isinstance(raw_candidate, dict):
+                return False
+            candidate = _evaluate_candidate(
+                context,
+                raw_candidate,
+                expected_observation_id,
+                index,
+                generated_at,
+            )
+            market = str(candidate["market"])
+            if manifest[market]["status"] != "evaluated":
+                return False
+            if candidate["identity"] in identities:
+                return False
+            identities.add(str(candidate["identity"]))
+            replayed.append(candidate)
+            grouped.setdefault(market, []).append(candidate)
+        for market, entry in manifest.items():
+            count = len(grouped.get(market, []))
+            if entry["status"] == "evaluated" and count == 0:
+                return False
+            if entry["status"] == "unavailable" and count:
+                return False
+            entry["candidate_count"] = count
+        shadow_selections = _rank_candidate_shadow_selections(context, replayed)
+        expected_manifest = [manifest[market] for market in PRIMARY_MARKETS]
+        expected_fixture = {
+            "match_id": str(context.get("match_id") or context.get("fixture_id")),
+            "home_team": context.get("home_team"),
+            "away_team": context.get("away_team"),
+            "kickoff": context_kickoff.isoformat(),
+        }
+        expected_policy = {
+            "market_policy_version": STRICT_OOS_POLICY_VERSION,
+            "selection_policy_version": CONFIDENCE_POLICY_VERSION,
+            "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
+            "automatic_release_allowed": False,
+        }
+        expected_provenance = {
+            "strict_forward_oos": True,
+            "fixture_validated": True,
+            "generated_before_kickoff": True,
+            "training_cutoff_before_kickoff": True,
+            "canonical_probabilities_reproduced": True,
+            "market_values_recalculated": True,
+        }
+        return bool(
+            audit.get("fixture") == expected_fixture
+            and audit.get("model") == _candidate_evaluation_model_binding(context)
+            and audit.get("active_version_binding") == active_binding
+            and audit.get("policy") == expected_policy
+            and audit.get("provenance") == expected_provenance
+            and audit.get("market_manifest") == expected_manifest
+            and audit.get("candidates") == replayed
+            and audit.get("candidate_count") == len(replayed)
+            and audit.get("shadow_selections") == shadow_selections
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def validated_candidate_evaluation_audit(
+    audit: dict[str, Any], record: dict[str, Any] | None = None
+) -> bool:
+    if (
+        audit.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or audit.get("kind") != CANDIDATE_EVALUATION_KIND
+        or audit.get("status") != "observation_only"
+        or audit.get("counts_toward_primary_record") is not False
+        or audit.get("monetary_scope") != "none"
+    ):
+        return False
+    fixture = audit.get("fixture")
+    if not isinstance(fixture, dict):
+        return False
+    try:
+        fixture_kickoff = parse_aware_datetime(
+            str(fixture.get("kickoff") or ""),
+            "candidate evaluation fixture kickoff",
+        )
+    except (TypeError, ValueError):
+        return False
+    if (
+        not str(fixture.get("match_id") or "")
+        or not str(fixture.get("home_team") or "")
+        or not str(fixture.get("away_team") or "")
+    ):
+        return False
+    if record is not None:
+        try:
+            record_kickoff = parse_aware_datetime(
+                str(record.get("kickoff") or ""), "record kickoff"
+            )
+        except (TypeError, ValueError):
+            return False
+        if (
+            str(fixture.get("match_id")) != str(record.get("match_id") or "")
+            or fixture.get("home_team") != record.get("home_team")
+            or fixture.get("away_team") != record.get("away_team")
+            or fixture_kickoff.astimezone(timezone.utc)
+            != record_kickoff.astimezone(timezone.utc)
+        ):
+            return False
+
+    artifact = audit.get("artifact")
+    policy = audit.get("policy")
+    provenance = audit.get("provenance")
+    candidates = audit.get("candidates")
+    manifest = audit.get("market_manifest")
+    if (
+        not isinstance(artifact, dict)
+        or not isinstance(policy, dict)
+        or not isinstance(provenance, dict)
+        or not isinstance(audit.get("model"), dict)
+        or not isinstance(audit.get("active_version_binding"), dict)
+        or not isinstance(candidates, list)
+        or not isinstance(manifest, list)
+        or audit.get("candidate_count") != len(candidates)
+        or policy.get("market_policy_version") != STRICT_OOS_POLICY_VERSION
+        or policy.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION
+        or policy.get("automatic_release_allowed") is not False
+    ):
+        return False
+    if not all(
+        provenance.get(key) is True
+        for key in (
+            "strict_forward_oos",
+            "fixture_validated",
+            "generated_before_kickoff",
+            "training_cutoff_before_kickoff",
+            "canonical_probabilities_reproduced",
+            "market_values_recalculated",
+        )
+    ):
+        return False
+    artifact_sha256 = str(artifact.get("artifact_sha256") or "")
+    raw_artifact_sha256 = str(artifact.get("raw_artifact_sha256") or "")
+    observation_id = str(audit.get("observation_id") or "")
+    source_payload = artifact.get("source_payload")
+    source_payload_hash = str(artifact.get("source_payload_hash") or "")
+    if (
+        artifact.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
+        or artifact.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_sha256)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw_artifact_sha256)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", observation_id)
+        or not isinstance(source_payload, dict)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_payload_hash)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(audit.get("audit_hash") or ""))
+    ):
+        return False
+    try:
+        if audit.get("audit_hash") != calculate_candidate_evaluation_audit_hash(audit):
+            return False
+    except (TypeError, ValueError):
+        return False
+    manifest_by_market: dict[str, dict[str, Any]] = {}
+    for entry in manifest:
+        if not isinstance(entry, dict):
+            return False
+        market = entry.get("market")
+        status = entry.get("status")
+        if (
+            market not in PRIMARY_MARKETS
+            or market in manifest_by_market
+            or status not in {"evaluated", "unavailable"}
+            or isinstance(entry.get("candidate_count"), bool)
+            or not isinstance(entry.get("candidate_count"), int)
+            or entry.get("candidate_count") < 0
+            or (status == "unavailable" and not entry.get("reasons"))
+        ):
+            return False
+        manifest_by_market[str(market)] = entry
+    ids: set[str] = set()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            return False
+        market = candidate.get("market")
+        identity = str(candidate.get("identity") or "")
+        source_index = candidate.get("source_index")
+        if (
+            market not in manifest_by_market
+            or manifest_by_market[str(market)].get("status") != "evaluated"
+            or isinstance(source_index, bool)
+            or not isinstance(source_index, int)
+            or source_index < 1
+            or not identity
+        ):
+            return False
+        expected_id = "sha256:" + hashlib.sha256(
+            f"{observation_id}:{source_index}:{identity}".encode("utf-8")
+        ).hexdigest()
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if candidate_id != expected_id or candidate_id in ids:
+            return False
+        ids.add(candidate_id)
+        try:
+            distribution = _normalize_candidate_distribution(
+                candidate.get("settlement_probabilities"),
+                "archived candidate evaluation distribution",
+            )
+            probability = float(candidate.get("probability"))
+        except (TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(probability)
+            or abs(
+                probability - distribution["full_win"] - distribution["half_win"]
+            )
+            > PROBABILITY_AUDIT_TOLERANCE
+        ):
+            return False
+        gates = candidate.get("gates")
+        if not isinstance(gates, list) or not gates:
+            return False
+        for gate in gates:
+            if (
+                not isinstance(gate, dict)
+                or not str(gate.get("gate") or "")
+                or gate.get("category") not in CANDIDATE_GATE_CATEGORIES
+                or not isinstance(gate.get("passed"), bool)
+                or not isinstance(gate.get("reasons"), list)
+                or (gate.get("passed") is True and gate.get("reasons"))
+            ):
+                return False
+        counterfactual = all(
+            gate["passed"] for gate in gates if gate["category"] != "release"
+        )
+        formal = all(gate["passed"] for gate in gates)
+        if (
+            candidate.get("counterfactual_eligible") is not counterfactual
+            or candidate.get("formal_eligible") is not formal
+            or candidate.get("counts_toward_primary_record") is not False
+            or candidate.get("monetary_scope") != "none"
+            or candidate.get("status") != "observation"
+        ):
+            return False
+        expected_release = [
+            gate["gate"]
+            for gate in gates
+            if gate["category"] == "release" and not gate["passed"]
+        ]
+        if candidate.get("release_blockers") != expected_release:
+            return False
+        grouped.setdefault(str(market), []).append(candidate)
+    for market, entry in manifest_by_market.items():
+        count = len(grouped.get(market, []))
+        if entry.get("candidate_count") != count:
+            return False
+        if (entry.get("status") == "evaluated") != (count > 0):
+            return False
+    expected_selections: dict[str, str] = {}
+    for market, market_candidates in grouped.items():
+        eligible = [
+            candidate
+            for candidate in market_candidates
+            if candidate.get("counterfactual_eligible") is True
+        ]
+        ranks = sorted(candidate.get("shadow_rank") for candidate in eligible)
+        if ranks != list(range(1, len(eligible) + 1)):
+            return False
+        selected = [
+            candidate
+            for candidate in market_candidates
+            if candidate.get("shadow_selected") is True
+        ]
+        if len(selected) != (1 if eligible else 0):
+            return False
+        if selected:
+            if selected[0].get("shadow_rank") != 1:
+                return False
+            expected_selections[market] = str(selected[0].get("candidate_id"))
+        if any(
+            candidate.get("shadow_rank") is not None
+            or candidate.get("shadow_selected") is True
+            for candidate in market_candidates
+            if candidate.get("counterfactual_eligible") is not True
+        ):
+            return False
+    if audit.get("shadow_selections") != expected_selections:
+        return False
+    if record is None:
+        return False
+    return _replay_candidate_evaluation_audit(audit, record)
+
+
+def validated_observation_audit(
+    audit: dict[str, Any], record: dict[str, Any] | None = None
+) -> bool:
+    if audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION:
+        return validated_candidate_evaluation_audit(audit, record)
     if (
         audit.get("schema_version") != OBSERVATION_SCHEMA_VERSION
         or audit.get("status") != "observation_only"
@@ -6882,6 +8367,93 @@ def validated_observation_audit(audit: dict[str, Any]) -> bool:
     return True
 
 
+def validated_candidate_evaluation_diagnostic(
+    audit: dict[str, Any], record: dict[str, Any]
+) -> dict[str, Any] | None:
+    if record.get("status") != "reviewed":
+        return None
+    verification = record.get("result_verification")
+    if (
+        not isinstance(verification, dict)
+        or verification.get("verified_finished") is not True
+        or not str(verification.get("source") or "").strip()
+    ):
+        return None
+
+    def score_pair(value: Any, label: str) -> tuple[int, int] | None:
+        if value is None or str(value).strip() == "":
+            return None
+        match = re.fullmatch(r"(\d+)-(\d+)", str(value).strip())
+        if match is None:
+            raise ValueError(f"{label} must be HOME-AWAY")
+        return int(match.group(1)), int(match.group(2))
+
+    try:
+        verification_time = parse_aware_datetime(
+            str(verification.get("collected_at") or ""),
+            "candidate result verification collected_at",
+        )
+        kickoff_time = parse_aware_datetime(
+            str(record.get("kickoff") or ""), "candidate result fixture kickoff"
+        )
+        if verification_time.astimezone(timezone.utc) < kickoff_time.astimezone(
+            timezone.utc
+        ):
+            return None
+        final = score_pair(record.get("final_score"), "candidate final_score")
+        if final is None:
+            return None
+        half = score_pair(record.get("half_time_score"), "candidate half_time_score")
+        home_corners = record.get("home_corners")
+        away_corners = record.get("away_corners")
+        if (home_corners is None) != (away_corners is None):
+            return None
+        if home_corners is not None:
+            if (
+                isinstance(home_corners, bool)
+                or isinstance(away_corners, bool)
+                or int(home_corners) != home_corners
+                or int(away_corners) != away_corners
+                or int(home_corners) < 0
+                or int(away_corners) < 0
+            ):
+                return None
+            home_corners = int(home_corners)
+            away_corners = int(away_corners)
+        expected = settle_candidate_observations(
+            [audit],
+            half_home=half[0] if half is not None else None,
+            half_away=half[1] if half is not None else None,
+            home=final[0],
+            away=final[1],
+            home_corners=home_corners,
+            away_corners=away_corners,
+        )
+    except (TypeError, ValueError):
+        return None
+    if len(expected) != 1:
+        return None
+    matches = [
+        item
+        for item in frozen_observation_diagnostics(record)
+        if item.get("kind") == CANDIDATE_EVALUATION_KIND
+        and item.get("observation_id") == audit.get("observation_id")
+    ]
+    if len(matches) != 1 or matches[0] != expected[0]:
+        return None
+    return matches[0]
+
+
+def candidate_evaluation_selection_unit(
+    record: dict[str, Any], market: str
+) -> tuple[str, str]:
+    context = _candidate_evaluation_record_context(record)
+    return (
+        str(context.get("match_id") or context.get("fixture_id") or ""),
+        str(market),
+    )
+
+
 def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
     reviewed = [
         record
@@ -6953,7 +8525,7 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
             if item.get("observation_id")
         }
         for audit in frozen_candidate_audits(record):
-            if not validated_observation_audit(audit):
+            if not validated_observation_audit(audit, record):
                 block = market_block(str(audit.get("market") or "unknown"))
                 block["excluded_observations"] += 1
                 reasons = block["excluded_reasons"]
@@ -6964,6 +8536,11 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
             reviewed_match_ids.add(str(record.get("match_id")))
 
             diagnostic = diagnostics_by_id.get(str(audit.get("observation_id")))
+            if audit.get("kind") == CANDIDATE_EVALUATION_KIND:
+                # v2 has its own one-selection-per-market cohort and release
+                # funnel below.  Keeping it out of the v1 observation funnel
+                # avoids double-counting the bound HT/FT and corner audits.
+                continue
             if audit.get("kind") == CORNER_OBSERVATION_KIND:
                 grouped: dict[str, list[dict[str, Any]]] = {}
                 for candidate in audit.get("candidates", []):
@@ -7079,6 +8656,171 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def shadow_selection_by_market(records: list[dict[str, Any]]) -> dict[str, Any]:
+    reviewed = strict_forward_reviewed_records(records)
+    markets: dict[str, dict[str, Any]] = {
+        market: {
+            "market": market,
+            "evaluated_records": 0,
+            "unavailable_records": 0,
+            "counterfactual_abstentions": 0,
+            "shadow_selected": 0,
+            "graded_shadow_selections": 0,
+            "ungraded_shadow_selections": 0,
+            "settlement_results": {
+                state: 0 for state in CANDIDATE_SETTLEMENT_STATES
+            },
+            "counts_toward_primary_record": False,
+            "monetary_scope": "none",
+        }
+        for market in PRIMARY_MARKETS
+    }
+    reviewed_match_ids: set[str] = set()
+    seen_selection_units: set[tuple[str, str]] = set()
+    for record in reviewed:
+        for audit in frozen_candidate_audits(record):
+            observation_id = str(audit.get("observation_id") or "")
+            if (
+                audit.get("kind") != CANDIDATE_EVALUATION_KIND
+                or not validated_candidate_evaluation_audit(audit, record)
+                or not observation_id
+            ):
+                continue
+            diagnostic = validated_candidate_evaluation_diagnostic(audit, record)
+            if diagnostic is None:
+                continue
+            result_by_id = {
+                str(item.get("candidate_id")): item.get("settlement_result")
+                for item in (
+                    diagnostic.get("candidate_results", [])
+                    if isinstance(diagnostic, dict)
+                    else []
+                )
+                if isinstance(item, dict) and item.get("candidate_id")
+            }
+            selected_by_market = {
+                str(candidate.get("market")): candidate
+                for candidate in audit.get("candidates", [])
+                if isinstance(candidate, dict)
+                and candidate.get("shadow_selected") is True
+            }
+            for entry in audit.get("market_manifest", []):
+                if not isinstance(entry, dict) or entry.get("market") not in markets:
+                    continue
+                market = str(entry["market"])
+                selection_unit = candidate_evaluation_selection_unit(record, market)
+                if not selection_unit[0] or selection_unit in seen_selection_units:
+                    continue
+                seen_selection_units.add(selection_unit)
+                reviewed_match_ids.add(selection_unit[0])
+                block = markets[market]
+                if entry.get("status") == "unavailable":
+                    block["unavailable_records"] += 1
+                    continue
+                block["evaluated_records"] += 1
+                selected = selected_by_market.get(market)
+                if not isinstance(selected, dict):
+                    block["counterfactual_abstentions"] += 1
+                    continue
+                block["shadow_selected"] += 1
+                result = result_by_id.get(str(selected.get("candidate_id")))
+                if result in CANDIDATE_SETTLEMENT_STATES:
+                    block["graded_shadow_selections"] += 1
+                    block["settlement_results"][str(result)] += 1
+                else:
+                    block["ungraded_shadow_selections"] += 1
+    return {
+        "evaluation_scope": "strict_forward_oos_reviewed_candidate_evaluation_v2",
+        "selection_unit": "at_most_one_shadow_selected_per_match_market",
+        "reviewed_matches_with_candidate_evaluations": len(reviewed_match_ids),
+        "markets": markets,
+    }
+
+
+def release_blocker_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
+    reviewed = strict_forward_reviewed_records(records)
+    markets: dict[str, dict[str, Any]] = {
+        market: {
+            "market": market,
+            "counterfactual_candidates": 0,
+            "release_gates": {},
+        }
+        for market in PRIMARY_MARKETS
+    }
+    seen_selection_units: set[tuple[str, str]] = set()
+    for record in reviewed:
+        for audit in frozen_candidate_audits(record):
+            observation_id = str(audit.get("observation_id") or "")
+            if (
+                audit.get("kind") != CANDIDATE_EVALUATION_KIND
+                or not validated_candidate_evaluation_audit(audit, record)
+                or not observation_id
+            ):
+                continue
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for candidate in audit.get("candidates", []):
+                if isinstance(candidate, dict) and candidate.get("market") in markets:
+                    grouped.setdefault(str(candidate["market"]), []).append(candidate)
+            for market, market_candidates in grouped.items():
+                selection_unit = candidate_evaluation_selection_unit(record, market)
+                if not selection_unit[0] or selection_unit in seen_selection_units:
+                    continue
+                seen_selection_units.add(selection_unit)
+                block = markets[market]
+                for candidate in market_candidates:
+                    if candidate.get("counterfactual_eligible") is not True:
+                        continue
+                    block["counterfactual_candidates"] += 1
+                    for gate in candidate.get("gates", []):
+                        if not isinstance(gate, dict) or gate.get("category") != "release":
+                            continue
+                        name = str(gate.get("gate") or "")
+                        if not name:
+                            continue
+                        gate_block = block["release_gates"].setdefault(
+                            name,
+                            {
+                                "evaluated": 0,
+                                "passed": 0,
+                                "failed": 0,
+                                "failure_reasons": {},
+                            },
+                        )
+                        gate_block["evaluated"] += 1
+                        if gate.get("passed") is True:
+                            gate_block["passed"] += 1
+                        else:
+                            gate_block["failed"] += 1
+                            for reason in gate.get("reasons", []):
+                                normalized = str(reason).strip()
+                                if normalized:
+                                    reasons = gate_block["failure_reasons"]
+                                    reasons[normalized] = reasons.get(normalized, 0) + 1
+    for block in markets.values():
+        block["release_gates"] = {
+            name: {
+                **values,
+                "failure_reasons": dict(sorted(values["failure_reasons"].items())),
+            }
+            for name, values in sorted(block["release_gates"].items())
+        }
+    return {
+        "evaluation_scope": "counterfactual_candidates_release_gates_only",
+        "markets": markets,
+    }
+
+
+def shadow_review_trigger_by_market(
+    shadow: dict[str, Any], minimum: int
+) -> dict[str, bool]:
+    raw_markets = shadow.get("markets", {}) if isinstance(shadow, dict) else {}
+    return {
+        market: int(raw_markets.get(market, {}).get("graded_shadow_selections", 0))
+        >= minimum
+        for market in PRIMARY_MARKETS
+    }
+
+
 def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[str, Any]:
     strict_records = strict_forward_reviewed_records(records)
     primary_by_market = primary_market_performance(strict_records)
@@ -7097,6 +8839,8 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         for record in records[-20:]
         if str(record.get("key_learning", "")).strip()
     ]
+    shadow = shadow_selection_by_market(records)
+    release_funnel = release_blocker_funnel(records)
     return {
         "league_key": league_key,
         "source_labels": sorted(
@@ -7121,6 +8865,8 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
         "selection_policy": selection_policy_block(records),
         "one_x_two_metrics": one_x_two_metrics(records),
         "observation_gate_funnel": observation_gate_funnel(records),
+        "shadow_selection_by_market": shadow,
+        "release_blocker_funnel": release_funnel,
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -7163,6 +8909,8 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     primary_by_market = primary_market_performance(strict_reviewed)
     quarantined_primary = performance_block(primary_pairs(excluded_reviewed))
     quarantined_by_market = primary_market_performance(excluded_reviewed)
+    shadow = shadow_selection_by_market(reviewed)
+    release_funnel = release_blocker_funnel(reviewed)
     return {
         "evaluation_scope": "strict_forward_oos",
         "reviewed_matches": len(reviewed),
@@ -7192,6 +8940,8 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "selection_policy": selection_policy_block(reviewed),
         "one_x_two_metrics": one_x_two_metrics(reviewed),
         "observation_gate_funnel": observation_gate_funnel(reviewed),
+        "shadow_selection_by_market": shadow,
+        "release_blocker_funnel": release_funnel,
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -7283,6 +9033,9 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
                 "corner_handicap",
             )
         }
+        shadow_threshold = shadow_review_trigger_by_market(
+            league_stats["shadow_selection_by_market"], minimum
+        )
         matches = int(league_stats["reviewed_matches"])
         strict_matches = int(league_stats["strict_forward_reviewed_matches"])
         sample_tier = (
@@ -7310,9 +9063,14 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "sample_tier": sample_tier,
             "minimum_graded_per_market_for_manual_review": minimum,
             "sample_review_trigger_met_by_market": sample_threshold,
+            "shadow_selection_by_market": league_stats[
+                "shadow_selection_by_market"
+            ],
+            "shadow_review_trigger_met_by_market": shadow_threshold,
+            "release_blocker_funnel": league_stats["release_blocker_funnel"],
             "decision": (
                 "manual_model_validation_required"
-                if any(sample_threshold.values())
+                if any(sample_threshold.values()) or any(shadow_threshold.values())
                 else "hold_insufficient_strict_league_sample"
             ),
             "active_weight_adjustments": {},
@@ -7364,6 +9122,9 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
             "corner_handicap",
         )
     }
+    shadow_eligibility = shadow_review_trigger_by_market(
+        stats["shadow_selection_by_market"], minimum
+    )
     calibration = {
         "updated_at": now_iso(),
         "history_path": str(history_file),
@@ -7379,6 +9140,9 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "observation_gate_funnel": stats["observation_gate_funnel"],
         "minimum_graded_per_market_for_manual_review": minimum,
         "sample_review_trigger_met_by_market": eligibility,
+        "shadow_selection_by_market": stats["shadow_selection_by_market"],
+        "shadow_review_trigger_met_by_market": shadow_eligibility,
+        "release_blocker_funnel": stats["release_blocker_funnel"],
         "weight_change_eligible": {market: False for market in eligibility},
         "active_weight_adjustments": {},
         "parameter_change_authorized": False,
@@ -7389,7 +9153,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "stats": stats,
         "league_profiles": league_calibration_profiles(stats, minimum),
     }
-    if not any(eligibility.values()):
+    if not any(eligibility.values()) and not any(shadow_eligibility.values()):
         calibration["decision"] = "hold_insufficient_strict_sample"
     else:
         calibration["decision"] = "manual_model_validation_required"
@@ -7531,6 +9295,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Validated corner_ranker JSON for the same prediction; never creates "
             "a formal pick or stake"
+        ),
+    )
+    record.add_argument(
+        "--candidate-evaluation-file",
+        help=(
+            "candidate-evaluation/2.0.0 multi-market audit artifact; probabilities, "
+            "EV, edge, timing, gates, and shadow selection are revalidated before archive"
+        ),
+    )
+    record.add_argument(
+        "--require-candidate-evaluations",
+        action="store_true",
+        help=(
+            "Fail closed unless --candidate-evaluation-file supplies an evaluated or "
+            "explicitly unavailable manifest entry for every supported market"
         ),
     )
     record.add_argument("--data-quality", choices=("high", "medium", "low", "unknown"), default="unknown")

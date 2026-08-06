@@ -23,12 +23,22 @@ def _display_item(
     probability: float,
 ) -> dict:
     home, away = (int(value) for value in score.split("-"))
+    total_goals = home + away
+    goal_range = (
+        "0-1" if total_goals <= 1 else
+        "2-3" if total_goals <= 3 else
+        "4-6" if total_goals <= 6 else
+        "7+"
+    )
     return {
         "slot": rank,
         "htft": htft,
         "score": score,
         "home_goals": home,
         "away_goals": away,
+        "total_goals": total_goals,
+        "goal_range_code": goal_range,
+        "goal_range_label": f"{goal_range}球",
         "probability": probability,
         "percentage": probability * 100.0,
         "selection_role": "global_joint_probability_top_two",
@@ -51,10 +61,10 @@ def _outlook(count: int = 2) -> dict:
             "items": copy.deepcopy(items),
             "display_items": items,
             "display_count": len(items),
-            "display_reason": "global_joint_probability_top_two",
-            "display_policy": "global_joint_probability_top_two_v1",
+            "display_reason": "global_joint_probability_top_two_with_rank1_goal_range",
+            "display_policy": "global_joint_probability_top_two_with_rank1_goal_range_v2",
             "ranking_basis": "global_joint_event_probability_descending",
-            "pairing_basis": "same_validated_joint_event",
+            "pairing_basis": "rank1_goal_range_plus_same_validated_joint_event_htft_score_top_two",
             "ranking_source": "validated_joint_paths",
             "status": "high_variance_reference",
             "recommendation_eligible": False,
@@ -160,8 +170,13 @@ class ReviewCardRendererTests(unittest.TestCase):
             ["1. 平/平 5.6%", "2. 平/胜 4.3%"],
         )
         self.assertEqual(
-            card.score_reference.splitlines()[1:],
-            ["1. 1-1 5.6%", "2. 1-0 4.3%"],
+            card.score_reference.splitlines(),
+            [
+                "总进球 2-3球",
+                "高方差·非推荐",
+                "1. 1-1 5.6%",
+                "2. 1-0 4.3%",
+            ],
         )
         visible = "\n".join(renderer.visible_text(card))
         self.assertNotIn("9-9", visible)
@@ -235,6 +250,17 @@ class ReviewCardRendererTests(unittest.TestCase):
         self.assertEqual(card.events, ())
         self.assertEqual(card.joint_status, "data_insufficient")
 
+    def test_goal_range_conflicting_with_score_fails_closed(self) -> None:
+        bad = _outlook(2)
+        bad["joint_scenarios"]["display_items"][0]["goal_range_code"] = "0-1"
+        bad["joint_scenarios"]["display_items"][0]["goal_range_label"] = "0-1球"
+        self.public_builder.side_effect = lambda artifact: bad
+
+        card = renderer.build_card(_record())
+
+        self.assertEqual(card.events, ())
+        self.assertEqual(card.joint_status, "data_insufficient")
+
     def test_half_time_score_cannot_exceed_full_time_score(self) -> None:
         record = _record()
         record["half_time_score"] = "3-0"
@@ -256,12 +282,13 @@ class ReviewCardRendererTests(unittest.TestCase):
         svg = renderer.render_svg(card)
         root = ET.fromstring(svg)
         self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
-        for heading in ("编号", "赛事", "比赛", "半场", "全场", "主推结算", "半全场参考", "波胆参考"):
+        for heading in ("编号", "赛事", "比赛", "半场", "全场", "主推结算", "半全场参考", "总进球/波胆参考"):
             self.assertIn(heading, svg)
         for value in ("平/平", "平/胜", "1-1", "1-0"):
             self.assertIn(value, svg)
         self.assertNotIn("平/负", svg)
-        self.assertNotIn("0-1", svg)
+        self.assertIn("总进球 2-3球", svg)
+        self.assertNotIn("0-1球·1-0", svg)
         self.assertIn("无正式推荐（不结算、不计战绩）", "".join(root.itertext()))
         self.assertNotIn("…", svg)
         self.assertNotIn("...", svg)

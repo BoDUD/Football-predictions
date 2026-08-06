@@ -23,15 +23,16 @@ except ImportError:  # Invoked directly from the ``scripts`` directory.
 
 
 ARTIFACT_TYPE = "soccer_public_market_outlook"
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3.0"
 PROBABILITY_TOLERANCE = 1e-9
 THREE_WAY_CLARITY_GAP_PP = 8.0
 GOAL_RANGE_CLARITY_GAP_PP = 8.0
 BTTS_CLARITY_GAP_PP = 10.0
 JOINT_DISPLAY_COUNT = 2
-JOINT_DISPLAY_POLICY = "global_joint_probability_top_two_v1"
+JOINT_DISPLAY_POLICY = "global_joint_probability_top_two_with_rank1_goal_range_v2"
 JOINT_SCENARIO_WARNING = (
-    "联合情景属于高方差概率参考，不构成主推或正式推荐。"
+    "总进球取联合概率第 1 名事件的比分映射；半全场和波胆逐行来自联合 Top 2；"
+    "属于高方差概率参考，不构成主推或正式推荐。"
 )
 
 _HALF_TIME_ITEMS = (("H", "胜"), ("D", "平"), ("A", "负"))
@@ -205,12 +206,32 @@ def _canonical_scenario_item(
 
 def _public_scenario_item(item: Mapping[str, Any]) -> dict[str, Any]:
     probability = float(item["probability"])
+    total_goals = int(item["home_goals"]) + int(item["away_goals"])
+    goal_range_code, goal_range_label = _goal_range_for_total(total_goals)
     return {
         **dict(item),
+        "total_goals": total_goals,
+        "goal_range_code": goal_range_code,
+        "goal_range_label": goal_range_label,
         "percentage": probability * 100.0,
         "counts_as_primary": False,
         "requires_bookmaker_odds": False,
     }
+
+
+def _goal_range_for_total(total_goals: int) -> tuple[str, str]:
+    if total_goals < 0:
+        raise PublicMarketOutlookError("joint scenario total goals cannot be negative")
+    if total_goals <= 1:
+        code = "0-1"
+    elif total_goals <= 3:
+        code = "2-3"
+    elif total_goals <= 6:
+        code = "4-6"
+    else:
+        code = "7+"
+    labels = dict(_GOAL_RANGE_ITEMS)
+    return code, labels[code]
 
 
 def _full_result_code(home_goals: int, away_goals: int) -> str:
@@ -488,9 +509,9 @@ def _safe_joint_scenarios(
         )
 
     # The public contract is the frozen global joint-event Top 2.  Each item is
-    # one inseparable (HT/FT + full-time score) event and is already ordered by
-    # genuine joint probability.  Independent HT/FT and exact-score rankings
-    # remain internal diagnostics and must never be zipped into these rows.
+    # one inseparable (goal range + HT/FT + full-time score) event and is already
+    # ordered by genuine joint probability.  Independent goal-range, HT/FT, and
+    # exact-score rankings remain diagnostics and must never be zipped into rows.
     display_items: list[dict[str, Any]] = []
     for item in saved_top_two:
         public_item = _public_scenario_item(item)
@@ -504,10 +525,10 @@ def _safe_joint_scenarios(
         "items": display_items,
         "display_count": JOINT_DISPLAY_COUNT,
         "display_items": [dict(item) for item in display_items],
-        "display_reason": "global_joint_probability_top_two",
+        "display_reason": "global_joint_probability_top_two_with_rank1_goal_range",
         "display_policy": JOINT_DISPLAY_POLICY,
         "ranking_basis": "global_joint_event_probability_descending",
-        "pairing_basis": "same_validated_joint_event",
+        "pairing_basis": "rank1_goal_range_plus_same_validated_joint_event_htft_score_top_two",
         "ranking_source": ranking_source,
         "reconstructed_positive_event_count": len(reconstructed),
         "artifact_top_two_exact_match": True,

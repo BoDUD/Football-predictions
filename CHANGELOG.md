@@ -4,16 +4,22 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-06
+
 ### Added
 - Added a fixture-bound lineup fallback contract that checks official competition/club sources, public ESPN lineup pages, and exact-event Sofascore pages when Titan lacks either starting XI, while keeping predicted, non-official, or conflicting lineups out of `lineup_confirmed` evidence.
 - Added live-fetched, page-hash-bound Titan competition metadata so the user-facing Chinese tournament name is separated from an internal proxy-model league key.
 - Added a complete-analysis archive guard for normal initial and lineup-check predictions.
-- Added a real archive-to-card integration test for non-counting model leaders and paired joint scenarios.
+- Added archive-to-card regression coverage for explicit no-primary output, one Rank-1-score-derived goal range, and frozen joint Top-2 HT/FT-score pairs.
+- Added fixture-bound `candidate-evaluation/2.0.0` audits for all supported markets, deterministic per-market shadow selection, verified post-match shadow settlement, and separate shadow/release-blocker calibration funnels.
+- Candidate audits now reject generation before any consumed market/model snapshot, freeze and replay their source plus active-version evidence binding, recompute verified-result diagnostics, deduplicate shadow samples by match/market, and use half-stake-weighted edge probabilities for split settlements.
 
 ### Changed
 - Missing Titan lineup data now triggers one bounded multi-source fallback pass instead of an immediate "unavailable" conclusion; a still-unconfirmed lineup completes the scheduled check with lineup-dependent gates closed rather than causing a retry or fabricated XI.
-- Public scenario output now shows only the frozen, validated global joint-event Top 2 in descending joint-probability order across initial, lineup, and review text/cards. Every row keeps its HT/FT label and exact score inseparably paired, repeated HT/FT labels remain visible when their scores differ, and neither a third-event field nor half-time-root branch completion is allowed. Independent HT/FT and unconditional exact-score Top 2 lists and hit ranks remain machine-only audits.
-- Render no-formal-primary matches with a non-counting `◇ 模型首选` from the validated joint 1X2 leader when complete analysis exists; reserve `数据不足` for missing or invalid joint artifacts.
+- Public scenario output now shows one total-goal range mapped deterministically from the frozen global joint-event Rank 1 score, plus exactly the frozen global joint-event Top 2 in descending joint-probability order across initial, lineup, and review text/cards. Every paired row keeps its HT/FT label and exact score inseparably aligned, repeated HT/FT labels remain visible when their scores differ, and neither a third event nor a repeated Rank 2 goal-range label is displayed. Independent 1X2/goal-range marginals, HT/FT Top 2, unconditional exact-score Top 2, and hit ranks remain audit-only.
+- Render no-formal-primary cards as exactly `无正式主推`; never promote a marginal 1X2 or goal-range leader into the primary or joint slots. Separately qualified observations remain non-counting text/audit annotations and do not occupy the card primary.
+- Allow a newer renderer to project the one visible goal range from Rank 1 of an old valid frozen joint artifact without rewriting the archive, artifact, probabilities, order, settlement basis, or archive hash; missing or invalid joint artifacts still fail all three public projection cells closed as `数据不足`.
+- Keep integrity/value/risk gates independent from release gates so paused markets can accumulate clean forward shadow evidence without becoming formal picks; twenty graded shadows triggers manual validation only and never auto-releases a market or authorizes parameter changes.
 - Make review-card provenance wording reflect whether the frozen settlement version actually contains a validated joint path.
 - Derive card date/title/stage from the archive, reject mixed stages/dates and duplicate matches, and freeze competition identity into settlement/statistics.
 - Upgrade legacy reviewed settlement bases through an explicit audited migration so later top-level league changes cannot alter review cards or statistics; missing historical competition evidence remains explicitly unavailable.

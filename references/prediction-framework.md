@@ -22,7 +22,8 @@ Use the following output policy:
 Quick prediction results only - best for fast decisions:
 - Match info summary
 - Key odds data (main lines)
-- Best pick with probability and EV
+- Formal primary with probability and EV, or `无正式主推`
+- The one goal range mapped from the frozen joint Rank 1 score
 - Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each event's HT/FT label, full-time score, and joint probability kept together
 
 ### Mode B: 可视化模式 (Visual/Detailed)
@@ -30,20 +31,23 @@ Use one simple deterministic image plus analytical text. Initial and lineup-chec
 the same fixed eight columns: `编号`, `时间`, `赛事`, `主队 vs 客队`, `主推`, `总进球`, `半全场`,
 and `波胆`. The renderer derives the date, title, and stage subtitle from the bound archive;
 callers cannot supply them, mix stages/dates, or repeat one match. The stage does not change the table. In the image,
-show only the highest-probability goal range with its probability and lead over second place.
-Show HT/FT and exact score as exactly the frozen, validated global joint-event Top 2 from the
-same path posterior. Keep every event's HT/FT label, full-time score, and joint probability
-together; retain repeated HT/FT labels when their scores differ and never display a third item.
+show exactly one total-goal range, deterministically mapped from the frozen global joint-event
+Rank 1 score rather than the independent goal-range marginal leader. Show HT/FT and exact score
+as exactly the frozen, validated global joint-event Top 2 from the same path posterior. Keep
+every event's HT/FT label, full-time score, and joint probability together; retain repeated
+HT/FT labels when their scores differ and never display a third item. Internally derive a range
+for both events as a consistency check, but do not repeat two range labels in the image or
+normal text.
 
 Keep the full analysis in accompanying text or machine audit, in this stable order:
 
 1. Match identity, kickoff time/timezone, status, and lineup state
 2. Opening-to-current Asian handicap, totals, 1X2, and available corner movement
-3. Complete half-time, full-time 1X2, goal-range, and BTTS distributions with probability gaps
+3. Complete half-time, full-time 1X2, goal-range, and BTTS marginal distributions with probability gaps
 4. Unified EV comparison for supported candidate markets
 5. Fundamentals, home/away split, H2H, motivation, lineup/injuries, and data quality
 6. Primary/no-primary decision, secondary references, failed gates, and risks
-7. The same system-selected paired joint events shown in the image
+7. The same Rank-1-score-derived range and paired joint events shown in the image
 8. Internal HT/FT matrix and standalone score diagnostics only when audit detail is useful
 
 Render probability bars with a fixed-width 20-block scale, for example:
@@ -262,8 +266,11 @@ product of an HT/FT marginal and a score marginal. Freeze and validate the globa
 then publicly display exactly those two events in descending joint-probability order. Keep
 every event's HT/FT label, full-time score, and joint probability together. Retain both rows
 when their HT/FT labels match but their scores differ; never deduplicate them, expose a third
-event, or complete a branch set.
-Derive half-time, 1X2, total goals, goal range, and BTTS from the same artifact. Preserve legacy
+event, or complete a branch set. Derive and validate a goal-range label from each frozen score,
+but publicly show only the Rank 1 event's range as the single `总进球` value.
+Derive half-time, 1X2, total goals, goal range, and BTTS from the same artifact. Keep the
+independent 1X2 and goal-range rankings as descriptive marginal audits; neither may become a
+card primary or replace the single Rank-1-score-derived range. Preserve legacy
 unconditional exact-score and HT/FT Top 2 fields only as machine-readable diagnostics; never
 place them side by side as user scenarios, reorder them for terminal-result agreement, or fill
 a missing joint event by hand.
@@ -380,9 +387,9 @@ archive command from the probability distribution, complete current market, and 
 format. A caller-supplied value is only an assertion to audit; it is never authoritative.
 
 ### Final Output
-1. Headline direction in archive-derived order: best threshold-qualified formal primary; otherwise the highest-ranked separately qualified observation as `◇ 观察/不下注`; otherwise the validated joint 1X2 Top-1 as `◇ 模型首选（不计主推、不计战绩）`; otherwise `数据不足`. Never show both non-primary fallbacks as competing headline directions.
-2. One highest-probability goal range plus its probability lead in the compact image; retain the complete goal-range distribution in text/audit
-3. Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each HT/FT label, full-time score, and joint probability inseparably paired; if the artifact is unavailable, show `数据不足` and no fallback scenarios
+1. Card headline: the best threshold-qualified formal primary; otherwise exactly `无正式主推`. A separately qualified observation may appear once as `◇ 观察/不下注` only in accompanying text/audit. Never promote an independent 1X2 or goal-range marginal leader into the primary cell.
+2. One goal range mapped deterministically from the frozen joint Rank 1 score in the compact image; retain the complete independent goal-range marginal distribution only as text/audit context
+3. Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each HT/FT label, full-time score, and joint probability inseparably paired; internally validate both score-derived ranges but do not repeat two range labels in the image or normal text. If the artifact is unavailable, show `数据不足` across the public projections and no fallback scenarios
 4. Confidence level for each recommendation and the best qualified first-half direction, or `无正EV建议`
 5. Complete half-time, 1X2 and BTTS distributions in text/audit, plus a 3x3 HT/FT marginal matrix when audit detail is useful. The legacy `probability_top2_v3_post_selection` HT/FT Top 2 may remain archived for component evaluation but is not a user-facing scenario list. Pass `league_key`, current model hash, and registry-issued evidence; historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Under `strict-oos-market-policy-v1`, HT/FT remains observation-only regardless of diagnostic gates.
 
@@ -401,7 +408,7 @@ Treat joint events and standalone exact-score diagnostics only as high-variance 
 记录至少包含：
 
 - 比赛 ID、联赛、带时区的开球时间
-- 主客队、绑定的后验 artifact/hash，以及冻结且通过校验的全局联合事件 Top 2；严格按联合概率降序保存，每项的 HT/FT、全场比分与联合概率不可拆分，相同 HT/FT 但比分不同的两项不得去重
+- 主客队、绑定的后验 artifact/hash，以及冻结且通过校验的全局联合事件 Top 2；严格按联合概率降序保存，每项的 HT/FT、全场比分与联合概率不可拆分，相同 HT/FT 但比分不同的两项不得去重；展示时仅将 Rank 1 比分映射为一个总进球区间
 - 亚盘选择方、盘口、赔率
 - 大小球方向、盘口、赔率
 - 合格的总进球区间、双方进球、角球大小或角球让球方向及其真实市场赔率
@@ -409,6 +416,6 @@ Treat joint events and standalone exact-score diagnostics only as high-variance 
 - 推荐、来源 URL、关键理由
 - 数据质量，以及每个正式推荐相对临场市场的 `aligned/neutral/against/conflicting/unknown` 分类
 
-通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件比分 Top 2，仅作为机器可读的全场分布审计，并让 `--predicted-score` 等于无条件第一项；这些字段不得直接驱动卡片。面向用户的配对情景必须另行绑定通过校验的联合路径后验 artifact；展示层只公开冻结且校验通过的全局联合事件 Top 2，严格按联合概率降序，并保持每项 HT/FT、全场比分与联合概率不可拆分。相同 HT/FT 但比分不同的两项必须同时保留，绝不公开第三项；独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。没有该 artifact 时显示 `数据不足`。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推，也不能与联合进球路径硬绑定。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`。波胆、联合情景和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
+通过两个 `--exact-score-pick SCORE:PROBABILITY` 保存无条件比分 Top 2，仅作为机器可读的全场分布审计，并让 `--predicted-score` 等于无条件第一项；这些字段不得直接驱动卡片。面向用户的配对情景必须另行绑定通过校验的联合路径后验 artifact；展示层只公开冻结且校验通过的全局联合事件 Top 2，严格按联合概率降序，并保持每项 HT/FT、全场比分与联合概率不可拆分。每项都可在内部确定性映射总进球区间用于一致性校验，但图片与普通文本只展示 Rank 1 比分对应的一个区间，不重复 Rank 2 区间。相同 HT/FT 但比分不同的两项必须同时保留，绝不公开第三项；独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。没有该 artifact 时公共三栏显示 `数据不足`。只有通过阈值且被当前市场政策与对应 manager formal flag 放行的正式推荐才能写入专用 pick 字段；当前角球 manager 的两个 formal flag 均为 false，因此角球只能进入观察审计，不能写入 `corner_total_pick`、`corner_handicap_pick` 或成为主推，也不能与联合进球路径硬绑定。每次调用必须通过 `--primary-market` 明确全市场唯一主推；脚本把其余合格方向标为 `secondary`。若没有正式方向，显式传 `--primary-market none`，卡片显示 `无正式主推`。波胆、联合情景和观察候选不得计入正式准确率或 ROI。滚球或赛后分析不得伪装为赛前预测，也不得计入准确率。
 
 **不存档 = 工作流未完成。**

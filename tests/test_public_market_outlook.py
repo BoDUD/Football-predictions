@@ -290,7 +290,22 @@ class PublicMarketOutlookTests(unittest.TestCase):
         self.assertEqual(scenarios["items"], scenarios["display_items"])
         self.assertEqual(
             scenarios["display_policy"],
-            "global_joint_probability_top_two_v1",
+            "global_joint_probability_top_two_with_rank1_goal_range_v2",
+        )
+        self.assertEqual(
+            [
+                (
+                    item["goal_range_code"],
+                    item["goal_range_label"],
+                    item["total_goals"],
+                )
+                for item in scenarios["items"]
+            ],
+            [("2-3", "2-3球", 2), ("2-3", "2-3球", 3)],
+        )
+        self.assertEqual(
+            scenarios["pairing_basis"],
+            "rank1_goal_range_plus_same_validated_joint_event_htft_score_top_two",
         )
         self.assertNotIn("third_probability", scenarios)
         self.assertNotIn("top2_top3_gap_percentage_points", scenarios)
@@ -361,6 +376,32 @@ class PublicMarketOutlookTests(unittest.TestCase):
             scenarios["display_policy"],
             public_market_outlook.JOINT_DISPLAY_POLICY,
         )
+
+    def test_joint_goal_range_projection_uses_score_boundaries(self):
+        cases = (
+            (("DD", "0-0", 0.056), "0-1", "0-1球", 0),
+            (("DH", "1-0", 0.056), "0-1", "0-1球", 1),
+            (("HH", "2-0", 0.056), "2-3", "2-3球", 2),
+            (("HH", "3-0", 0.056), "2-3", "2-3球", 3),
+            (("HH", "4-0", 0.056), "4-6", "4-6球", 4),
+            (("HH", "6-0", 0.056), "4-6", "4-6球", 6),
+            (("HH", "7-0", 0.056), "7+", "7+球", 7),
+        )
+        for event, code, label, total in cases:
+            with self.subTest(score=event[1]):
+                home_goals, away_goals = map(int, event[1].split("-"))
+                item = public_market_outlook._public_scenario_item(
+                    public_market_outlook._canonical_scenario_item(
+                        1,
+                        htft=event[0],
+                        home_goals=home_goals,
+                        away_goals=away_goals,
+                        probability=event[2],
+                    )
+                )
+                self.assertEqual(item["goal_range_code"], code)
+                self.assertEqual(item["goal_range_label"], label)
+                self.assertEqual(item["total_goals"], total)
 
     def test_clarity_thresholds_are_inclusive_and_ties_use_source_order(self):
         artifact = self._artifact()

@@ -467,8 +467,7 @@ class PlainTextFormatterTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "总进球：2-3球41.0%"
-                "（分歧，领先第二名2.0个百分点）",
+                "总进球：2-3球（联合第1名比分映射）",
                 text,
             )
             self.assertIn(
@@ -476,7 +475,8 @@ class PlainTextFormatterTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "联合情景：联合事件 Top 2（按联合概率排序，高方差，不作推荐）："
+                "联合情景：联合事件 Top 2（半全场＋波胆逐行同源，"
+                "按联合概率排序，高方差，不作推荐）："
                 "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
                 text,
             )
@@ -485,7 +485,7 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertNotIn("半全场：", text)
             self.assert_plain(text)
 
-    def test_no_primary_plain_text_exposes_non_counting_joint_model_leader(self):
+    def test_no_primary_plain_text_does_not_expose_a_marginal_model_leader(self):
         record = base_record()
         record["primary_market"] = None
         record["primary_pick"] = None
@@ -499,11 +499,8 @@ class PlainTextFormatterTests(unittest.TestCase):
             ):
                 text = formatter.render(base, "42", "initial")
 
-        self.assertIn(
-            "◇ 模型首选：客胜46.0%（不计主推、不计战绩）",
-            text,
-        )
         self.assertIn("主推：无正式推荐", text)
+        self.assertNotIn("◇ 模型首选", text)
         self.assert_plain(text)
 
     def test_qualified_observation_precedes_joint_model_leader_in_plain_text(self):
@@ -901,7 +898,8 @@ class PlainTextFormatterTests(unittest.TestCase):
                 review_text,
             )
             self.assertIn(
-                "联合情景：联合事件 Top 2（按联合概率排序，高方差，不作推荐）："
+                "联合情景：联合事件 Top 2（半全场＋波胆逐行同源，"
+                "按联合概率排序，高方差，不作推荐）："
                 "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
                 review_text,
             )

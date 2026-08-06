@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import hashlib
 import importlib.util
 import json
 import math
@@ -313,6 +314,8 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "score_model_file": None,
         "joint_scenario_file": None,
         "require_complete_analysis": False,
+        "candidate_evaluation_file": None,
+        "require_candidate_evaluations": False,
         "htft_observation_model_file": None,
         "htft_observation_ranker_file": None,
         "corner_observation_model_dir": None,
@@ -984,6 +987,72 @@ class MemoryStoreTests(unittest.TestCase):
             **overrides,
         )
 
+    def write_candidate_evaluation_file(
+        self,
+        base: str,
+        *,
+        probability_offset: float = 0.0,
+    ) -> str:
+        matrix = self.joint_prediction["full_time_score_marginal"][
+            "probabilities"
+        ]
+        distributions = {
+            side: memory_store.matrix_settlement_distribution(
+                matrix, "asian", {"market": "asian", "side": side, "line": 0.0}
+            )
+            for side in ("home", "away")
+        }
+        side = max(
+            distributions,
+            key=lambda value: distributions[value]["full_win"],
+        )
+        other = "away" if side == "home" else "home"
+        distribution = distributions[side]
+        payload = {
+            "artifact_type": memory_store.CANDIDATE_EVALUATION_ARTIFACT_TYPE,
+            "schema_version": memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            "policy_version": memory_store.STRICT_OOS_POLICY_VERSION,
+            "selection_policy_version": memory_store.CONFIDENCE_POLICY_VERSION,
+            "generated_at": "2026-07-21T09:56:00Z",
+            "fixture": {
+                "match_id": JOINT_FIXTURE_ID,
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "kickoff": JOINT_KICKOFF,
+            },
+            "market_manifest": [
+                {
+                    "market": market,
+                    "status": "evaluated" if market == "asian" else "unavailable",
+                    "reasons": [] if market == "asian" else ["not_collected_for_test"],
+                }
+                for market in memory_store.PRIMARY_MARKETS
+            ],
+            "candidates": [
+                {
+                    "market": "asian",
+                    "side": side,
+                    "line": 0.0,
+                    "probability": distribution["full_win"]
+                    + distribution["half_win"]
+                    + probability_offset,
+                    "settlement_probabilities": distribution,
+                    "odds": 4.0,
+                    "odds_format": "decimal",
+                    "market_complete": True,
+                    "complete_market_odds": {side: 4.0, other: 1.10},
+                    "market_source": "Titan007 consensus",
+                    "market_collected_at": "2026-07-21T09:50:00Z",
+                    "price_basis": "consensus",
+                    "firm_count": 5,
+                    "market_signal": "aligned",
+                }
+            ],
+        }
+        path = Path(base) / "candidate-evaluation.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
     def test_record_parser_exposes_joint_scenario_file(self):
         arguments = [
                 "record",
@@ -1022,9 +1091,469 @@ class MemoryStoreTests(unittest.TestCase):
         parsed = memory_store.build_parser().parse_args(arguments)
         self.assertEqual(parsed.joint_scenario_file, "joint.json")
         self.assertTrue(parsed.require_complete_analysis)
+        self.assertIsNone(parsed.candidate_evaluation_file)
+        self.assertFalse(parsed.require_candidate_evaluations)
 
         defaulted = memory_store.build_parser().parse_args(arguments[:-1])
         self.assertTrue(defaulted.require_complete_analysis)
+
+    def test_candidate_evaluation_v2_archives_shadow_without_formal_pick(self):
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            created = memory_store.cmd_record(
+                self.joint_record_args(
+                    base,
+                    candidate_evaluation_file=artifact,
+                    require_candidate_evaluations=True,
+                )
+            )["record"]
+
+            audit = next(
+                item
+                for item in created["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            self.assertTrue(
+                memory_store.validated_candidate_evaluation_audit(audit, created)
+            )
+            self.assertIsNone(created["primary_market"])
+            self.assertIsNone(created["primary_pick"])
+            candidate = audit["candidates"][0]
+            self.assertTrue(candidate["counterfactual_eligible"])
+            self.assertFalse(candidate["formal_eligible"])
+            self.assertTrue(candidate["shadow_selected"])
+            self.assertEqual(candidate["shadow_rank"], 1)
+            self.assertIn("market_policy_enabled", candidate["release_blockers"])
+            self.assertEqual(
+                audit["shadow_selections"]["asian"], candidate["candidate_id"]
+            )
+
+    def test_candidate_evaluation_v2_rejects_missing_or_tampered_input(self):
+        with tempfile.TemporaryDirectory() as base:
+            with self.assertRaisesRegex(
+                ValueError, "requires --candidate-evaluation-file"
+            ):
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        require_candidate_evaluations=True,
+                        candidate_evaluation_file=None,
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(
+                base, probability_offset=0.01
+            )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+            payload["market_manifest"].pop()
+            Path(artifact).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "every supported market"):
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )
+
+    def test_candidate_evaluation_v2_settles_shadow_and_triggers_review_only(self):
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            memory_store.cmd_record(
+                self.joint_record_args(
+                    base,
+                    candidate_evaluation_file=artifact,
+                    require_candidate_evaluations=True,
+                )
+            )
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id=JOINT_FIXTURE_ID,
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=0,
+                    half_away_score=0,
+                    home_corners=None,
+                    away_corners=None,
+                    key_learning="candidate evaluation shadow settlement test",
+                )
+            )
+            record = reviewed["record"]
+            diagnostic = next(
+                item
+                for item in record["observation_diagnostics"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            self.assertEqual(diagnostic["status"], "graded_observation")
+            self.assertEqual(len(diagnostic["candidate_results"]), 1)
+            self.assertIsNotNone(
+                diagnostic["candidate_results"][0]["settlement_result"]
+            )
+            self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
+            self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
+            shadow = reviewed["stats"]["shadow_selection_by_market"]["markets"][
+                "asian"
+            ]
+            self.assertEqual(shadow["shadow_selected"], 1)
+            self.assertEqual(shadow["graded_shadow_selections"], 1)
+            release = reviewed["stats"]["release_blocker_funnel"]["markets"][
+                "asian"
+            ]
+            self.assertEqual(
+                release["release_gates"]["market_policy_enabled"]["failed"], 1
+            )
+
+            seed = copy.deepcopy(record)
+            mismatched = copy.deepcopy(seed)
+            mismatched["match_id"] = "candidate-shadow-mismatched"
+            mismatched_stats = memory_store.calculate_stats([mismatched])
+            self.assertEqual(
+                mismatched_stats["shadow_selection_by_market"]["markets"]["asian"][
+                    "graded_shadow_selections"
+                ],
+                0,
+            )
+            duplicate_stats = memory_store.calculate_stats([seed, copy.deepcopy(seed)])
+            self.assertEqual(
+                duplicate_stats["shadow_selection_by_market"]["markets"]["asian"][
+                    "graded_shadow_selections"
+                ],
+                1,
+            )
+
+            def rebound_clone(index: int) -> dict:
+                clone = copy.deepcopy(seed)
+                match_id = f"candidate-shadow-{index}"
+                clone["match_id"] = match_id
+                basis = clone["settlement_basis"]
+                audit = next(
+                    item
+                    for item in basis["candidate_audits"]
+                    if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+                )
+                old_to_new: dict[str, str] = {}
+                artifact_sha = "sha256:" + hashlib.sha256(
+                    match_id.encode("utf-8")
+                ).hexdigest()
+                audit["fixture"]["match_id"] = match_id
+                audit["artifact"]["artifact_sha256"] = artifact_sha
+                audit["observation_id"] = artifact_sha
+                for candidate in audit["candidates"]:
+                    old_id = candidate["candidate_id"]
+                    new_id = "sha256:" + hashlib.sha256(
+                        (
+                            f"{artifact_sha}:{candidate['source_index']}:"
+                            f"{candidate['identity']}"
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    candidate["candidate_id"] = new_id
+                    old_to_new[old_id] = new_id
+                audit["shadow_selections"] = {
+                    market: old_to_new[candidate_id]
+                    for market, candidate_id in audit["shadow_selections"].items()
+                }
+                audit["audit_hash"] = memory_store.calculate_candidate_evaluation_audit_hash(
+                    audit
+                )
+                diagnostic = next(
+                    item
+                    for item in basis["observation_diagnostics"]
+                    if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+                )
+                diagnostic["observation_id"] = artifact_sha
+                for result in diagnostic["candidate_results"]:
+                    result["candidate_id"] = old_to_new[result["candidate_id"]]
+                return clone
+
+            forged = [rebound_clone(index) for index in range(20)]
+            forged_stats = memory_store.calculate_stats(forged)
+            self.assertEqual(
+                forged_stats["shadow_selection_by_market"]["markets"]["asian"][
+                    "graded_shadow_selections"
+                ],
+                0,
+            )
+
+            shadow_summary = {
+                "markets": {
+                    market: {
+                        "graded_shadow_selections": 20 if market == "asian" else 0
+                    }
+                    for market in memory_store.PRIMARY_MARKETS
+                }
+            }
+            threshold = memory_store.shadow_review_trigger_by_market(
+                shadow_summary, 20
+            )
+            self.assertTrue(threshold["asian"])
+            self.assertFalse(threshold["total"])
+
+    def test_candidate_evaluation_v2_enforces_temporal_causality(self):
+        cases = (
+            (
+                "market-after-candidate",
+                {"market_collected_at": "2026-07-21T09:57:00Z"},
+                None,
+                "cannot precede market_collected_at",
+            ),
+            (
+                "candidate-before-model",
+                {},
+                "2026-07-21T09:54:00Z",
+                "cannot precede its upstream model",
+            ),
+        )
+        for label, candidate_changes, generated_at, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as base:
+                artifact = self.write_candidate_evaluation_file(base)
+                payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+                payload["candidates"][0].update(candidate_changes)
+                if generated_at is not None:
+                    payload["generated_at"] = generated_at
+                Path(artifact).write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(ValueError, expected):
+                    memory_store.cmd_record(
+                        self.joint_record_args(
+                            base,
+                            candidate_evaluation_file=artifact,
+                            require_candidate_evaluations=True,
+                        )
+                    )
+
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+            payload["generated_at"] = "2026-07-21T09:55:00Z"
+            Path(artifact).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            created = memory_store.cmd_record(
+                self.joint_record_args(
+                    base,
+                    candidate_evaluation_file=artifact,
+                    require_candidate_evaluations=True,
+                )
+            )["record"]
+            audit = next(
+                item
+                for item in created["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            self.assertTrue(
+                memory_store.validated_candidate_evaluation_audit(audit, created)
+            )
+
+    def test_candidate_evaluation_v2_uses_five_state_quarter_line_edge(self):
+        matrix = self.joint_prediction["full_time_score_marginal"][
+            "probabilities"
+        ]
+        for line in (-0.25, -0.75):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as base:
+                artifact = self.write_candidate_evaluation_file(base)
+                payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+                raw = payload["candidates"][0]
+                side = raw["side"]
+                other = "away" if side == "home" else "home"
+                distribution = memory_store.matrix_settlement_distribution(
+                    matrix,
+                    "asian",
+                    {"market": "asian", "side": side, "line": line},
+                )
+                raw.update(
+                    {
+                        "line": line,
+                        "probability": distribution["full_win"]
+                        + distribution["half_win"],
+                        "settlement_probabilities": distribution,
+                        "odds": 2.0,
+                        "complete_market_odds": {side: 2.0, other: 2.0},
+                        "cover_distribution_validated": True,
+                    }
+                )
+                Path(artifact).write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                )
+                created = memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )["record"]
+                audit = next(
+                    item
+                    for item in created["candidate_audits"]
+                    if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+                )
+                candidate = audit["candidates"][0]
+                edge_probability = memory_store.effective_settlement_win_probability(
+                    distribution, "test distribution"
+                )
+                self.assertIsNotNone(edge_probability)
+                self.assertAlmostEqual(candidate["edge_probability"], edge_probability)
+                self.assertAlmostEqual(
+                    candidate["edge_pp"], (edge_probability - 0.5) * 100.0
+                )
+                old_binary_edge = (candidate["probability"] - 0.5) * 100.0
+                self.assertNotAlmostEqual(candidate["edge_pp"], old_binary_edge)
+        self.assertIsNone(
+            memory_store.effective_settlement_win_probability(
+                {
+                    "full_win": 0.0,
+                    "half_win": 0.0,
+                    "push": 1.0,
+                    "half_loss": 0.0,
+                    "loss": 0.0,
+                },
+                "all-push test distribution",
+            )
+        )
+
+    def test_candidate_evaluation_v2_replays_derived_fields_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            memory_store.cmd_record(
+                self.joint_record_args(
+                    base,
+                    candidate_evaluation_file=artifact,
+                    require_candidate_evaluations=True,
+                )
+            )
+            reviewed = review_command(
+                SimpleNamespace(
+                    base_dir=base,
+                    verified_finished=True,
+                    verification_source="https://example.test/final",
+                    verification_collected_at="2026-07-21T21:00:00+09:00",
+                    match_id=JOINT_FIXTURE_ID,
+                    home_score=1,
+                    away_score=0,
+                    half_home_score=0,
+                    half_away_score=0,
+                    home_corners=None,
+                    away_corners=None,
+                    key_learning="candidate replay tamper test",
+                )
+            )["record"]
+            original = copy.deepcopy(reviewed)
+            audit = next(
+                item
+                for item in reviewed["settlement_basis"]["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            self.assertTrue(
+                memory_store.validated_candidate_evaluation_audit(audit, reviewed)
+            )
+            audit["candidates"][0]["ev"] += 1.0
+            audit["audit_hash"] = memory_store.calculate_candidate_evaluation_audit_hash(
+                audit
+            )
+            self.assertFalse(
+                memory_store.validated_candidate_evaluation_audit(audit, reviewed)
+            )
+            self.assertEqual(
+                memory_store.calculate_stats([reviewed])["shadow_selection_by_market"][
+                    "markets"
+                ]["asian"]["graded_shadow_selections"],
+                0,
+            )
+
+            diagnostic_tamper = copy.deepcopy(original)
+            diagnostic = next(
+                item
+                for item in diagnostic_tamper["settlement_basis"][
+                    "observation_diagnostics"
+                ]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            diagnostic["candidate_results"][0]["settlement_result"] = "loss"
+            self.assertEqual(
+                memory_store.calculate_stats([diagnostic_tamper])[
+                    "shadow_selection_by_market"
+                ]["markets"]["asian"]["graded_shadow_selections"],
+                0,
+            )
+
+    def test_candidate_evaluation_v2_deduplicates_same_match_market_across_artifact_hashes(self):
+        records = []
+        observation_ids = []
+        raw_artifact_hashes = []
+        for indent in (None, 2):
+            with tempfile.TemporaryDirectory() as base:
+                artifact = self.write_candidate_evaluation_file(base)
+                payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+                Path(artifact).write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=indent),
+                    encoding="utf-8",
+                )
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )
+                record = review_command(
+                    SimpleNamespace(
+                        base_dir=base,
+                        verified_finished=True,
+                        verification_source="https://example.test/final",
+                        verification_collected_at="2026-07-21T21:00:00+09:00",
+                        match_id=JOINT_FIXTURE_ID,
+                        home_score=1,
+                        away_score=0,
+                        half_home_score=0,
+                        half_away_score=0,
+                        home_corners=None,
+                        away_corners=None,
+                        key_learning="candidate dedupe test",
+                    )
+                )["record"]
+                records.append(copy.deepcopy(record))
+                audit = next(
+                    item
+                    for item in record["settlement_basis"]["candidate_audits"]
+                    if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+                )
+                observation_ids.append(audit["observation_id"])
+                raw_artifact_hashes.append(
+                    audit["artifact"]["raw_artifact_sha256"]
+                )
+        self.assertEqual(observation_ids[0], observation_ids[1])
+        self.assertNotEqual(raw_artifact_hashes[0], raw_artifact_hashes[1])
+        stats = memory_store.calculate_stats(records)
+        self.assertEqual(
+            stats["shadow_selection_by_market"]["markets"]["asian"][
+                "graded_shadow_selections"
+            ],
+            1,
+        )
+        self.assertEqual(
+            stats["release_blocker_funnel"]["markets"]["asian"][
+                "counterfactual_candidates"
+            ],
+            1,
+        )
 
     def test_complete_analysis_guard_rejects_missing_joint_artifact(self):
         with tempfile.TemporaryDirectory() as base:
@@ -1057,7 +1586,7 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.validated_joint_scenario_audit(created)
             )
 
-    def test_real_complete_archive_renders_model_leader_and_joint_pairs_end_to_end(self):
+    def test_real_complete_archive_renders_no_primary_and_joint_pairs_end_to_end(self):
         with tempfile.TemporaryDirectory() as base:
             created = memory_store.cmd_record(
                 self.joint_record_args(base, require_complete_analysis=True)
@@ -1084,8 +1613,9 @@ class MemoryStoreTests(unittest.TestCase):
                 payload, {JOINT_FIXTURE_ID: created}
             )
 
-            self.assertTrue(card.rows[0].primary.startswith("◇ 模型首选："))
+            self.assertEqual(card.rows[0].primary, "无正式主推")
             self.assertNotEqual(card.rows[0].total_goals, "数据不足")
+            self.assertEqual(len(card.rows[0].total_goals.splitlines()), 1)
             self.assertEqual(len(card.rows[0].htft.splitlines()), 2)
             self.assertEqual(
                 len(card.rows[0].htft.splitlines()),
@@ -3856,7 +4386,7 @@ class MemoryStoreTests(unittest.TestCase):
                     corner_total_odds_format="hong_kong",
                     corner_total_probability=0.56,
                     corner_total_ev=0.186,
-                    corner_total_edge_pp=4.5,
+                    corner_total_edge_pp=3.0945945946,
                     corner_total_firm_count=3,
                     corner_total_market_signal="aligned",
                     corner_total_market_complete=True,
@@ -3906,7 +4436,7 @@ class MemoryStoreTests(unittest.TestCase):
                     corner_handicap_odds_format="decimal",
                     corner_handicap_probability=0.56,
                     corner_handicap_ev=0.192,
-                    corner_handicap_edge_pp=4.5,
+                    corner_handicap_edge_pp=10.7222222222,
                     corner_handicap_firm_count=3,
                     corner_handicap_market_signal="aligned",
                     corner_handicap_market_complete=True,
@@ -4026,6 +4556,7 @@ class MemoryStoreTests(unittest.TestCase):
                     "corner_total_push_probability": 0.10,
                     "corner_total_half_loss_probability": 0.0,
                     "corner_total_loss_probability": 0.34,
+                    "corner_total_edge_pp": 10.7222222222,
                     "primary_change_reason": "确认首发改变角球强度",
                     "previous_primary_invalidated": True,
                     "previous_primary_current_ev": 0.12,
