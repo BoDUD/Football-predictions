@@ -2,13 +2,31 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
+当前发布版本：**3.3.0**。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
 ## 安装
 
+作为 Codex Skill 安装：
+
 ```bash
 npx skills add BoDUD/Football-predictions
 ```
+
+仓库同时提供可安装的本地诊断命令。Windows 基础安装会声明 `tzdata`，PNG/JPEG
+渲染依赖 Pillow，按需安装 `render` extra：
+
+```bash
+python -m pip install .
+python -m pip install ".[render]"
+soccer-predict doctor --workspace .
+```
+
+`doctor` 检查 Python、Pillow、中文字体、IANA 时区、工作区及 `.codex` 写权限、
+模型注册表和 scheduler/watchdog 文件与状态 JSON。它默认不联网、不安装或启用
+watchdog，也不修改模型或归档；只有显式传入 `--network` 才执行最长 10 秒的外部
+连通性检查。`--json` 提供稳定的机器可读结果，`--strict` 可把可选依赖警告也视为失败。
 
 安装后可直接在 Codex 中使用：
 
@@ -31,7 +49,7 @@ npx skills add BoDUD/Football-predictions
 
 Titan 中文页时间默认按 `Asia/Shanghai` 解析，再转换为 Codex 环境中的用户时区。比赛状态始终以页面明确的未开场、进行中或完场标识为准。
 
-默认输出为“简单图片 + 正常分析文字”。初盘和临场复查统一使用同一张 8 列表格：`编号`、`时间`、`赛事`、`主队 vs 客队`、`主推`、`总进球`、`半全场`、`波胆`；日期、标题与阶段副标题全部从归档派生，同一张图禁止混合阶段、比赛日期或同一场的两个版本。`主推` 只显示通过全部门槛的正式主推；没有正式方向时固定显示 `无正式主推`，绝不拿独立 1X2 或总进球 marginal 首位补位。图片中的 `总进球` 只显示一个区间：由冻结联合事件 Rank 1 的比分总球数确定性映射；不显示 Rank 2 区间，也不使用独立总进球 marginal Top-1。`半全场` 与 `波胆` 只展示冻结且通过校验的全局联合事件 Top 2，严格按联合概率降序。每一行的 HT/FT、全场比分与联合概率是不可拆分的同一事件；若两个事件拥有相同 HT/FT 但比分不同，保留两行并重复该标签。绝不展示第三项，也不按半场根节点补齐胜平负分支。系统内部仍完整计算并校验两个事件各自的 score-derived goal range，以及半场、1X2、全部总进球区间、BTTS、EV/edge 与证据审计，但图片和普通文字不重复展示两个区间。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件波胆 Top 2 只保留审计，不得占用或重排公开位置。正式主推后标红色 `★`；通过诊断资格的独立观察只能在随附文字或审计中标 `◇`，不占 `主推` 栏且不计战绩。严禁独立排列半全场与比分后暗示对应，也严禁按终场方向硬配比分或手填 fallback；没有通过校验并绑定指定 `analysis_stage` 与版本哈希的联合后验 artifact 时，`总进球`、`半全场`、`波胆` 三栏必须整体显示 `数据不足`，同时主推栏仍如实保留正式主推或 `无正式主推`。
+默认输出为“简单图片 + 正常分析文字”。初盘和临场复查统一使用同一张 8 列表格：`编号`、`时间`、`赛事`、`主队 vs 客队`、`主推`、`联合首选情景总球`、`半全场`、`波胆`；日期、标题与阶段副标题全部从归档派生，同一张图禁止混合阶段、比赛日期或同一场的两个版本。`主推` 只显示通过全部门槛的正式主推；没有正式方向时固定显示 `无正式主推`，绝不拿独立 1X2 或总进球 marginal 首位补位。图片中的 `联合首选情景总球` 先显示由冻结联合事件 Rank 1 比分确定性映射的一个区间，再显示从完整归档联合分布重算的 Top-2 累计概率、其余情景质量和版本化不确定度；不显示 Rank 2 区间，也不拿独立总进球 marginal Top-1 替换联合区间。随附文字会另列 `总进球边际第一` 及概率，并明确它只用于边际审计、不替代联合情景。`半全场` 与 `波胆` 只展示冻结且通过校验的全局联合事件 Top 2，严格按联合概率降序。每一行的 HT/FT、全场比分与联合概率是不可拆分的同一事件；若两个事件拥有相同 HT/FT 但比分不同，保留两行并重复该标签。绝不展示第三项，也不按半场根节点补齐胜平负分支。系统内部仍完整计算并校验两个事件各自的 score-derived goal range，以及半场、1X2、全部总进球区间、BTTS、EV/edge 与证据审计。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件波胆 Top 2 只保留审计，不得占用或重排公开位置。正式主推后标红色 `★`；通过诊断资格的独立观察只能在随附文字或审计中标 `◇`，不占 `主推` 栏且不计战绩。严禁独立排列半全场与比分后暗示对应，也严禁按终场方向硬配比分或手填 fallback；没有通过校验并绑定指定 `analysis_stage` 与版本哈希的联合后验 artifact 时，`联合首选情景总球`、`半全场`、`波胆` 三栏必须整体显示 `数据不足`，同时主推栏仍如实保留正式主推或 `无正式主推`。
 
 所有图片都禁止用 `…` 或三个点截断内容；必须通过语义换行、缩小至可读字号、增加行高或扩展画布显示完整文字。赛后复盘同样生成同风格图片，绑定最终有效赛前版本和已核验赛果，不得根据结果回改赛前结论；无主推复盘图片保留 `主推：无正式推荐（不结算、不计战绩）`，配套文字继续保留本场关键及联赛/累计战绩。项目不包含微信或其他聊天软件的自动发送、RPA、账号配置或外部消息投递能力，也不承诺胜率、收益或盈利。
 
@@ -95,9 +113,9 @@ python scripts/league_model_manager.py inspect \
   --output .codex/soccer-predict/models/league-history-expanded/inspection.json
 ```
 
-半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。扩展导入覆盖 14 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。保存阶段标签不等于已经为每个阶段训练独立模型：当前注册 manager 只用 `competition_regime=regular` 拟合，其他赛制保留排除计数与漂移证据。
+半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。九格关联种子支持显式时间半衰期和有效样本量审计，但生产默认仍使用已经验证的均匀权重，只有时间顺序对比和未触碰前向样本共同支持后才允许切换。扩展导入覆盖 14 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。保存阶段标签不等于已经为每个阶段训练独立模型：当前注册 manager 只用 `competition_regime=regular` 拟合，其他赛制保留排除计数与漂移证据。
 
-面向用户的比赛情景不是 HT/FT 九格与全场比分两个边际榜单的拼接。联合路径 artifact 必须在同一状态空间中表示半场进球和下半场进球，使全场比分由路径相加得到，并验证其全场比分、半场边际和 HT/FT 九格边际全部与绑定的 canonical artifacts 一致。新 artifact 使用紧凑四维路径 kernel，并在 IPF 前执行全部 Hall 支持可行性审计；验证器会从 kernel 重建 HT、下半场、FT、HT/FT、所有派生市场及排序事件，任一篡改都关闭输出。归档中冻结且通过重建校验的全局联合事件 Top 2 是半全场与波胆栏唯一允许展示的两项，按联合概率降序，并保留每项自身不可拆分的 HT/FT、全场比分与联合概率；即使两项拥有相同 HT/FT，也不得去重。验证器为两个事件都从比分确定性映射总进球区间，但公共卡片和普通文字只展示 Rank 1 对应的一个区间。联合概率必须从路径单元求和，不能用两个边际概率相乘，也不能为满足终场方向而替换任一结果。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。历史冻结的有效 artifact 继续只读兼容；新版渲染器可从其 Rank 1 冻结比分投影区间，但不会修改档案、artifact 或 archive hash。
+面向用户的比赛情景不是 HT/FT 九格与全场比分两个边际榜单的拼接。联合路径 artifact 必须在同一状态空间中表示半场进球和下半场进球，使全场比分由路径相加得到，并验证其全场比分、半场边际和 HT/FT 九格边际全部与绑定的 canonical artifacts 一致。新 artifact 使用紧凑四维路径 kernel，并在 IPF 前执行全部 Hall 支持可行性审计；验证器会从 kernel 重建 HT、下半场、FT、HT/FT、所有派生市场及排序事件，任一篡改都关闭输出。归档中冻结且通过重建校验的全局联合事件 Top 2 是半全场与波胆栏唯一允许展示的两项，按联合概率降序，并保留每项自身不可拆分的 HT/FT、全场比分与联合概率；即使两项拥有相同 HT/FT，也不得去重。验证器为两个事件都从比分确定性映射总进球区间，但公共卡片只展示 Rank 1 对应的一个区间，并从完整归档联合分布重算 Top-2 累计概率、其余质量和版本化熵不确定度；普通文字另列审计用的总进球边际第一，明确不能替代联合区间。联合概率必须从路径单元求和，不能用两个边际概率相乘，也不能为满足终场方向而替换任一结果。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。历史冻结的有效 artifact 继续只读兼容；新版渲染器可从其 Rank 1 冻结比分投影区间并从完整冻结分布重算集中度，但不会修改档案、artifact 或 archive hash。
 
 ```bash
 python scripts/joint_scenario_model.py predict \
@@ -147,9 +165,22 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 暂停的 HT/FT 不再是“算完后丢弃”。`memory_store.py record` 可通过 `--htft-observation-model-file` 与 `--htft-observation-ranker-file` 固化矩阵、诊断 Top 2、pair mass、模型/预测/制品哈希和逐门槛失败原因；该诊断 Top 2 只服务内部校准，不能与独立比分榜单组成用户卡片。赛后只计算观察用 Top-1/Top-2、九分类 Brier 与 log loss，并在 `stats`/`calibrate` 输出 gate funnel；它始终不计主推、注额、胜负、收益或 ROI，复盘文字继续保留 `主推：无正式推荐（不结算、不计战绩）`。
 
-正常初盘与临场归档现在默认要求有效的 `--joint-scenario-file`；`record` 会以完整分析模式拒绝缺失、过期或身份不一致的联合路径，避免先生成一张“数据不足”的完成图。有效联合模型存在但正式盘口门槛未通过时，图片固定显示 `无正式主推`，并展示由冻结 Rank 1 比分映射的一个总进球区间，以及冻结且通过校验的全局联合事件 Top 2；每项的半全场与代表波胆保持原始配对，它们不计正式主推、注额或收益。独立 1X2 与总进球 marginal 首位只能作为分布审计。合格观察仅可在随附文字或审计中单独标注，不占主推栏。旧冻结版本若当时有有效联合制品，可从其 Rank 1 比分重渲染区间而不改档案或哈希；若当时没有联合制品，三栏仍如实显示 `数据不足`，不得用赛果或其他版本回填。
+正常初盘与临场归档现在默认要求有效的 `--joint-scenario-file`；`record` 会以完整分析模式拒绝缺失、过期或身份不一致的联合路径，避免先生成一张“数据不足”的完成图。有效联合模型存在但正式盘口门槛未通过时，图片固定显示 `无正式主推`，并展示由冻结 Rank 1 比分映射的联合首选情景总球、从完整联合分布重算的集中度/不确定度，以及冻结且通过校验的全局联合事件 Top 2；每项的半全场与代表波胆保持原始配对，它们不计正式主推、注额或收益。独立 1X2 与总进球 marginal 首位只能作为分布审计。合格观察仅可在随附文字或审计中单独标注，不占主推栏。旧冻结版本若当时有有效联合制品，可从其 Rank 1 比分重渲染区间并重算集中度而不改档案或哈希；若当时没有联合制品，三栏仍如实显示 `数据不足`，不得用赛果或其他版本回填。
 
 新的正常初盘与临场归档还必须传入 `candidate-evaluation/2.0.0` 与 `--require-candidate-evaluations`，把亚盘、大小球、半场、半全场、总进球区间、BTTS 和两类角球市场逐一记为已评估或明确不可用。候选制品的生成时间不得早于其使用的盘口快照或联合/角球上游模型；系统从冻结 source payload、活动版本及模型/证据绑定重算完整盘口、五态 EV/edge、门槛、信心排序和 shadow 选择。四分盘的 edge 按半赢/半输各半注折算，push 不进入有效赢亏质量。只因市场发布政策暂停而失败的候选仍可进入每场每市场最多一个的 shadow 样本，但永远不占主推、不下注、不计战绩或 ROI。赛后复盘会按最终比分重新结算并核对冻结诊断；改派生字段后重算自哈希、或仅改变 JSON 格式/字节哈希复制同场样本，都不能污染 `stats`/`calibrate`。单市场达到 20 个已结算 shadow 只触发人工模型/政策复核，不会自动解禁、调参或回改旧档案。
+
+真正的“未触碰前向验证”由 `scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先在干净且已评审的 Git 提交上冻结代码文件、数据 manifest、模型 registry、候选选择器、阈值、市场状态和显示策略，再启动只接受启动时刻之后比赛的 cohort。cohort 激活后，每场归档必须传入由可见赛前网页导出构建的 `--source-evidence-file`；系统保存内容寻址的原始 JSON、HTTP 元数据和解析器版本，并从完整公司赔率行重放候选价格，不能只保存二次加工结果。验证报告覆盖预测、弃赛和不可用市场，比较历史频率、独立 HT/FT、简单 Poisson/DC 和同时间 bookmaker no-vig 基线，输出 log loss、Brier、校准、覆盖率、按联赛/市场/提前量切片、以开球周聚类的置信区间，以及可执行入场价下的 ROI/CLV。报告永远不会自动解禁市场或改参数；代码、数据、模型、选择器、阈值或显示策略发生预测相关变化时必须结束旧口径并启动新 cohort。
+
+```bash
+python scripts/source_evidence.py build --source-file visible-page-export.json --output-dir .codex/soccer-predict/source-evidence
+python scripts/source_evidence.py verify --evidence .codex/soccer-predict/source-evidence/MATCH-source-evidence.json
+python scripts/forward_policy.py --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA
+python scripts/forward_policy.py --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID
+python scripts/forward_policy.py --base-dir . close --closed-at TIMEZONE_AWARE_ISO
+python scripts/forward_validation.py --input forward-observations.json --output forward-validation.json
+```
+
+冻结政策要求工作树已经提交，因此本次代码修复本身不能作为未来效果证据；必须在合并/提交后再启动新的前向 cohort。外部可信时间戳锚定仍是可选增强，尚未配置外部服务时只能证明本地内容哈希与 Git 边界，不能声称第三方时间见证。SQLite 迁移和更多赛前协变量也仍属于后续工程，当前没有为了迎合 review 虚构完成状态。
 
 完整输入契约见 [`references/history-workbook-data.md`](references/history-workbook-data.md)，半全场构造与选择规则见 [`references/half-time-full-time.md`](references/half-time-full-time.md)。
 本地数据哈希、分联赛门槛、fallback 与赛制漂移的可执行核验见
@@ -234,9 +265,18 @@ soccer-predict/
 ## 验证
 
 ```bash
-python -B -X utf8 -m unittest discover -s tests -v
+python -m pip install -e ".[dev,render,notebook]"
+python -m pytest -q
 python -B -X utf8 <skill-creator>/scripts/quick_validate.py .
 ```
+
+CI 在 Python 3.11/3.12 和 Windows 上运行测试，并自动汇总 `unit`、`property`、
+`schema_contract`、`documentation_contract`、`integration_replay`、`live_canary`、
+`e2e` 与 `uncategorized` 分类。没有相应测试的类别会如实显示 0，新文件没有明确分类时
+进入 `uncategorized` 而不冒充单元测试；分类清单不等同于已具备真实 provider
+或端到端覆盖。`soccer_predict/`、`scripts/` 与 `tests/` 全部执行 ruff lint/format；
+CLI/doctor 另执行 mypy 和 80% 覆盖率门槛。HT/FT notebook 在 CI 中使用明确标记为非模型证据的
+最小 fixture 真执行全部单元格；默认本地模式仍只验证 `.codex` 中的真实哈希制品。
 
 ## License
 
