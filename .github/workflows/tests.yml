@@ -226,7 +226,10 @@ jobs:
         run: |
           $taskName = "SoccerPredict-CI-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $installer = Join-Path $env:GITHUB_WORKSPACE "scripts/install_windows_watchdog.ps1"
-          $pythonPath = (Get-Command python.exe -CommandType Application).Source
+          [string]$pythonPath = (& python -c "import sys; print(sys.executable)").Trim()
+          if (-not (Test-Path -LiteralPath $pythonPath)) {
+            throw "Python executable does not exist: $pythonPath"
+          }
           try {
             & $installer install -AllowRecurring -Workspace $env:GITHUB_WORKSPACE -PythonPath $pythonPath -TaskName $taskName
             & $installer status -TaskName $taskName
