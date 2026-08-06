@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from scripts import titan_corner_odds_collector as collector
-
 
 KICKOFF = 1_700_000_000
 
@@ -39,7 +38,9 @@ def request_item(
     return collector.build_request_plan(
         [row], [company_id], include_half_total=spec is collector.HALF_TOTAL
     )[
-        2 if spec is collector.HALF_TOTAL else (1 if spec is collector.FULL_HANDICAP else 0)
+        2
+        if spec is collector.HALF_TOTAL
+        else (1 if spec is collector.FULL_HANDICAP else 0)
     ]
 
 
@@ -113,7 +114,9 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
             spec=collector.FULL_TOTAL,
         )
 
-        self.assertEqual([row["kind"] for row in snapshots], ["INITIAL", "EARLY", "REAL"])
+        self.assertEqual(
+            [row["kind"] for row in snapshots], ["INITIAL", "EARLY", "REAL"]
+        )
         self.assertEqual(snapshots[-1]["seconds_before_kickoff"], 10)
         self.assertEqual(qa["verified_unique_snapshots"], 3)
         self.assertEqual(qa["duplicate_verified_records_removed"], 1)
@@ -151,9 +154,7 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
             ]
         )
         request = request_item()
-        record = collector.parse_source_response(
-            request, raw, "2026-08-03T00:00:00Z"
-        )
+        record = collector.parse_source_response(request, raw, "2026-08-03T00:00:00Z")
 
         self.assertEqual(record["status"], "complete")
         self.assertEqual(record["market_key"], "full_total")
@@ -168,7 +169,9 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
         self.assertIn("oddskind=2", record["source_url"])
         self.assertIn("companyid=8", record["source_url"])
         self.assertIn("isHalf=0", record["source_url"])
-        self.assertTrue(record["selection_policy"]["modify_time_strictly_before_match_time"])
+        self.assertTrue(
+            record["selection_policy"]["modify_time_strictly_before_match_time"]
+        )
 
     def test_effective_cutoff_is_earlier_of_schedule_and_source_kickoff(self) -> None:
         quote = detail("REAL", KICKOFF - 30, line=10.5)
@@ -229,9 +232,7 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
 
     def test_parse_response_rejects_schedule_or_team_mismatch(self) -> None:
         request = request_item()
-        with self.assertRaisesRegex(
-            collector.CornerOddsCollectionError, "ScheduleID"
-        ):
+        with self.assertRaisesRegex(collector.CornerOddsCollectionError, "ScheduleID"):
             collector.parse_source_response(
                 request,
                 response_bytes([], match_id=1234567),
@@ -240,9 +241,7 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
 
         payload = json.loads(response_bytes([]))
         payload["Sche"]["HomeTeamID"] = 999
-        with self.assertRaisesRegex(
-            collector.CornerOddsCollectionError, "HomeTeamID"
-        ):
+        with self.assertRaisesRegex(collector.CornerOddsCollectionError, "HomeTeamID"):
             collector.parse_source_response(
                 request,
                 json.dumps(payload).encode("utf-8"),
@@ -290,7 +289,9 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
             extra = fixture("1234567")
             second.write_text(json.dumps([extra], ensure_ascii=False), encoding="utf-8")
             loaded = collector.load_schedule_files([first, second])
-            self.assertEqual({row["match_id"] for row in loaded}, {"2929679", "1234567"})
+            self.assertEqual(
+                {row["match_id"] for row in loaded}, {"2929679", "1234567"}
+            )
 
             conflicting = fixture()
             conflicting["home_team_id"] = 999
@@ -304,9 +305,7 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
 
     def test_company_ids_support_repeat_and_commas(self) -> None:
         self.assertEqual(collector.parse_company_ids(None), [3, 8, 47])
-        self.assertEqual(
-            collector.parse_company_ids(["8", "47,3", "8"]), [3, 8, 47]
-        )
+        self.assertEqual(collector.parse_company_ids(["8", "47,3", "8"]), [3, 8, 47])
         with self.assertRaises(collector.CornerOddsCollectionError):
             collector.parse_company_ids(["3,"])
 
@@ -341,7 +340,9 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
                     keep_raw=False,
                 )
             self.assertEqual(first_fetch.call_count, 2)
-            self.assertEqual(len(checkpoint_path.read_text(encoding="utf-8").splitlines()), 2)
+            self.assertEqual(
+                len(checkpoint_path.read_text(encoding="utf-8").splitlines()), 2
+            )
 
             with mock.patch.object(
                 collector,
@@ -400,9 +401,7 @@ class TitanCornerOddsCollectorTests(unittest.TestCase):
                 request, raw, "2026-08-03T00:00:00Z"
             )
             record["attempts_used"] = 1
-            record["source_response_path"] = collector._store_raw(
-                output / "raw", raw
-            )
+            record["source_response_path"] = collector._store_raw(output / "raw", raw)
             self.assertTrue(collector._can_resume(record, request, output))
 
             for field, value in (

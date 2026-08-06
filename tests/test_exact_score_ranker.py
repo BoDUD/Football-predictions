@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "exact_score_ranker.py"
 SPEC = importlib.util.spec_from_file_location("soccer_exact_score_ranker", SCRIPT)
@@ -59,7 +58,9 @@ class ExactScoreRankerTests(unittest.TestCase):
         self.assertGreater(result["captured_mass"], 0.999)
         self.assertLessEqual(result["captured_mass"], 1.0 + 1e-12)
 
-    def test_total_primary_uses_conditioned_display_scores_without_rewriting_distribution(self):
+    def test_total_primary_uses_conditioned_display_scores_without_rewriting_distribution(
+        self,
+    ):
         result = ranker.rank_exact_scores(
             1.82,
             1.05,

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import csv
-from datetime import date, timedelta
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import date, timedelta
+from pathlib import Path
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "history_importer.py"
 SPEC = importlib.util.spec_from_file_location("soccer_history_importer", SCRIPT)
@@ -20,9 +19,7 @@ SPEC.loader.exec_module(history_importer)
 
 
 SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-DOCUMENT_REL_NS = (
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-)
+DOCUMENT_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 CLOSING_SENTINEL = "CLOSE_ONLY_SECRET"
@@ -41,7 +38,9 @@ def _xml_bytes(element: ET.Element) -> bytes:
     return ET.tostring(element, encoding="utf-8", xml_declaration=True)
 
 
-def _worksheet_xml(rows: list[list[object]], *, formula_ref: str | None = None) -> bytes:
+def _worksheet_xml(
+    rows: list[list[object]], *, formula_ref: str | None = None
+) -> bytes:
     worksheet = ET.Element(f"{{{SPREADSHEET_NS}}}worksheet")
     sheet_data = ET.SubElement(worksheet, f"{{{SPREADSHEET_NS}}}sheetData")
     for row_index, values in enumerate(rows, start=1):
@@ -52,9 +51,7 @@ def _worksheet_xml(rows: list[list[object]], *, formula_ref: str | None = None) 
             if value is None:
                 continue
             reference = f"{_column_name(column_index)}{row_index}"
-            cell = ET.SubElement(
-                row, f"{{{SPREADSHEET_NS}}}c", {"r": reference}
-            )
+            cell = ET.SubElement(row, f"{{{SPREADSHEET_NS}}}c", {"r": reference})
             if reference == formula_ref:
                 ET.SubElement(cell, f"{{{SPREADSHEET_NS}}}f").text = "1+1"
                 ET.SubElement(cell, f"{{{SPREADSHEET_NS}}}v").text = "2"
@@ -119,7 +116,7 @@ def _write_workbook(
 
     workbook = ET.Element(
         f"{{{SPREADSHEET_NS}}}workbook",
-        {f"xmlns:r": DOCUMENT_REL_NS},
+        {"xmlns:r": DOCUMENT_REL_NS},
     )
     sheets = ET.SubElement(workbook, f"{{{SPREADSHEET_NS}}}sheets")
     ET.SubElement(
@@ -177,7 +174,10 @@ def _write_workbook(
     ET.SubElement(
         content_types,
         f"{{{CONTENT_TYPES_NS}}}Default",
-        {"Extension": "rels", "ContentType": "application/vnd.openxmlformats-package.relationships+xml"},
+        {
+            "Extension": "rels",
+            "ContentType": "application/vnd.openxmlformats-package.relationships+xml",
+        },
     )
     ET.SubElement(
         content_types,
@@ -388,9 +388,7 @@ class HistoryImporterTests(unittest.TestCase):
         self.assertEqual(score_rows[0]["competition_regime"], "regular")
         self.assertEqual(score_rows[0]["format_version"], "standard_league_format")
         self.assertEqual(score_rows[0]["phase_group"], "regular_season")
-        self.assertEqual(
-            score_rows[0]["season_status"], "partial_as_of_2026-12-31"
-        )
+        self.assertEqual(score_rows[0]["season_status"], "partial_as_of_2026-12-31")
         self.assertTrue(
             all(row["competition_regime"] == "regular" for row in market_rows)
         )
@@ -520,9 +518,7 @@ class HistoryImporterTests(unittest.TestCase):
                 )
             )
 
-        summary, score_rows, market_rows = self._import(
-            rows, sheet_name="日职"
-        )
+        summary, score_rows, market_rows = self._import(rows, sheet_name="日职")
 
         self.assertEqual(len(score_rows), 180)
         self.assertEqual(
@@ -545,9 +541,7 @@ class HistoryImporterTests(unittest.TestCase):
                 "observed_matches": 180,
                 "expected_matches": 200,
                 "remaining_matches": 20,
-                "expectation_id": (
-                    "known-schedule-match-counts-v1:japan_j1:2026"
-                ),
+                "expectation_id": ("known-schedule-match-counts-v1:japan_j1:2026"),
                 "expectation_basis": (
                     "versioned source-scope competition schedule total"
                 ),
@@ -779,7 +773,10 @@ class HistoryImporterTests(unittest.TestCase):
             },
         )
         self.assertTrue(
-            all(row["season_status"] == "partial_as_of_2026-12-31" for row in market_rows)
+            all(
+                row["season_status"] == "partial_as_of_2026-12-31"
+                for row in market_rows
+            )
         )
 
     def test_ucl_format_version_changes_without_merging_phase_labels(self):
@@ -942,7 +939,8 @@ class HistoryImporterTests(unittest.TestCase):
 
     def test_known_schedule_overflow_is_rejected(self):
         with self.assertRaisesRegex(
-            history_importer.HistoryImportError, "exceeding the audited schedule expectation"
+            history_importer.HistoryImportError,
+            "exceeding the audited schedule expectation",
         ):
             history_importer._season_completeness(
                 "brazil_serie_a", 2026, 381, "2026-12-31"
@@ -964,7 +962,9 @@ class HistoryImporterTests(unittest.TestCase):
         score_text = score_path.read_text(encoding="utf-8")
         market_text = market_path.read_text(encoding="utf-8")
 
-        self.assertIn(CLOSING_SENTINEL, str(history_importer.read_xlsx_rows(workbook)[1]))
+        self.assertIn(
+            CLOSING_SENTINEL, str(history_importer.read_xlsx_rows(workbook)[1])
+        )
         self.assertNotIn(CLOSING_SENTINEL, score_text)
         self.assertNotIn(CLOSING_SENTINEL, market_text)
         with market_path.open(encoding="utf-8", newline="") as handle:
@@ -1028,9 +1028,9 @@ class HistoryImporterTests(unittest.TestCase):
             writer.writerows(rows)
 
         league = manifest["leagues"][0]
-        league["score_dataset"]["sha256"] = "sha256:" + hashlib.sha256(
-            score_path.read_bytes()
-        ).hexdigest()
+        league["score_dataset"]["sha256"] = (
+            "sha256:" + hashlib.sha256(score_path.read_bytes()).hexdigest()
+        )
         league["competition_regimes"] = {"2026": {"regular": 1}}
         manifest["competition_regime_counts"] = [
             {
@@ -1040,9 +1040,7 @@ class HistoryImporterTests(unittest.TestCase):
                 "rows": 1,
             }
         ]
-        manifest["bundle_hash"] = history_importer._canonical_manifest_hash(
-            manifest
-        )
+        manifest["bundle_hash"] = history_importer._canonical_manifest_hash(manifest)
         (output_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -1098,9 +1096,7 @@ class HistoryImporterTests(unittest.TestCase):
         )
         for name, mutate, message in cases:
             with self.subTest(name=name):
-                output_dir, manifest = self._bundle(
-                    name, [_data_row(1, "08-01 20:00")]
-                )
+                output_dir, manifest = self._bundle(name, [_data_row(1, "08-01 20:00")])
                 self._tamper_csv_and_rehash(
                     output_dir,
                     manifest,

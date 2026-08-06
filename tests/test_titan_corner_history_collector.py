@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 SCRIPT = (
     Path(__file__).resolve().parents[1]
@@ -113,9 +112,7 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
             self.assertEqual(report["japan_j1_2026_regime_normalized"], 1)
             normalized = json.loads(path.read_text(encoding="utf-8"))
             by_id = {str(row["match_id"]): row for row in normalized["matches"]}
-            self.assertEqual(
-                by_id["1"]["competition_regime"], "2026_vision_regional"
-            )
+            self.assertEqual(by_id["1"]["competition_regime"], "2026_vision_regional")
             self.assertEqual(by_id["2"]["competition_regime"], "regular")
             for row in by_id.values():
                 self.assertEqual(row["source_timezone"], "Asia/Shanghai")
@@ -294,9 +291,7 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
                 )
             final = json.loads(final_path.read_text(encoding="utf-8"))
             self.assertEqual(fetched_ids, [1])
-            self.assertEqual(
-                {row["match_id"] for row in final["matches"]}, {"1", "2"}
-            )
+            self.assertEqual({row["match_id"] for row in final["matches"]}, {"1", "2"})
             self.assertNotIn(
                 "forged home", {row.get("home_team") for row in final["matches"]}
             )

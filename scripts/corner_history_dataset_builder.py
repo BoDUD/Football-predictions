@@ -12,16 +12,15 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from collections import Counter
-from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
+from collections import Counter
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
-
 
 ARTIFACT_TYPE = "soccer_corner_history_dataset_bundle"
 SCHEMA_VERSION = "2.0.0"
@@ -245,13 +244,16 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-        allow_nan=False,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     _atomic_bytes(path, payload.encode("utf-8"))
 
 
@@ -318,7 +320,9 @@ def _source_kickoff(raw: Mapping[str, Any], match_id: str) -> tuple[datetime, in
     try:
         parsed_epoch = int(epoch)
     except (TypeError, ValueError) as error:
-        raise CornerDatasetError(f"match {match_id}: kickoff_epoch is invalid") from error
+        raise CornerDatasetError(
+            f"match {match_id}: kickoff_epoch is invalid"
+        ) from error
     if parsed_epoch <= 0 or parsed_epoch != int(kickoff.timestamp()):
         raise CornerDatasetError(
             f"match {match_id}: kickoff_epoch does not match kickoff_utc"
@@ -369,9 +373,7 @@ PHASE_ALIASES = {
 
 def _normalized_phase(raw: Mapping[str, Any]) -> str:
     phase = str(raw.get("phase") or "").strip().casefold()
-    explicit = PHASE_ALIASES.get(
-        phase, phase.replace("-", "_").replace(" ", "_")
-    )
+    explicit = PHASE_ALIASES.get(phase, phase.replace("-", "_").replace(" ", "_"))
     competition = str(raw.get("competition_key") or "").strip()
     round_text = str(raw.get("round") or "").strip()
     phase_and_round = f"{phase} {round_text}".strip()
@@ -449,7 +451,9 @@ def load_source(path: str | Path) -> dict[str, Any]:
     try:
         source = json.loads(source_path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise CornerDatasetError(f"cannot read corner history: {source_path}") from error
+        raise CornerDatasetError(
+            f"cannot read corner history: {source_path}"
+        ) from error
     if not isinstance(source, dict):
         raise CornerDatasetError("corner history must contain a JSON object")
     if source.get("schema_version") != SOURCE_SCHEMA_VERSION:
@@ -511,9 +515,7 @@ def _selected_competitions(
         }
         unknown = sorted(set(values) - set(competition_by_league))
         if unknown:
-            raise CornerDatasetError(
-                "unsupported league_keys: " + ", ".join(unknown)
-            )
+            raise CornerDatasetError("unsupported league_keys: " + ", ".join(unknown))
         selected = {competition_by_league[value] for value in values}
     return tuple(key for key in COMPETITIONS if key in selected)
 
@@ -631,12 +633,16 @@ def build_dataset(
             )
         source_hash = raw.get("source_response_sha256")
         if not isinstance(source_hash, str) or not HASH_RE.fullmatch(source_hash):
-            raise CornerDatasetError(f"match {match_id}: invalid source_response_sha256")
+            raise CornerDatasetError(
+                f"match {match_id}: invalid source_response_sha256"
+            )
         fixture_fingerprint = raw.get("schedule_fixture_sha256")
         if not isinstance(fixture_fingerprint, str) or not HASH_RE.fullmatch(
             fixture_fingerprint
         ):
-            raise CornerDatasetError(f"match {match_id}: invalid schedule_fixture_sha256")
+            raise CornerDatasetError(
+                f"match {match_id}: invalid schedule_fixture_sha256"
+            )
         if fixture_fingerprint != calculate_fixture_fingerprint(raw):
             raise CornerDatasetError(
                 f"match {match_id}: schedule_fixture_sha256 does not match fixture"
@@ -651,11 +657,19 @@ def build_dataset(
             raise CornerDatasetError(
                 f"match {match_id}: source_collected_at cannot precede kickoff_utc"
             )
-        home_corners = _nonnegative_count(raw.get("home_corners"), "home_corners", match_id)
-        away_corners = _nonnegative_count(raw.get("away_corners"), "away_corners", match_id)
-        total_corners = _nonnegative_count(raw.get("total_corners"), "total_corners", match_id)
+        home_corners = _nonnegative_count(
+            raw.get("home_corners"), "home_corners", match_id
+        )
+        away_corners = _nonnegative_count(
+            raw.get("away_corners"), "away_corners", match_id
+        )
+        total_corners = _nonnegative_count(
+            raw.get("total_corners"), "total_corners", match_id
+        )
         if total_corners != home_corners + away_corners:
-            raise CornerDatasetError(f"match {match_id}: total_corners does not reconcile")
+            raise CornerDatasetError(
+                f"match {match_id}: total_corners does not reconcile"
+            )
 
         half_home = raw.get("half_home_corners")
         half_away = raw.get("half_away_corners")
@@ -677,7 +691,9 @@ def build_dataset(
                 or parsed_half_home > home_corners
                 or parsed_half_away > away_corners
             ):
-                raise CornerDatasetError(f"match {match_id}: half corners do not reconcile")
+                raise CornerDatasetError(
+                    f"match {match_id}: half corners do not reconcile"
+                )
 
         row = {
             "date": kickoff_date.isoformat(),
@@ -771,7 +787,9 @@ def build_dataset(
     try:
         source_payload = source_file.read_bytes()
     except OSError as error:
-        raise CornerDatasetError(f"cannot reread corner history: {source_file}") from error
+        raise CornerDatasetError(
+            f"cannot reread corner history: {source_file}"
+        ) from error
     _atomic_bytes(source_copy, source_payload)
     # Re-open the copied evidence before binding it into the manifest.  This
     # prevents a manifest from pointing at a missing or semantically invalid
@@ -784,9 +802,9 @@ def build_dataset(
         "artifact_type": ARTIFACT_TYPE,
         "schema_version": SCHEMA_VERSION,
         "builder_version": BUILDER_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        ).replace("+00:00", "Z"),
+        "generated_at": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "as_of_date": audit_date.isoformat(),
         "source_file": SOURCE_COPY_FILENAME,
         "source_file_sha256": _file_hash(source_copy),

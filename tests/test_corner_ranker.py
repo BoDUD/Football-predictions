@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import copy
 import csv
-from datetime import date, datetime, timedelta, timezone
 import hashlib
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
-from scripts import corner_model, corner_model_manager, corner_ranker
 from _corner_source_fixture import build_source_bound_dataset
 
+from scripts import corner_model, corner_model_manager, corner_ranker
 
 TEAMS = ("A", "B", "C", "D")
 
@@ -31,12 +31,14 @@ def write_history(path: Path, *, days: int = 16) -> None:
                 kickoff = datetime.combine(
                     match_date, datetime.min.time(), tzinfo=timezone.utc
                 )
-                fixture_hash = "sha256:" + hashlib.sha256(
-                    f"fixture:{match_id}".encode()
-                ).hexdigest()
-                response_hash = "sha256:" + hashlib.sha256(
-                    f"response:{match_id}".encode()
-                ).hexdigest()
+                fixture_hash = (
+                    "sha256:"
+                    + hashlib.sha256(f"fixture:{match_id}".encode()).hexdigest()
+                )
+                response_hash = (
+                    "sha256:"
+                    + hashlib.sha256(f"response:{match_id}".encode()).hexdigest()
+                )
                 writer.writerow(
                     [
                         match_date.isoformat(),
@@ -190,36 +192,38 @@ class CornerRankerTests(unittest.TestCase):
             win_mass = probabilities["full_win"] + 0.5 * probabilities["half_win"]
             loss_mass = probabilities["loss"] + 0.5 * probabilities["half_loss"]
             expected_probability = win_mass / (win_mass + loss_mass)
-            self.assertAlmostEqual(candidate["probability"], expected_probability, places=12)
+            self.assertAlmostEqual(
+                candidate["probability"], expected_probability, places=12
+            )
             self.assertEqual(
                 candidate["probability_basis"],
                 "half_stake_weighted_directional_mass_excluding_push",
             )
-            self.assertAlmostEqual(candidate["equivalent_win_mass"], win_mass, places=12)
-            self.assertAlmostEqual(candidate["equivalent_loss_mass"], loss_mass, places=12)
+            self.assertAlmostEqual(
+                candidate["equivalent_win_mass"], win_mass, places=12
+            )
+            self.assertAlmostEqual(
+                candidate["equivalent_loss_mass"], loss_mass, places=12
+            )
             self.assertAlmostEqual(
                 candidate["edge_pp"], (expected_probability - 0.5) * 100, places=12
             )
-            self.assertAlmostEqual(
-                sum(probabilities.values()), 1.0, places=12
-            )
+            self.assertAlmostEqual(sum(probabilities.values()), 1.0, places=12)
         corner_ranker.validate_ranking(
             ranking, self.prediction, model_dir=self.model_dir
         )
 
     def test_registered_false_flags_force_every_candidate_to_observation(self):
         ranking = self.rank()
-        self.assertFalse(
-            ranking["upstream_policy"]["formal_corner_total_eligible"]
-        )
-        self.assertFalse(
-            ranking["upstream_policy"]["formal_corner_handicap_eligible"]
-        )
+        self.assertFalse(ranking["upstream_policy"]["formal_corner_total_eligible"])
+        self.assertFalse(ranking["upstream_policy"]["formal_corner_handicap_eligible"])
         self.assertEqual(ranking["formal_count"], 0)
         self.assertIsNone(ranking["primary"])
         self.assertEqual(ranking["market_policy"]["status"], "observation_only")
         self.assertTrue(
-            ranking["market_policy"]["diagnostic_qualification_cannot_override_upstream_policy"]
+            ranking["market_policy"][
+                "diagnostic_qualification_cannot_override_upstream_policy"
+            ]
         )
         self.assertTrue(
             any(
@@ -276,7 +280,9 @@ class CornerRankerTests(unittest.TestCase):
         by_side = {item["side"]: item for item in ranking["candidates"]}
         over = by_side["over"]
         under = by_side["under"]
-        self.assertAlmostEqual(over["probability"] + under["probability"], 1.0, places=12)
+        self.assertAlmostEqual(
+            over["probability"] + under["probability"], 1.0, places=12
+        )
         self.assertAlmostEqual(over["edge_pp"], -under["edge_pp"], places=12)
         self.assertAlmostEqual(
             over["equivalent_win_mass"], under["equivalent_loss_mass"], places=12
@@ -337,7 +343,9 @@ class CornerRankerTests(unittest.TestCase):
             self.assertIn("data quality low", failures)
             self.assertIn("corner-profile evidence unavailable", failures)
             self.assertIn("market signal is unknown", failures)
-            self.assertEqual(candidate["diagnostic_qualification_status"], "unqualified")
+            self.assertEqual(
+                candidate["diagnostic_qualification_status"], "unqualified"
+            )
 
     def test_adverse_signal_stricter_gate_and_corroboration(self):
         uncorroborated = self.rank(
@@ -348,13 +356,13 @@ class CornerRankerTests(unittest.TestCase):
             self.assertIn("adverse-signal firm count 3 < 5", failures)
             self.assertIn("lacks independent", failures)
 
-        model_items = {
-            item["side"]: item for item in self.prediction["corner_totals"]
-        }
+        model_items = {item["side"]: item for item in self.prediction["corner_totals"]}
         strongest_side = max(
             ("over", "under"),
-            key=lambda side: model_items[side]["probabilities"]["full_win"]
-            + model_items[side]["probabilities"]["half_win"],
+            key=lambda side: (
+                model_items[side]["probabilities"]["full_win"]
+                + model_items[side]["probabilities"]["half_win"]
+            ),
         )
         other_side = "under" if strongest_side == "over" else "over"
         prices = {strongest_side: 3.0, other_side: 1.5}
@@ -376,7 +384,9 @@ class CornerRankerTests(unittest.TestCase):
             ]
         )
         strongest = next(
-            item for item in corroborated["candidates"] if item["side"] == strongest_side
+            item
+            for item in corroborated["candidates"]
+            if item["side"] == strongest_side
         )
         self.assertEqual(strongest["diagnostic_qualification_status"], "qualified")
         self.assertEqual(strongest["status"], "observation")
@@ -393,13 +403,7 @@ class CornerRankerTests(unittest.TestCase):
 
     def test_market_and_evidence_must_be_strictly_pre_kickoff(self):
         with self.assertRaisesRegex(corner_ranker.CornerRankerError, "before kickoff"):
-            self.rank(
-                [
-                    self.total_market(
-                        market_collected_at="2024-02-01T12:00:00Z"
-                    )
-                ]
-            )
+            self.rank([self.total_market(market_collected_at="2024-02-01T12:00:00Z")])
         with self.assertRaisesRegex(corner_ranker.CornerRankerError, "before kickoff"):
             self.rank(generated_at="2024-02-01T12:00:00Z")
         with self.assertRaisesRegex(corner_ranker.CornerRankerError, "before kickoff"):
@@ -418,7 +422,9 @@ class CornerRankerTests(unittest.TestCase):
                 tampered, self.prediction, model_dir=self.model_dir
             )
         tampered["ranking_hash"] = corner_ranker.calculate_ranking_hash(tampered)
-        with self.assertRaisesRegex(corner_ranker.CornerRankerError, "does not reproduce"):
+        with self.assertRaisesRegex(
+            corner_ranker.CornerRankerError, "does not reproduce"
+        ):
             corner_ranker.validate_ranking(
                 tampered, self.prediction, model_dir=self.model_dir
             )

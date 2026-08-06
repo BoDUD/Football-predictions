@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import argparse
 import copy
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -54,9 +54,7 @@ SUPPORTED_VERSION_PAIRS = frozenset(
 )
 MODEL_ONLY_MODE = "model_only"
 UPSTREAM_HALF_TIME_ANCHOR_MODE = "upstream_half_time_market_anchor"
-PROBABILITY_MODES = frozenset(
-    {MODEL_ONLY_MODE, UPSTREAM_HALF_TIME_ANCHOR_MODE}
-)
+PROBABILITY_MODES = frozenset({MODEL_ONLY_MODE, UPSTREAM_HALF_TIME_ANCHOR_MODE})
 IPF_TOLERANCE = 1e-12
 IPF_MAX_ITERATIONS = 10_000
 PATH_TAIL_TOLERANCE = 1e-8
@@ -69,9 +67,7 @@ MARKET_EVIDENCE_MAX_CONTAINER_ITEMS = 2_048
 MARKET_EVIDENCE_MAX_ROWS_PER_MARKET = 250
 MARKET_EVIDENCE_MAX_TOTAL_ROWS = 750
 RESULT_CODES = ("H", "D", "A")
-HTFT_CODE_ORDER = tuple(
-    half + full for half in RESULT_CODES for full in RESULT_CODES
-)
+HTFT_CODE_ORDER = tuple(half + full for half in RESULT_CODES for full in RESULT_CODES)
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -152,7 +148,10 @@ def _evidence_match_id(evidence: Mapping[str, Any] | None) -> str | None:
     for key in ("match_id", "fixture_id"):
         if key in evidence and evidence.get(key) is not None:
             candidates.append(
-                (f"market evidence.{key}", _normalize_match_id(evidence[key], key) or "")
+                (
+                    f"market evidence.{key}",
+                    _normalize_match_id(evidence[key], key) or "",
+                )
             )
     evidence_fixture = evidence.get("fixture")
     if isinstance(evidence_fixture, Mapping):
@@ -314,9 +313,11 @@ def _market_rows(
     ):
         errors.append(f"{name}.stored_complete_firm_count does not match rows")
     for index, row in enumerate(rows):
-        if not isinstance(row, Mapping) or not isinstance(row.get("bookmaker"), str) or not row[
-            "bookmaker"
-        ].strip():
+        if (
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("bookmaker"), str)
+            or not row["bookmaker"].strip()
+        ):
             errors.append(f"{name}.rows[{index}] bookmaker is invalid")
             break
         if not row_validator(row):
@@ -426,7 +427,9 @@ def _matrix_copy(value: Any, name: str) -> list[list[float]]:
 
 def _validate_htft_probabilities(value: Any) -> dict[str, float]:
     if not isinstance(value, Mapping) or set(value) != set(HTFT_CODE_ORDER):
-        raise JointScenarioError("HT/FT probabilities must contain exactly all nine codes")
+        raise JointScenarioError(
+            "HT/FT probabilities must contain exactly all nine codes"
+        )
     probabilities = {
         code: _finite(value[code], f"HT/FT probability {code}")
         for code in HTFT_CODE_ORDER
@@ -508,7 +511,9 @@ def _resolve_external_anchor_mode(
         htft_prediction.get("generated_at"), "HT/FT prediction generated_at"
     )
     if upstream_generated > generated_at or upstream_generated >= kickoff:
-        raise JointScenarioError("HT/FT prediction timing is invalid for joint generation")
+        raise JointScenarioError(
+            "HT/FT prediction timing is invalid for joint generation"
+        )
     upstream_prediction_hash = htft_prediction.get("prediction_hash")
     if not isinstance(upstream_prediction_hash, str) or not HASH_RE.fullmatch(
         upstream_prediction_hash
@@ -756,17 +761,23 @@ def align_joint_distribution(
     ):
         raise JointScenarioError("max_iterations must be a positive integer")
     if not isinstance(seed, Sequence) or len(seed) != 3:
-        raise JointScenarioError("joint seed must contain three half-time-result planes")
+        raise JointScenarioError(
+            "joint seed must contain three half-time-result planes"
+        )
     home_count = len(score_target)
     away_count = len(score_target[0])
     aligned: list[list[list[float]]] = []
     for half_index, plane in enumerate(seed):
         if not isinstance(plane, Sequence) or len(plane) != home_count:
-            raise JointScenarioError("joint seed score bounds do not match target matrix")
+            raise JointScenarioError(
+                "joint seed score bounds do not match target matrix"
+            )
         normalized_plane: list[list[float]] = []
         for home, row in enumerate(plane):
             if not isinstance(row, Sequence) or len(row) != away_count:
-                raise JointScenarioError("joint seed score bounds do not match target matrix")
+                raise JointScenarioError(
+                    "joint seed score bounds do not match target matrix"
+                )
             normalized_row = [
                 _finite(value, f"seed[{half_index}][{home}][{away}]")
                 for away, value in enumerate(row)
@@ -838,10 +849,7 @@ def align_joint_distribution(
         raise JointScenarioError("joint-scenario IPF did not converge")
 
     total = math.fsum(
-        probability
-        for plane in aligned
-        for row in plane
-        for probability in row
+        probability for plane in aligned for row in plane for probability in row
     )
     if abs(total - 1.0) > tolerance:
         raise JointScenarioError("aligned joint distribution does not sum to one")
@@ -923,9 +931,7 @@ def _normalize_market_evidence(
     fixture: Mapping[str, Any],
     expected_match_id: Any = None,
 ) -> dict[str, Any]:
-    normalized_expected_id = _normalize_match_id(
-        expected_match_id, "expected_match_id"
-    )
+    normalized_expected_id = _normalize_match_id(expected_match_id, "expected_match_id")
     evidence_match_id = _evidence_match_id(evidence)
     if (
         normalized_expected_id is not None
@@ -1135,7 +1141,9 @@ def _joint_cells(
                         "home_goals": home,
                         "away_goals": away,
                         "structurally_feasible": raw_seed > 0.0,
-                        "prior_probability": raw_seed / seed_mass if raw_seed > 0.0 else 0.0,
+                        "prior_probability": raw_seed / seed_mass
+                        if raw_seed > 0.0
+                        else 0.0,
                         "probability": probability,
                     }
                 )
@@ -1313,7 +1321,9 @@ def _marginals_from_cells(
         if identity in seen:
             raise JointScenarioError("joint_cells contain duplicate identities")
         seen.add(identity)
-        probability = _finite(cell.get("probability"), f"joint_cells[{index}].probability")
+        probability = _finite(
+            cell.get("probability"), f"joint_cells[{index}].probability"
+        )
         prior = _finite(
             cell.get("prior_probability"),
             f"joint_cells[{index}].prior_probability",
@@ -1335,19 +1345,17 @@ def _marginals_from_cells(
                 "joint cell feasibility must agree with positive path-prior support"
             )
         if not feasible and probability > 0.0:
-            raise JointScenarioError("structurally impossible joint paths must remain zero")
+            raise JointScenarioError(
+                "structurally impossible joint paths must remain zero"
+            )
         score_matrix[home][away] += probability
         htft[str(code)] += probability
-    expected_count = len(HTFT_CODE_ORDER) * (home_goals_max + 1) * (
-        away_goals_max + 1
-    )
+    expected_count = len(HTFT_CODE_ORDER) * (home_goals_max + 1) * (away_goals_max + 1)
     if len(seen) != expected_count:
         raise JointScenarioError("joint_cells are not an exhaustive HT/FT x score grid")
     if abs(math.fsum(htft.values()) - 1.0) > 1e-9:
         raise JointScenarioError("joint cell probabilities must sum to one")
-    prior_total = math.fsum(
-        float(cell["prior_probability"]) for cell in cells
-    )
+    prior_total = math.fsum(float(cell["prior_probability"]) for cell in cells)
     if abs(prior_total - 1.0) > 1e-9:
         raise JointScenarioError("joint path-prior probabilities must sum to one")
     return score_matrix, htft
@@ -1403,10 +1411,9 @@ def _validate_registered_inputs(
             "registered HT/FT model requires a dataset_manifest_hash binding"
         )
     full_component = model.get("components", {}).get("full_time")
-    if (
-        not isinstance(full_component, Mapping)
-        or score_prediction.get("model_hash") != full_component.get("model_hash")
-    ):
+    if not isinstance(full_component, Mapping) or score_prediction.get(
+        "model_hash"
+    ) != full_component.get("model_hash"):
         raise JointScenarioError(
             "canonical score prediction is not bound to the HT/FT full-time component"
         )
@@ -1540,7 +1547,9 @@ def _build_prediction(
             second_raw_omitted=float(second_tail["raw_omitted_probability"]),
         )
     except joint_path_kernel.PathKernelError as exc:
-        raise JointScenarioError(f"path support feasibility audit failed: {exc}") from exc
+        raise JointScenarioError(
+            f"path support feasibility audit failed: {exc}"
+        ) from exc
     pre_ipf_feasibility = feasibility_kernel["hall_audit"]
     if pre_ipf_feasibility.get("feasible") is not True:
         raise JointScenarioError(
@@ -1563,9 +1572,7 @@ def _build_prediction(
     seed_tail.update(
         {
             "tolerance": PATH_TAIL_TOLERANCE,
-            "tolerance_met": (
-                seed_tail["omitted_probability"] <= PATH_TAIL_TOLERANCE
-            ),
+            "tolerance_met": (seed_tail["omitted_probability"] <= PATH_TAIL_TOLERANCE),
         }
     )
     if seed_tail["tolerance_met"] is not True:
@@ -1592,9 +1599,7 @@ def _build_prediction(
         reconstructed = joint_path_kernel.validate_kernel(path_kernel)
     except joint_path_kernel.PathKernelError as exc:
         raise JointScenarioError(f"compact path kernel is invalid: {exc}") from exc
-    if content_hash(path_kernel["hall_audit"]) != content_hash(
-        pre_ipf_feasibility
-    ):
+    if content_hash(path_kernel["hall_audit"]) != content_hash(pre_ipf_feasibility):
         raise JointScenarioError(
             "post-IPF path kernel does not preserve the pre-IPF feasibility audit"
         )
@@ -1640,9 +1645,7 @@ def _build_prediction(
         },
         "market_evidence": evidence,
         "solver": solver,
-        "support_feasibility_audit": _support_feasibility_binding(
-            pre_ipf_feasibility
-        ),
+        "support_feasibility_audit": _support_feasibility_binding(pre_ipf_feasibility),
         "path_kernel": path_kernel,
         "tail_mass": {
             "canonical_full_time": copy.deepcopy(score_prediction.get("tail_mass")),
@@ -1737,13 +1740,17 @@ def _validate_external_anchor_artifact(
             "external anchor upstream prediction time must use canonical UTC"
         )
     if upstream_generated > generated_at or upstream_generated >= kickoff:
-        raise JointScenarioError("external anchor upstream prediction timing is invalid")
+        raise JointScenarioError(
+            "external anchor upstream prediction timing is invalid"
+        )
     if audit.get("upstream_prediction_hash") != htft_input_binding.get(
         "prediction_hash"
     ):
         raise JointScenarioError("external anchor HT/FT prediction hash does not match")
     if audit.get("same_price_independent_ev_authorized") is not False:
-        raise JointScenarioError("external anchor price cannot authorize independent EV")
+        raise JointScenarioError(
+            "external anchor price cannot authorize independent EV"
+        )
     if probability_mode == MODEL_ONLY_MODE:
         expected = {
             "enabled": False,
@@ -1764,7 +1771,9 @@ def _validate_external_anchor_artifact(
             raise JointScenarioError("model-only external anchor audit is malformed")
         return None
     if probability_mode != UPSTREAM_HALF_TIME_ANCHOR_MODE:
-        raise JointScenarioError("unsupported probability mode for external anchor audit")
+        raise JointScenarioError(
+            "unsupported probability mode for external anchor audit"
+        )
     if (
         audit.get("enabled") is not True
         or audit.get("role") != "upstream_probability_input"
@@ -1782,7 +1791,11 @@ def _validate_external_anchor_artifact(
     )
     if audit.get("captured_at") != canonical_captured_at:
         raise JointScenarioError("external anchor captured_at must use canonical UTC")
-    if captured_at > upstream_generated or captured_at > generated_at or captured_at >= kickoff:
+    if (
+        captured_at > upstream_generated
+        or captured_at > generated_at
+        or captured_at >= kickoff
+    ):
         raise JointScenarioError("external half-time anchor timing is invalid")
     probabilities = _validate_result_probabilities(
         audit.get("probabilities"), "external_anchor_audit.probabilities"
@@ -1838,7 +1851,9 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
         fixture.get("kickoff"), "fixture.kickoff"
     )
     if fixture.get("kickoff") != canonical_kickoff:
-        raise JointScenarioError("fixture.kickoff must use canonical UTC representation")
+        raise JointScenarioError(
+            "fixture.kickoff must use canonical UTC representation"
+        )
     if generated_at >= kickoff:
         raise JointScenarioError("generated_at must be strictly before kickoff")
     for field in ("home_team", "away_team", "competition_key", "unknown_team_policy"):
@@ -1880,8 +1895,10 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
         if not isinstance(binding, Mapping):
             raise JointScenarioError(f"inputs.{name} binding is missing")
         for key, value in binding.items():
-            if value is not None and key.endswith("hash") and (
-                not isinstance(value, str) or not HASH_RE.fullmatch(value)
+            if (
+                value is not None
+                and key.endswith("hash")
+                and (not isinstance(value, str) or not HASH_RE.fullmatch(value))
             ):
                 raise JointScenarioError(f"inputs.{name}.{key} must be a SHA-256 hash")
     expected_fixture_hash = content_hash(_fixture_identity(fixture))
@@ -1914,7 +1931,9 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
     if evidence.get("provided") is True:
         raw_evidence = evidence.get("payload")
         if not isinstance(raw_evidence, Mapping):
-            raise JointScenarioError("market_evidence.payload must preserve its input bundle")
+            raise JointScenarioError(
+                "market_evidence.payload must preserve its input bundle"
+            )
         expected_evidence = _normalize_market_evidence(
             raw_evidence,
             generated_at=generated_at,
@@ -1933,10 +1952,10 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
     else:
         raise JointScenarioError("market_evidence.provided must be boolean")
     if _canonical_bytes(evidence) != _canonical_bytes(expected_evidence):
-        raise JointScenarioError("market evidence audit does not reproduce from its payload")
-    if inputs["market_evidence"].get("content_hash") != evidence.get(
-        "content_hash"
-    ):
+        raise JointScenarioError(
+            "market evidence audit does not reproduce from its payload"
+        )
+    if inputs["market_evidence"].get("content_hash") != evidence.get("content_hash"):
         raise JointScenarioError("market evidence hash bindings do not match")
 
     score_matrix = _validate_score_marginal_payload(
@@ -1945,9 +1964,8 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
     home_max = len(score_matrix) - 1
     away_max = len(score_matrix[0]) - 1
     htft_payload = payload.get("htft_marginal")
-    if (
-        not isinstance(htft_payload, Mapping)
-        or htft_payload.get("class_order") != list(HTFT_CODE_ORDER)
+    if not isinstance(htft_payload, Mapping) or htft_payload.get("class_order") != list(
+        HTFT_CODE_ORDER
     ):
         raise JointScenarioError("HT/FT marginal metadata is invalid")
     htft_probabilities = _validate_htft_probabilities(
@@ -2020,10 +2038,13 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
             full_away_goals_max=away_max,
         )
         kernel_tail = reconstructed_kernel["tail_mass"]
-        if abs(
-            kernel_seed_tail["retained_probability"]
-            - float(kernel_tail["conditional_convolution_retained_probability"])
-        ) > 1e-12:
+        if (
+            abs(
+                kernel_seed_tail["retained_probability"]
+                - float(kernel_tail["conditional_convolution_retained_probability"])
+            )
+            > 1e-12
+        ):
             raise JointScenarioError(
                 "path_kernel conditional convolution tail does not reproduce"
             )
@@ -2086,8 +2107,7 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
     if anchor_half_marginal is not None:
         calculated_half = _htft_row_marginal(calculated_htft)
         if any(
-            abs(calculated_half[result] - anchor_half_marginal[result])
-            > IPF_TOLERANCE
+            abs(calculated_half[result] - anchor_half_marginal[result]) > IPF_TOLERANCE
             for result in RESULT_CODES
         ):
             raise JointScenarioError(
@@ -2140,30 +2160,42 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
         actual = solver.get(field)
         expected = reproduced_solver.get(field)
         if isinstance(expected, float):
-            if not math.isfinite(float(actual)) or abs(float(actual) - expected) > 1e-15:
+            if (
+                not math.isfinite(float(actual))
+                or abs(float(actual) - expected) > 1e-15
+            ):
                 raise JointScenarioError(f"solver.{field} does not reproduce")
         elif actual != expected:
             raise JointScenarioError(f"solver.{field} does not reproduce")
 
     if payload.get("joint_top_two") != expected_top_two:
-        raise JointScenarioError("joint_top_two does not match joint probability ranking")
-    expected_pair_mass = math.fsum(item["probability"] for item in expected_top_two)
-    if abs(
-        _finite(
-            payload.get("joint_top_two_probability_mass"),
-            "joint_top_two_probability_mass",
+        raise JointScenarioError(
+            "joint_top_two does not match joint probability ranking"
         )
-        - expected_pair_mass
-    ) > 1e-15:
+    expected_pair_mass = math.fsum(item["probability"] for item in expected_top_two)
+    if (
+        abs(
+            _finite(
+                payload.get("joint_top_two_probability_mass"),
+                "joint_top_two_probability_mass",
+            )
+            - expected_pair_mass
+        )
+        > 1e-15
+    ):
         raise JointScenarioError("joint_top_two_probability_mass is inconsistent")
     if payload.get("derived") != _derived_full_time_fields(calculated_score):
         raise JointScenarioError("derived football probabilities do not reproduce")
     if payload.get("derived_field_audits") != _derived_field_audits(
         str(probability_mode)
     ):
-        raise JointScenarioError("derived-field provenance and safety audits are invalid")
+        raise JointScenarioError(
+            "derived-field provenance and safety audits are invalid"
+        )
     tail = payload.get("tail_mass")
-    path_tail = tail.get("feasible_path_convolution") if isinstance(tail, Mapping) else None
+    path_tail = (
+        tail.get("feasible_path_convolution") if isinstance(tail, Mapping) else None
+    )
     if (
         not isinstance(path_tail, Mapping)
         or path_tail.get("tolerance") != PATH_TAIL_TOLERANCE
@@ -2187,9 +2219,7 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
                     path_tail.get("retained_probability"),
                     "path retained probability",
                 )
-                - float(
-                    kernel_tail["conditional_convolution_retained_probability"]
-                )
+                - float(kernel_tail["conditional_convolution_retained_probability"])
             )
             > 1e-12
             or abs(
@@ -2197,9 +2227,7 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
                     path_tail.get("omitted_probability"),
                     "path omitted probability",
                 )
-                - float(
-                    kernel_tail["conditional_convolution_omitted_probability"]
-                )
+                - float(kernel_tail["conditional_convolution_omitted_probability"])
             )
             > 1e-12
         ):
@@ -2210,14 +2238,20 @@ def validate_prediction(payload: Mapping[str, Any]) -> None:
             ("half_time_component", "half_raw_omitted_probability"),
             ("second_half_component", "second_raw_omitted_probability"),
         ):
-            component_tail = tail.get(component_name) if isinstance(tail, Mapping) else None
-            if not isinstance(component_tail, Mapping) or abs(
-                _finite(
-                    component_tail.get("raw_omitted_probability"),
-                    f"{component_name} raw omitted probability",
+            component_tail = (
+                tail.get(component_name) if isinstance(tail, Mapping) else None
+            )
+            if (
+                not isinstance(component_tail, Mapping)
+                or abs(
+                    _finite(
+                        component_tail.get("raw_omitted_probability"),
+                        f"{component_name} raw omitted probability",
+                    )
+                    - float(kernel_tail[kernel_key])
                 )
-                - float(kernel_tail[kernel_key])
-            ) > 1e-15:
+                > 1e-15
+            ):
                 raise JointScenarioError(
                     f"{component_name} tail does not match path_kernel"
                 )
@@ -2267,9 +2301,12 @@ def save_prediction(prediction: Mapping[str, Any], path: str | Path) -> Path:
     validate_prediction(prediction)
     destination = Path(path).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(
-        prediction, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
-    ) + "\n"
+    text = (
+        json.dumps(
+            prediction, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
+        )
+        + "\n"
+    )
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -2302,7 +2339,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-match-id",
         help="optional fixture ID that market evidence must match",
     )
-    predict.add_argument("--generated-at", required=True, help="timezone-aware ISO time")
+    predict.add_argument(
+        "--generated-at", required=True, help="timezone-aware ISO time"
+    )
     predict.add_argument("--output", required=True, help="output prediction JSON")
 
     validate = subparsers.add_parser(
@@ -2321,9 +2360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             score_prediction = load_json(
                 arguments.score_prediction, "canonical score prediction"
             )
-            htft_prediction = load_json(
-                arguments.htft_prediction, "HT/FT prediction"
-            )
+            htft_prediction = load_json(arguments.htft_prediction, "HT/FT prediction")
             evidence = (
                 load_json(arguments.market_evidence, "market evidence")
                 if arguments.market_evidence

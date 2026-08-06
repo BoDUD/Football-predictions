@@ -26,15 +26,15 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from datetime import date, datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import random
 import re
 import sys
 import tempfile
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:  # Repository-root imports.
@@ -63,9 +63,7 @@ COMPETITION_REGIME_POLICY = {
     "excluded_regimes_usage": "counted_for_drift_audit_only_not_fit_or_scored",
     "special_regimes_are_not_merged_into_regular_strengths": True,
 }
-FORMAL_COMPETITION_REGIMES = frozenset(
-    COMPETITION_REGIME_POLICY["allowed_regimes"]
-)
+FORMAL_COMPETITION_REGIMES = frozenset(COMPETITION_REGIME_POLICY["allowed_regimes"])
 MODEL_PAIR_MASS_THRESHOLD = 0.46
 MARKET_PAIR_MASS_THRESHOLD = 0.50
 EPSILON = 1e-15
@@ -153,7 +151,9 @@ def _canonical_hash(value: Any) -> str:
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise HoldoutEvaluationError("evaluation contains non-canonical values") from exc
+        raise HoldoutEvaluationError(
+            "evaluation contains non-canonical values"
+        ) from exc
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
@@ -199,8 +199,7 @@ def _promotion_metadata(
     competition_regime_policy_matches_manager: bool = True,
 ) -> dict[str, Any]:
     promoted_run = (
-        fit_configuration_matches_promoted
-        and bootstrap_configuration_matches_promoted
+        fit_configuration_matches_promoted and bootstrap_configuration_matches_promoted
     )
     return {
         "configuration_status": (
@@ -453,7 +452,10 @@ def _load_score_rows(
             kickoff = _canonical_utc(
                 row.get("kickoff_utc"), f"row {row_number} kickoff_utc"
             )
-            if datetime.fromisoformat(kickoff.replace("Z", "+00:00")).date() != match_date:
+            if (
+                datetime.fromisoformat(kickoff.replace("Z", "+00:00")).date()
+                != match_date
+            ):
                 raise HoldoutEvaluationError(
                     f"{path.name} row {row_number}: date and kickoff_utc disagree"
                 )
@@ -539,7 +541,10 @@ def _load_score_rows(
     return sorted(
         rows,
         key=lambda row: (
-            row["date"], row["kickoff_utc"], row["home_team"], row["away_team"]
+            row["date"],
+            row["kickoff_utc"],
+            row["home_team"],
+            row["away_team"],
         ),
     )
 
@@ -574,7 +579,9 @@ def _load_opening_consensus(
     with handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
-            raise HoldoutEvaluationError(f"opening-market CSV has no header: {path.name}")
+            raise HoldoutEvaluationError(
+                f"opening-market CSV has no header: {path.name}"
+            )
         missing = sorted(MARKET_REQUIRED_COLUMNS - set(reader.fieldnames))
         if missing:
             raise HoldoutEvaluationError(
@@ -631,7 +638,9 @@ def _load_opening_consensus(
             for result in htft_model.RESULTS
         }
         total = math.fsum(probabilities.values())
-        probabilities = {result: value / total for result, value in probabilities.items()}
+        probabilities = {
+            result: value / total for result, value in probabilities.items()
+        }
         consensus[key] = {
             "probabilities": probabilities,
             "bookmaker_count": len(book_names),
@@ -651,15 +660,9 @@ def _new_accumulator(threshold: float) -> dict[str, Any]:
         "pair_covered_count": 0,
         "pair_hit_count": 0,
         "class_support": {name: 0 for name in htft_model.HTFT_CLASSES},
-        "class_probability_sum": {
-            name: 0.0 for name in htft_model.HTFT_CLASSES
-        },
-        "class_top_one_predictions": {
-            name: 0 for name in htft_model.HTFT_CLASSES
-        },
-        "class_top_one_true_positives": {
-            name: 0 for name in htft_model.HTFT_CLASSES
-        },
+        "class_probability_sum": {name: 0.0 for name in htft_model.HTFT_CLASSES},
+        "class_top_one_predictions": {name: 0 for name in htft_model.HTFT_CLASSES},
+        "class_top_one_true_positives": {name: 0 for name in htft_model.HTFT_CLASSES},
     }
 
 
@@ -687,9 +690,7 @@ def _add_paired_cohort_score(
         cohorts["overall"], candidate, baseline, actual_class, group=group
     )
     cohort = "league_average_fallback" if used_fallback else "known_teams"
-    _add_paired_score(
-        cohorts[cohort], candidate, baseline, actual_class, group=group
-    )
+    _add_paired_score(cohorts[cohort], candidate, baseline, actual_class, group=group)
 
 
 def _finalize_paired_cohorts(
@@ -708,18 +709,26 @@ def _finalize_paired_cohorts(
     }
 
 
-def _validate_probability_vector(probabilities: Mapping[str, float]) -> dict[str, float]:
+def _validate_probability_vector(
+    probabilities: Mapping[str, float],
+) -> dict[str, float]:
     if set(probabilities) != set(htft_model.HTFT_CLASSES):
-        raise HoldoutEvaluationError("prediction does not contain all nine HT/FT classes")
+        raise HoldoutEvaluationError(
+            "prediction does not contain all nine HT/FT classes"
+        )
     values = {name: float(probabilities[name]) for name in htft_model.HTFT_CLASSES}
     if any(not math.isfinite(value) or value < 0.0 for value in values.values()):
-        raise HoldoutEvaluationError("HT/FT probabilities must be finite and non-negative")
+        raise HoldoutEvaluationError(
+            "HT/FT probabilities must be finite and non-negative"
+        )
     if abs(math.fsum(values.values()) - 1.0) > 1e-9:
         raise HoldoutEvaluationError("HT/FT probabilities must sum to one")
     return values
 
 
-def _losses(probabilities: Mapping[str, float], actual_class: str) -> tuple[float, float]:
+def _losses(
+    probabilities: Mapping[str, float], actual_class: str
+) -> tuple[float, float]:
     values = _validate_probability_vector(probabilities)
     if actual_class not in values:
         raise HoldoutEvaluationError("actual HT/FT class is invalid")
@@ -802,9 +811,9 @@ def _bootstrap_delta(
     for observation in observations:
         group = str(observation["group"])
         groups.setdefault(group, []).append(float(observation[field]))
-    observed = math.fsum(
-        value for values in groups.values() for value in values
-    ) / len(observations)
+    observed = math.fsum(value for values in groups.values() for value in values) / len(
+        observations
+    )
     rng = random.Random(seed)
     samples: list[float] = []
     for _ in range(repetitions):
@@ -920,8 +929,7 @@ def _finalize_accumulator(accumulator: Mapping[str, Any]) -> dict[str, Any]:
                 ),
                 "calibration_error_pp": (
                     (
-                        accumulator["class_probability_sum"][name]
-                        / sample_count
+                        accumulator["class_probability_sum"][name] / sample_count
                         - accumulator["class_support"][name] / sample_count
                     )
                     * 100
@@ -1038,9 +1046,7 @@ def _add_context_slice_score(
             actual_class,
             used_fallback=used_fallback,
         )
-        _add_score(
-            accumulator["baseline"], baseline_probabilities, actual_class
-        )
+        _add_score(accumulator["baseline"], baseline_probabilities, actual_class)
         _add_paired_score(
             accumulator["paired"],
             model_probabilities,
@@ -1088,8 +1094,7 @@ def _finalize_context_slices(
             for value, accumulator in sorted(values.items())
         }
         for dimension, values in (
-            (name, slices.get(name, {}))
-            for name in ("format_version", "phase_group")
+            (name, slices.get(name, {})) for name in ("format_version", "phase_group")
         )
     }
 
@@ -1157,7 +1162,9 @@ def _write_training_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
-def _historical_model_timestamp(model: Mapping[str, Any], timestamp: str) -> dict[str, Any]:
+def _historical_model_timestamp(
+    model: Mapping[str, Any], timestamp: str
+) -> dict[str, Any]:
     result = copy.deepcopy(model)
     result["generated_at"] = timestamp
     for component in result["components"].values():
@@ -1263,9 +1270,7 @@ def _fit_and_score_split(
     training_candidates = [
         row for row in rows if row["season"] <= split["training_season_max"]
     ]
-    test_candidates = [
-        row for row in rows if row["season"] == split["test_season"]
-    ]
+    test_candidates = [row for row in rows if row["season"] == split["test_season"]]
     training_rows, excluded_training_rows = _partition_formal_regimes(
         training_candidates
     )
@@ -1376,9 +1381,7 @@ def _fit_and_score_split(
                 rho_min=fit_config["rho_min"],
                 rho_max=fit_config["rho_max"],
                 rho_step=fit_config["rho_step"],
-                association_smoothing_alpha=fit_config[
-                    "association_smoothing_alpha"
-                ],
+                association_smoothing_alpha=fit_config["association_smoothing_alpha"],
                 association_power=fit_config["association_power"],
                 competition_key=league_key,
                 dataset_manifest_hash=manifest_hash,
@@ -1393,9 +1396,9 @@ def _fit_and_score_split(
     }
     for row in test_rows:
         kickoff = row["kickoff_utc"]
-        if datetime.fromisoformat(kickoff.replace("Z", "+00:00")) <= datetime.fromisoformat(
-            generated_at.replace("Z", "+00:00")
-        ):
+        if datetime.fromisoformat(
+            kickoff.replace("Z", "+00:00")
+        ) <= datetime.fromisoformat(generated_at.replace("Z", "+00:00")):
             raise HoldoutEvaluationError(
                 f"{league_key} {split['split_id']}: prediction is not before kickoff"
             )
@@ -1626,9 +1629,7 @@ def _aggregate_split_cohorts(
         [item["baseline"] for item in split_accumulators],
         threshold=MODEL_PAIR_MASS_THRESHOLD,
     )
-    paired = _merge_paired_accumulators(
-        [item["paired"] for item in split_accumulators]
-    )
+    paired = _merge_paired_accumulators([item["paired"] for item in split_accumulators])
     context_slices = _merge_context_slices(split_accumulators)
     return {
         "model_only": _finalize_cohorts(model),
@@ -1704,7 +1705,11 @@ def evaluate_bundle(
     """Evaluate every league in an audited history-importer bundle."""
 
     root, manifest_file, manifest = _resolve_manifest(dataset_dir, manifest_path)
-    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
         raise HoldoutEvaluationError("iterations must be a positive integer")
     if (
         isinstance(bootstrap_repetitions, bool)
@@ -1739,13 +1744,11 @@ def evaluate_bundle(
         and bootstrap_seed == BOOTSTRAP_SEED
     )
     promoted_run = (
-        fit_configuration_matches_promoted
-        and bootstrap_configuration_matches_promoted
+        fit_configuration_matches_promoted and bootstrap_configuration_matches_promoted
     )
     if not promoted_run and experimental_override is not True:
         raise HoldoutEvaluationError(
-            "non-promoted fit or bootstrap settings require "
-            "experimental_override=True"
+            "non-promoted fit or bootstrap settings require experimental_override=True"
         )
     run_splits = _splits_for_run(promoted_run=promoted_run)
     leagues_value = manifest["leagues"]
@@ -2005,11 +2008,7 @@ def _rebuild_split_evidence(
     paired_accumulator = paired_cohorts["overall"]
     context_slices = _new_context_slice_accumulators()
     expected_split = next(
-        (
-            item
-            for item in expected_splits
-            if item["split_id"] == split.get("split_id")
-        ),
+        (item for item in expected_splits if item["split_id"] == split.get("split_id")),
         None,
     )
     if expected_split is None:
@@ -2154,14 +2153,20 @@ def _rebuild_split_evidence(
     counts = baseline_metadata.get("training_class_counts")
     if not isinstance(counts, Mapping) or set(counts) != set(htft_model.HTFT_CLASSES):
         raise HoldoutEvaluationError("baseline training_class_counts are invalid")
-    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts.values()):
-        raise HoldoutEvaluationError("baseline class counts must be non-negative integers")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in counts.values()
+    ):
+        raise HoldoutEvaluationError(
+            "baseline class counts must be non-negative integers"
+        )
     if sum(counts.values()) != split.get("training_match_count"):
-        raise HoldoutEvaluationError("baseline class counts do not match training count")
+        raise HoldoutEvaluationError(
+            "baseline class counts do not match training count"
+        )
     denominator = sum(counts.values()) + alpha * len(htft_model.HTFT_CLASSES)
     expected_baseline_probabilities = {
-        name: (counts[name] + alpha) / denominator
-        for name in htft_model.HTFT_CLASSES
+        name: (counts[name] + alpha) / denominator for name in htft_model.HTFT_CLASSES
     }
     _require_same(
         baseline_metadata.get("probabilities"),
@@ -2202,7 +2207,7 @@ def _rebuild_split_evidence(
         observed_test_regimes[competition_regime] = (
             observed_test_regimes.get(competition_regime, 0) + 1
         )
-        season_status = _optional_context_value(
+        _season_status = _optional_context_value(
             forecast.get("season_status"),
             default=LEGACY_SEASON_STATUS,
             name="forecast.season_status",
@@ -2282,7 +2287,9 @@ def _rebuild_split_evidence(
         research = forecast.get("research_opening_market")
         if research is not None:
             if not isinstance(research, Mapping):
-                raise HoldoutEvaluationError("research forecast must be an object or null")
+                raise HoldoutEvaluationError(
+                    "research forecast must be an object or null"
+                )
             if research.get("policy") != RESEARCH_MARKET_POLICY:
                 raise HoldoutEvaluationError("research forecast policy is invalid")
             research_probabilities = _validate_probability_vector(
@@ -2383,8 +2390,7 @@ def _rebuild_split_evidence(
     if (
         research_summary.get("policy") != RESEARCH_MARKET_POLICY
         or research_summary.get("research_only") is not True
-        or research_summary.get("collection_time_status")
-        != "unavailable_in_source"
+        or research_summary.get("collection_time_status") != "unavailable_in_source"
         or research_summary.get("official_anchor_interface_used") is not False
     ):
         raise HoldoutEvaluationError("split research policy was weakened")
@@ -2397,7 +2403,10 @@ def _rebuild_split_evidence(
     if research_summary.get("anchor_available_count") != anchor_count:
         raise HoldoutEvaluationError("research anchor count does not match forecasts")
     expected_availability = anchor_count / len(forecasts)
-    if abs(float(research_summary.get("anchor_availability")) - expected_availability) > 1e-12:
+    if (
+        abs(float(research_summary.get("anchor_availability")) - expected_availability)
+        > 1e-12
+    ):
         raise HoldoutEvaluationError("research anchor availability is incorrect")
     expected_bookmaker_summary = {
         "minimum": min(bookmaker_counts) if bookmaker_counts else None,
@@ -2554,7 +2563,9 @@ def _verify_source_binding(
                 expected_training_class_counts[row["actual_class"]] += 1
             baseline = split.get("league_empirical_frequency_baseline")
             if not isinstance(baseline, Mapping):
-                raise HoldoutEvaluationError("source-bound baseline metadata is missing")
+                raise HoldoutEvaluationError(
+                    "source-bound baseline metadata is missing"
+                )
             if test_rows:
                 _require_same(
                     baseline.get("training_class_counts"),
@@ -2663,9 +2674,10 @@ def _verify_source_binding(
                     raise HoldoutEvaluationError(
                         f"{league_key} source-bound model hash does not reproduce"
                     )
-                if split.get("model_training_data_hash") != reproduced_model[
-                    "training"
-                ]["source_data_hash"]:
+                if (
+                    split.get("model_training_data_hash")
+                    != reproduced_model["training"]["source_data_hash"]
+                ):
                     raise HoldoutEvaluationError(
                         f"{league_key} source-bound training data hash does not reproduce"
                     )
@@ -2740,8 +2752,7 @@ def validate_evaluation(
         or evaluation.get("complete_prekickoff_nine_way_htft_odds_available")
         is not False
         or evaluation.get("ev_roi_evaluation_available") is not False
-        or evaluation.get("evaluation_scope")
-        != "nine_class_probability_accuracy_only"
+        or evaluation.get("evaluation_scope") != "nine_class_probability_accuracy_only"
     ):
         raise HoldoutEvaluationError("formal HT/FT eligibility scope is invalid")
     if evaluation.get("evaluator_version") != EVALUATOR_VERSION:
@@ -2755,14 +2766,17 @@ def validate_evaluation(
         raise HoldoutEvaluationError("bootstrap_config is missing")
     repetitions = bootstrap.get("repetitions")
     seed = bootstrap.get("seed")
-    if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
+    if (
+        isinstance(repetitions, bool)
+        or not isinstance(repetitions, int)
+        or repetitions < 1
+    ):
         raise HoldoutEvaluationError("bootstrap repetitions are invalid")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise HoldoutEvaluationError("bootstrap seed is invalid")
     fit_config = evaluation.get("fit_config")
-    if (
-        not isinstance(fit_config, Mapping)
-        or set(fit_config) != set(PROMOTED_FIT_CONFIG)
+    if not isinstance(fit_config, Mapping) or set(fit_config) != set(
+        PROMOTED_FIT_CONFIG
     ):
         raise HoldoutEvaluationError("fit_config keys are invalid")
     for name in (
@@ -2779,10 +2793,18 @@ def validate_evaluation(
         "baseline_smoothing_alpha",
     ):
         value = fit_config.get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
             raise HoldoutEvaluationError(f"fit_config.{name} is invalid")
     iterations = fit_config.get("iterations")
-    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
         raise HoldoutEvaluationError("fit_config.iterations is invalid")
     if fit_config.get("seed_method") != "empirical_association":
         raise HoldoutEvaluationError("fit_config seed_method is invalid")
@@ -2793,14 +2815,13 @@ def validate_evaluation(
         repetitions == DEFAULT_BOOTSTRAP_REPETITIONS and seed == BOOTSTRAP_SEED
     )
     promoted_run = (
-        fit_configuration_matches_promoted
-        and bootstrap_configuration_matches_promoted
+        fit_configuration_matches_promoted and bootstrap_configuration_matches_promoted
     )
     declared_regime_policy = evaluation.get("competition_regime_policy")
-    competition_regime_policy_matches_manager = (
-        isinstance(declared_regime_policy, Mapping)
-        and _canonical_hash(declared_regime_policy)
-        == _canonical_hash(COMPETITION_REGIME_POLICY)
+    competition_regime_policy_matches_manager = isinstance(
+        declared_regime_policy, Mapping
+    ) and _canonical_hash(declared_regime_policy) == _canonical_hash(
+        COMPETITION_REGIME_POLICY
     )
     _require_same(
         declared_regime_policy,
@@ -2829,13 +2850,14 @@ def validate_evaluation(
         or policy.get("collection_time_status") != "unavailable_in_source"
         or policy.get("official_anchor_interface_used") is not False
         or policy.get("production_eligibility") is not False
-        or policy.get("complete_prekickoff_nine_way_htft_odds_available")
-        is not False
+        or policy.get("complete_prekickoff_nine_way_htft_odds_available") is not False
         or policy.get("ev_roi_evaluation_available") is not False
     ):
         raise HoldoutEvaluationError("research market policy was weakened")
     if _contains_key(evaluation, {"captured_at", "anchor_timestamp"}):
-        raise HoldoutEvaluationError("untimestamped research data contains a fake timestamp")
+        raise HoldoutEvaluationError(
+            "untimestamped research data contains a fake timestamp"
+        )
     split_policy = evaluation.get("split_policy")
     if (
         not isinstance(split_policy, Mapping)
@@ -2860,7 +2882,11 @@ def validate_evaluation(
         if not isinstance(league, Mapping):
             raise HoldoutEvaluationError("league evaluation must be an object")
         league_key = league.get("league_key")
-        if not isinstance(league_key, str) or not league_key or league_key in observed_leagues:
+        if (
+            not isinstance(league_key, str)
+            or not league_key
+            or league_key in observed_leagues
+        ):
             raise HoldoutEvaluationError("league_key is missing or duplicated")
         observed_leagues.add(league_key)
         score_dataset = league.get("score_dataset")
@@ -2868,9 +2894,9 @@ def validate_evaluation(
             raise HoldoutEvaluationError("league score_dataset metadata is missing")
         _require_hash(score_dataset.get("sha256"), "league score dataset hash")
         splits = league.get("splits")
-        if not isinstance(splits, list) or [item.get("split_id") for item in splits] != [
-            item["split_id"] for item in expected_splits
-        ]:
+        if not isinstance(splits, list) or [
+            item.get("split_id") for item in splits
+        ] != [item["split_id"] for item in expected_splits]:
             raise HoldoutEvaluationError("league fixed splits are missing or reordered")
         league_accumulators: list[dict[str, Any]] = []
         league_promotion_accumulators: list[dict[str, Any]] = []
@@ -2934,7 +2960,9 @@ def validate_evaluation(
             bootstrap_seed=seed,
         ),
     }
-    _require_same(evaluation.get("summary"), expected_summary, "global weighted summary")
+    _require_same(
+        evaluation.get("summary"), expected_summary, "global weighted summary"
+    )
     _require_same(
         evaluation.get("promotion_evidence"),
         _promotion_evidence_summary(
@@ -2965,13 +2993,16 @@ def save_evaluation(evaluation: Mapping[str, Any], path: str | Path) -> None:
     validate_evaluation(evaluation)
     destination = Path(path).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        evaluation,
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-        allow_nan=False,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            evaluation,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",

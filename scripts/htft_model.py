@@ -22,14 +22,14 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from datetime import date, datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import sys
 import tempfile
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:  # Works when imported from the repository root.
@@ -49,9 +49,7 @@ BACKTEST_LOG_LOSS_FLOOR = 1e-15
 RESULTS = ("home", "draw", "away")
 RESULT_CODES = {"home": "H", "draw": "D", "away": "A"}
 HTFT_CLASSES = tuple(
-    f"{half_time}_{full_time}"
-    for half_time in RESULTS
-    for full_time in RESULTS
+    f"{half_time}_{full_time}" for half_time in RESULTS for full_time in RESULTS
 )
 REQUIRED_COLUMNS = {
     "date",
@@ -69,8 +67,10 @@ class HTFTModelError(ValueError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -214,9 +214,7 @@ def load_training_csv(path: str | Path) -> list[dict[str, Any]]:
             raise HTFTModelError("training CSV has no header")
         missing = sorted(REQUIRED_COLUMNS - set(reader.fieldnames))
         if missing:
-            raise HTFTModelError(
-                "training CSV missing columns: " + ", ".join(missing)
-            )
+            raise HTFTModelError("training CSV missing columns: " + ", ".join(missing))
         has_league_key = "league_key" in reader.fieldnames
 
         records: list[dict[str, Any]] = []
@@ -262,7 +260,9 @@ def load_training_csv(path: str | Path) -> list[dict[str, Any]]:
                 half_away_goals,
             )
             if fixture_key in fixtures:
-                status = "duplicate" if fixtures[fixture_key] == score else "conflicting"
+                status = (
+                    "duplicate" if fixtures[fixture_key] == score else "conflicting"
+                )
                 raise HTFTModelError(
                     f"row {row_number}: {status} HT/FT score for "
                     f"{match_date.isoformat()} {home_team} vs {away_team}"
@@ -330,9 +330,7 @@ def _resolve_competition_key(
         raise HTFTModelError("training rows contain multiple competition keys")
     observed_value = next(iter(observed), "")
     if explicit_value and observed_value and explicit_value != observed_value:
-        raise HTFTModelError(
-            "explicit competition_key does not match CSV league_key"
-        )
+        raise HTFTModelError("explicit competition_key does not match CSV league_key")
     resolved = explicit_value or observed_value
     if not resolved:
         raise HTFTModelError(
@@ -375,24 +373,41 @@ def _canonical_training_rows(
 
 
 def _fit_empirical_association(
-    records: Sequence[Mapping[str, Any]], *, smoothing_alpha: float
+    records: Sequence[Mapping[str, Any]],
+    *,
+    smoothing_alpha: float,
+    half_life_days: float | None = None,
 ) -> dict[str, Any]:
-    """Estimate a smoothed league HT/FT association seed from training only."""
+    """Estimate a smoothed, optionally time-decayed HT/FT association seed."""
 
     alpha = _require_finite(smoothing_alpha, "association_smoothing_alpha")
     if alpha <= 0.0:
         raise HTFTModelError("association_smoothing_alpha must be positive")
-    counts = {code: 0 for code in ("HH", "HD", "HA", "DH", "DD", "DA", "AH", "AD", "AA")}
+    if half_life_days is not None:
+        half_life_days = _require_finite(half_life_days, "association_half_life_days")
+        if half_life_days <= 0.0:
+            raise HTFTModelError("association_half_life_days must be positive")
+    reference_date = max(row["date"] for row in records)
+    counts = {
+        code: 0 for code in ("HH", "HD", "HA", "DH", "DD", "DA", "AH", "AD", "AA")
+    }
+    weighted_counts = {code: 0.0 for code in counts}
     for row in records:
-        half = RESULT_CODES[
-            _result(row["half_home_goals"], row["half_away_goals"])
-        ]
+        half = RESULT_CODES[_result(row["half_home_goals"], row["half_away_goals"])]
         full = RESULT_CODES[_result(row["home_goals"], row["away_goals"])]
-        counts[half + full] += 1
-    denominator = len(records) + alpha * 9.0
+        code = half + full
+        counts[code] += 1
+        if half_life_days is None:
+            weight = 1.0
+        else:
+            age_days = max(0, (reference_date - row["date"]).days)
+            weight = math.exp(-math.log(2.0) * age_days / half_life_days)
+        weighted_counts[code] += weight
+    effective_sample_weight = math.fsum(weighted_counts.values())
+    denominator = effective_sample_weight + alpha * 9.0
     seed_joint = [
         [
-            (counts[RESULT_CODES[half] + RESULT_CODES[full]] + alpha)
+            (weighted_counts[RESULT_CODES[half] + RESULT_CODES[full]] + alpha)
             / denominator
             for full in RESULTS
         ]
@@ -404,6 +419,18 @@ def _fit_empirical_association(
         "smoothing_alpha": alpha,
         "sample_count": len(records),
         "counts": counts,
+        "weighted_counts": weighted_counts,
+        "effective_sample_weight": effective_sample_weight,
+        "time_decay": {
+            "mode": "none" if half_life_days is None else "exponential_half_life",
+            "half_life_days": half_life_days,
+            "reference_date": reference_date.isoformat(),
+            "weight_formula": (
+                "uniform_weight_1"
+                if half_life_days is None
+                else "exp(-log(2) * age_days / half_life_days)"
+            ),
+        },
         "seed_joint": seed_joint,
     }
 
@@ -417,9 +444,7 @@ def _write_component_csv(
         raise HTFTModelError(f"unknown score component: {component}")
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            ["date", "home_team", "away_team", "home_goals", "away_goals"]
-        )
+        writer.writerow(["date", "home_team", "away_team", "home_goals", "away_goals"])
         for row in records:
             if component == "half_time":
                 home_goals = row["half_home_goals"]
@@ -480,6 +505,7 @@ def fit_model(
     ipf_max_iterations: int = 1000,
     association_smoothing_alpha: float = 0.5,
     association_power: float = 1.0,
+    association_half_life_days: float | None = None,
     competition_key: str | None = None,
     dataset_manifest_hash: str | None = None,
 ) -> dict[str, Any]:
@@ -513,8 +539,7 @@ def fit_model(
     ):
         raise HTFTModelError("dataset_manifest_hash must be a SHA-256 hash")
     teams = sorted(
-        {row["home_team"] for row in records}
-        | {row["away_team"] for row in records}
+        {row["home_team"] for row in records} | {row["away_team"] for row in records}
     )
     component_models: dict[str, Any] = {}
     component_half_lives = {
@@ -548,7 +573,9 @@ def fit_model(
     if association_power < 0.0:
         raise HTFTModelError("association_power cannot be negative")
     association = _fit_empirical_association(
-        records, smoothing_alpha=association_smoothing_alpha
+        records,
+        smoothing_alpha=association_smoothing_alpha,
+        half_life_days=association_half_life_days,
     )
     association["power"] = association_power
     association_joint = association["seed_joint"]
@@ -558,10 +585,7 @@ def fit_model(
     association["lift"] = [
         [
             association_joint[row][column]
-            / (
-                association_rows[RESULTS[row]]
-                * association_columns[RESULTS[column]]
-            )
+            / (association_rows[RESULTS[row]] * association_columns[RESULTS[column]])
             for column in range(3)
         ]
         for row in range(3)
@@ -672,9 +696,7 @@ def validate_model(model: Mapping[str, Any], *, verify_hash: bool = True) -> Non
     ipf_tolerance = _require_finite(ipf_config.get("tolerance"), "config.ipf.tolerance")
     if not 0.0 < ipf_tolerance < 1.0:
         raise HTFTModelError("config.ipf.tolerance must be between zero and one")
-    _require_integer(
-        ipf_config.get("max_iterations"), "config.ipf.max_iterations"
-    )
+    _require_integer(ipf_config.get("max_iterations"), "config.ipf.max_iterations")
 
     components = model.get("components")
     if not isinstance(components, Mapping) or set(components) != {
@@ -737,32 +759,120 @@ def validate_model(model: Mapping[str, Any], *, verify_hash: bool = True) -> Non
         association.get("smoothing_alpha"),
         "empirical_association.smoothing_alpha",
     )
-    power = _require_finite(
-        association.get("power"), "empirical_association.power"
-    )
+    power = _require_finite(association.get("power"), "empirical_association.power")
     if alpha <= 0.0 or power < 0.0:
         raise HTFTModelError("empirical association alpha/power is invalid")
     if association.get("sample_count") != match_count:
         raise HTFTModelError("empirical association sample_count does not match")
     counts = association.get("counts")
-    expected_codes = {
-        "HH", "HD", "HA", "DH", "DD", "DA", "AH", "AD", "AA"
-    }
+    expected_codes = {"HH", "HD", "HA", "DH", "DD", "DA", "AH", "AD", "AA"}
     if not isinstance(counts, Mapping) or set(counts) != expected_codes:
         raise HTFTModelError("empirical association counts are invalid")
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in counts.values()
-    ) or sum(counts.values()) != match_count:
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in counts.values()
+        )
+        or sum(counts.values()) != match_count
+    ):
         raise HTFTModelError("empirical association counts do not match training")
+    time_decay = association.get("time_decay")
+    weighted_counts = association.get("weighted_counts")
+    effective_sample_weight = association.get("effective_sample_weight")
+    if time_decay is None:
+        # Immutable artifacts created before time-decay support used uniform
+        # weights and did not persist weighting metadata.
+        expected_weighted_counts = {
+            code: float(value) for code, value in counts.items()
+        }
+        expected_effective_weight = float(match_count)
+    else:
+        if not isinstance(time_decay, Mapping):
+            raise HTFTModelError("empirical association time_decay is invalid")
+        mode = time_decay.get("mode")
+        reference = _parse_iso_date(
+            time_decay.get("reference_date"),
+            "empirical_association.time_decay.reference_date",
+        )
+        if reference != end_date:
+            raise HTFTModelError(
+                "empirical association decay reference must equal training.end_date"
+            )
+        if mode == "none":
+            if time_decay.get("half_life_days") is not None or (
+                time_decay.get("weight_formula") != "uniform_weight_1"
+            ):
+                raise HTFTModelError(
+                    "empirical association uniform decay metadata is invalid"
+                )
+        elif mode == "exponential_half_life":
+            decay_half_life = _require_finite(
+                time_decay.get("half_life_days"),
+                "empirical_association.time_decay.half_life_days",
+            )
+            if decay_half_life <= 0.0 or time_decay.get("weight_formula") != (
+                "exp(-log(2) * age_days / half_life_days)"
+            ):
+                raise HTFTModelError(
+                    "empirical association half-life metadata is invalid"
+                )
+        else:
+            raise HTFTModelError("empirical association decay mode is unsupported")
+        if (
+            not isinstance(weighted_counts, Mapping)
+            or set(weighted_counts) != expected_codes
+        ):
+            raise HTFTModelError("empirical association weighted_counts are invalid")
+        expected_weighted_counts = {
+            code: _require_finite(
+                weighted_counts[code],
+                f"empirical_association.weighted_counts.{code}",
+            )
+            for code in expected_codes
+        }
+        if any(value < 0.0 for value in expected_weighted_counts.values()):
+            raise HTFTModelError(
+                "empirical association weighted_counts cannot be negative"
+            )
+        expected_effective_weight = _require_finite(
+            effective_sample_weight,
+            "empirical_association.effective_sample_weight",
+        )
+        if (
+            expected_effective_weight <= 0.0
+            or expected_effective_weight > match_count + 1e-9
+            or abs(
+                math.fsum(expected_weighted_counts.values()) - expected_effective_weight
+            )
+            > 1e-10
+        ):
+            raise HTFTModelError(
+                "empirical association effective sample weight is invalid"
+            )
+        if (
+            mode == "exponential_half_life"
+            and start_date < end_date
+            and expected_effective_weight >= match_count - 1e-12
+        ):
+            raise HTFTModelError(
+                "time-decayed association must downweight older training rows"
+            )
+        if mode == "none" and (
+            abs(expected_effective_weight - match_count) > 1e-12
+            or any(
+                abs(expected_weighted_counts[code] - counts[code]) > 1e-12
+                for code in expected_codes
+            )
+        ):
+            raise HTFTModelError(
+                "empirical association uniform weights do not match raw counts"
+            )
     seed_joint = association.get("seed_joint")
     _validate_joint(seed_joint)
-    expected_denominator = match_count + alpha * 9.0
+    expected_denominator = expected_effective_weight + alpha * 9.0
     expected_seed_joint = [
         [
-            (
-                counts[RESULT_CODES[half] + RESULT_CODES[full]] + alpha
-            )
+            (expected_weighted_counts[RESULT_CODES[half] + RESULT_CODES[full]] + alpha)
             / expected_denominator
             for full in RESULTS
         ]
@@ -796,8 +906,10 @@ def validate_model(model: Mapping[str, Any], *, verify_hash: bool = True) -> Non
             "empirical association marginals do not match the seed joint"
         )
     lift = association.get("lift")
-    if not isinstance(lift, list) or len(lift) != 3 or any(
-        not isinstance(row, list) or len(row) != 3 for row in lift
+    if (
+        not isinstance(lift, list)
+        or len(lift) != 3
+        or any(not isinstance(row, list) or len(row) != 3 for row in lift)
     ):
         raise HTFTModelError("empirical association lift must be 3x3")
     if any(
@@ -822,9 +934,7 @@ def validate_model(model: Mapping[str, Any], *, verify_hash: bool = True) -> Non
         for row in range(3)
         for column in range(3)
     ):
-        raise HTFTModelError(
-            "empirical association lift does not match its seed joint"
-        )
+        raise HTFTModelError("empirical association lift does not match its seed joint")
 
     construction = model.get("construction")
     if not isinstance(construction, Mapping):
@@ -845,18 +955,23 @@ def validate_model(model: Mapping[str, Any], *, verify_hash: bool = True) -> Non
         )
     if verify_hash:
         stored_hash = model.get("model_hash")
-        if not isinstance(stored_hash, str) or stored_hash != calculate_model_hash(model):
+        if not isinstance(stored_hash, str) or stored_hash != calculate_model_hash(
+            model
+        ):
             raise HTFTModelError("model_hash does not match model contents")
 
 
 def save_json(value: Mapping[str, Any], path: str | Path | None) -> None:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-        allow_nan=False,
-    ) + "\n"
+    encoded = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     if path is None:
         sys.stdout.write(encoded)
         return
@@ -910,8 +1025,7 @@ def build_raw_joint(
                         half_probability * second_probability
                     )
     matrix = [
-        [math.fsum(buckets[row][column]) for column in range(3)]
-        for row in range(3)
+        [math.fsum(buckets[row][column]) for column in range(3)] for row in range(3)
     ]
     _validate_joint(matrix)
     return matrix
@@ -925,9 +1039,7 @@ def _validate_joint(matrix: Sequence[Sequence[float]]) -> None:
         if not isinstance(row, Sequence) or len(row) != 3:
             raise HTFTModelError("HT/FT joint matrix must be 3x3")
         for column_index, raw in enumerate(row):
-            value = _require_finite(
-                raw, f"joint[{row_index}][{column_index}]"
-            )
+            value = _require_finite(raw, f"joint[{row_index}][{column_index}]")
             if value < 0.0:
                 raise HTFTModelError("HT/FT joint probabilities cannot be negative")
             total += value
@@ -995,8 +1107,7 @@ def iterative_proportional_fit(
 
         row_sums = [math.fsum(row) for row in matrix]
         column_sums = [
-            math.fsum(matrix[row][column] for row in range(3))
-            for column in range(3)
+            math.fsum(matrix[row][column] for row in range(3)) for column in range(3)
         ]
         maximum_error = max(
             *(abs(actual - target) for actual, target in zip(row_sums, target_rows)),
@@ -1008,9 +1119,7 @@ def iterative_proportional_fit(
         if maximum_error <= tolerance:
             break
     else:
-        raise HTFTModelError(
-            "IPF did not converge within config.ipf.max_iterations"
-        )
+        raise HTFTModelError("IPF did not converge within config.ipf.max_iterations")
 
     _validate_joint(matrix)
     return matrix, {
@@ -1021,7 +1130,9 @@ def iterative_proportional_fit(
     }
 
 
-def _matrix_marginals(matrix: Sequence[Sequence[float]]) -> tuple[dict[str, float], dict[str, float]]:
+def _matrix_marginals(
+    matrix: Sequence[Sequence[float]],
+) -> tuple[dict[str, float], dict[str, float]]:
     _validate_joint(matrix)
     row_marginal = {
         result: math.fsum(matrix[index]) for index, result in enumerate(RESULTS)
@@ -1053,8 +1164,10 @@ def build_empirical_association_seed(
     )
     if power < 0.0:
         raise HTFTModelError("empirical_association.power cannot be negative")
-    if not isinstance(lift, list) or len(lift) != 3 or any(
-        not isinstance(row, list) or len(row) != 3 for row in lift
+    if (
+        not isinstance(lift, list)
+        or len(lift) != 3
+        or any(not isinstance(row, list) or len(row) != 3 for row in lift)
     ):
         raise HTFTModelError("empirical association lift must be 3x3")
     seed = [
@@ -1143,7 +1256,9 @@ def _validate_anchor(
     if not isinstance(source, str) or not source.strip():
         raise HTFTModelError(f"{name} anchor.source is required")
     probabilities = _validated_marginal(
-        anchor.get("probabilities"), f"{name} anchor.probabilities", require_positive=True
+        anchor.get("probabilities"),
+        f"{name} anchor.probabilities",
+        require_positive=True,
     )
     captured_at, canonical_captured_at = _parse_aware_datetime(
         anchor.get("captured_at"), f"{name} anchor.captured_at"
@@ -1199,9 +1314,7 @@ def predict_model(
     )
     if prediction_datetime >= kickoff_datetime:
         raise HTFTModelError("generated_at must be strictly before kickoff")
-    training_end = _parse_iso_date(
-        model["training"]["end_date"], "training.end_date"
-    )
+    training_end = _parse_iso_date(model["training"]["end_date"], "training.end_date")
     if training_end >= kickoff_datetime.date():
         raise HTFTModelError(
             "training.end_date must be strictly before kickoff's UTC date"
@@ -1272,18 +1385,33 @@ def predict_model(
         construction_method = "empirical_association_lift_then_ipf"
         association_audit: dict[str, Any] | None = {
             "training_sample_count": model["empirical_association"]["sample_count"],
+            "effective_sample_weight": model["empirical_association"].get(
+                "effective_sample_weight",
+                float(model["empirical_association"]["sample_count"]),
+            ),
+            "time_decay": copy.deepcopy(
+                model["empirical_association"].get(
+                    "time_decay",
+                    {
+                        "mode": "none",
+                        "half_life_days": None,
+                        "reference_date": model["training"]["end_date"],
+                        "weight_formula": "uniform_weight_1",
+                    },
+                )
+            ),
             "smoothing_alpha": model["empirical_association"]["smoothing_alpha"],
             "association_power": model["empirical_association"]["power"],
-            "model_association_hash": _sha256_json(
-                model["empirical_association"]
-            ),
+            "model_association_hash": _sha256_json(model["empirical_association"]),
         }
     else:
         raw_joint = build_raw_joint(
             component_outputs["half_time"]["matrix"],
             component_outputs["second_half"]["matrix"],
         )
-        construction_method = "experimental_half_time_plus_second_half_convolution_then_ipf"
+        construction_method = (
+            "experimental_half_time_plus_second_half_convolution_then_ipf"
+        )
         association_audit = None
     raw_half_marginal, raw_full_marginal = _matrix_marginals(raw_joint)
 
@@ -1474,21 +1602,26 @@ def validate_prediction(
     joint_matrix = htft.get("joint_matrix")
     _validate_joint(joint_matrix)
     probabilities = htft.get("probabilities")
-    if not isinstance(probabilities, Mapping) or set(probabilities) != set(HTFT_CLASSES):
+    if not isinstance(probabilities, Mapping) or set(probabilities) != set(
+        HTFT_CLASSES
+    ):
         raise HTFTModelError("prediction must contain all nine HT/FT classes")
     for row_index, half in enumerate(RESULTS):
         for column_index, full in enumerate(RESULTS):
             name = f"{half}_{full}"
             value = _require_finite(probabilities[name], f"htft.probabilities.{name}")
             if abs(value - joint_matrix[row_index][column_index]) > 1e-12:
-                raise HTFTModelError("HT/FT class probabilities do not match joint matrix")
+                raise HTFTModelError(
+                    "HT/FT class probabilities do not match joint matrix"
+                )
     code_probabilities = htft.get("code_probabilities")
     expected_codes = {
-        RESULT_CODES[half] + RESULT_CODES[full]
-        for half in RESULTS
-        for full in RESULTS
+        RESULT_CODES[half] + RESULT_CODES[full] for half in RESULTS for full in RESULTS
     }
-    if not isinstance(code_probabilities, Mapping) or set(code_probabilities) != expected_codes:
+    if (
+        not isinstance(code_probabilities, Mapping)
+        or set(code_probabilities) != expected_codes
+    ):
         raise HTFTModelError("prediction code_probabilities must contain HH through AA")
     for row_index, half in enumerate(RESULTS):
         for column_index, full in enumerate(RESULTS):
@@ -1497,7 +1630,9 @@ def validate_prediction(
                 code_probabilities[code], f"htft.code_probabilities.{code}"
             )
             if abs(value - joint_matrix[row_index][column_index]) > 1e-12:
-                raise HTFTModelError("HT/FT code probabilities do not match joint matrix")
+                raise HTFTModelError(
+                    "HT/FT code probabilities do not match joint matrix"
+                )
     declared_half = _validated_marginal(
         htft.get("half_time_marginal"), "half_time_marginal"
     )
@@ -1509,7 +1644,9 @@ def validate_prediction(
         if abs(declared_half[result] - derived_half[result]) > 1e-10:
             raise HTFTModelError("half-time marginal does not match HT/FT matrix rows")
         if abs(declared_full[result] - derived_full[result]) > 1e-10:
-            raise HTFTModelError("full-time marginal does not match HT/FT matrix columns")
+            raise HTFTModelError(
+                "full-time marginal does not match HT/FT matrix columns"
+            )
     for field, declared in (
         ("half_time_code_probabilities", declared_half),
         ("full_time_code_probabilities", declared_full),
@@ -1539,9 +1676,10 @@ def validate_prediction(
     if not isinstance(ranked, list) or len(ranked) != len(HTFT_CLASSES):
         raise HTFTModelError("prediction HT/FT ranked list must contain nine classes")
     for actual, (class_name, probability) in zip(ranked, ranked_expected, strict=True):
-        expected_code = RESULT_CODES[class_name.split("_", 1)[0]] + RESULT_CODES[
-            class_name.split("_", 1)[1]
-        ]
+        expected_code = (
+            RESULT_CODES[class_name.split("_", 1)[0]]
+            + RESULT_CODES[class_name.split("_", 1)[1]]
+        )
         if (
             not isinstance(actual, Mapping)
             or actual.get("class") != class_name
@@ -1595,10 +1733,13 @@ def validate_prediction(
             if target.get("de_vigged") is not True or not target.get("source"):
                 raise HTFTModelError(f"prediction {name} external anchor is unaudited")
             captured_at, _ = _parse_aware_datetime(
-                target.get("captured_at"), f"provenance.marginal_targets.{name}.captured_at"
+                target.get("captured_at"),
+                f"provenance.marginal_targets.{name}.captured_at",
             )
             if captured_at > generated_at or captured_at >= kickoff:
-                raise HTFTModelError(f"prediction {name} external anchor has invalid timing")
+                raise HTFTModelError(
+                    f"prediction {name} external anchor has invalid timing"
+                )
         elif origin == "model_component":
             component = components.get(name)
             if not isinstance(component, Mapping):
@@ -1616,7 +1757,9 @@ def validate_prediction(
         else:
             raise HTFTModelError(f"prediction {name} marginal origin is unsupported")
     external_enabled = provenance.get("external_anchor_enabled")
-    if not isinstance(external_enabled, bool) or external_enabled != bool(external_origins):
+    if not isinstance(external_enabled, bool) or external_enabled != bool(
+        external_origins
+    ):
         raise HTFTModelError("prediction external-anchor flag is inconsistent")
 
     construction = prediction.get("joint_construction")
@@ -1643,8 +1786,7 @@ def validate_prediction(
     ):
         declared_raw = _validated_marginal(construction.get(field), field)
         if any(
-            abs(declared_raw[result] - derived[result]) > 1e-12
-            for result in RESULTS
+            abs(declared_raw[result] - derived[result]) > 1e-12 for result in RESULTS
         ):
             raise HTFTModelError(
                 f"prediction {field} does not match the recorded joint seed"
@@ -1655,7 +1797,9 @@ def validate_prediction(
         raise HTFTModelError("prediction IPF audit is required")
     if ipf.get("converged") is not True:
         raise HTFTModelError("prediction IPF audit must report convergence")
-    tolerance = _require_finite(ipf.get("tolerance"), "joint_construction.ipf.tolerance")
+    tolerance = _require_finite(
+        ipf.get("tolerance"), "joint_construction.ipf.tolerance"
+    )
     if tolerance <= 0.0:
         raise HTFTModelError("prediction IPF tolerance must be positive")
     max_iterations = _require_integer(
@@ -1692,9 +1836,10 @@ def validate_prediction(
                 raise HTFTModelError(
                     "prediction joint matrix does not match IPF reconstruction"
                 )
-    if reconstructed_audit["iterations"] != iterations or abs(
-        reconstructed_audit["maximum_marginal_error"] - maximum_error
-    ) > 1e-15:
+    if (
+        reconstructed_audit["iterations"] != iterations
+        or abs(reconstructed_audit["maximum_marginal_error"] - maximum_error) > 1e-15
+    ):
         raise HTFTModelError("prediction IPF audit does not match reconstruction")
 
     association = construction.get("association")
@@ -1713,6 +1858,23 @@ def validate_prediction(
             association.get("association_power"),
             "joint_construction.association.association_power",
         )
+        declared_effective_weight = association.get("effective_sample_weight")
+        if declared_effective_weight is not None:
+            declared_effective_weight = _require_finite(
+                declared_effective_weight,
+                "joint_construction.association.effective_sample_weight",
+            )
+            if declared_effective_weight <= 0.0:
+                raise HTFTModelError(
+                    "prediction empirical association effective weight is invalid"
+                )
+        declared_time_decay = association.get("time_decay")
+        if declared_time_decay is not None and not isinstance(
+            declared_time_decay, Mapping
+        ):
+            raise HTFTModelError(
+                "prediction empirical association time_decay is invalid"
+            )
         association_hash = association.get("model_association_hash")
         if smoothing_alpha <= 0.0 or association_power < 0.0:
             raise HTFTModelError("prediction empirical association audit is invalid")
@@ -1736,6 +1898,37 @@ def validate_prediction(
                 raise HTFTModelError(
                     "prediction empirical association metadata does not match model artifact"
                 )
+            expected_effective_weight = model_association.get(
+                "effective_sample_weight", float(model_association["sample_count"])
+            )
+            expected_time_decay = model_association.get(
+                "time_decay",
+                {
+                    "mode": "none",
+                    "half_life_days": None,
+                    "reference_date": model["training"]["end_date"],
+                    "weight_formula": "uniform_weight_1",
+                },
+            )
+            if "time_decay" in model_association and (
+                declared_time_decay is None or declared_effective_weight is None
+            ):
+                raise HTFTModelError(
+                    "prediction association weighting audit is missing"
+                )
+            if (
+                declared_effective_weight is not None
+                and abs(declared_effective_weight - expected_effective_weight) > 1e-12
+            ):
+                raise HTFTModelError(
+                    "prediction association effective weight does not match model"
+                )
+            if declared_time_decay is not None and dict(declared_time_decay) != dict(
+                expected_time_decay
+            ):
+                raise HTFTModelError(
+                    "prediction association time_decay does not match model"
+                )
             reconstructed_seed = build_empirical_association_seed(
                 model_association, declared_half, declared_full
             )
@@ -1757,16 +1950,13 @@ def validate_prediction(
         )
     if verify_hash:
         stored_hash = prediction.get("prediction_hash")
-        if (
-            not isinstance(stored_hash, str)
-            or stored_hash != calculate_prediction_hash(prediction)
+        if not isinstance(stored_hash, str) or stored_hash != calculate_prediction_hash(
+            prediction
         ):
             raise HTFTModelError("prediction_hash does not match prediction contents")
 
 
-def _write_training_subset(
-    path: Path, records: Sequence[Mapping[str, Any]]
-) -> None:
+def _write_training_subset(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -1829,6 +2019,7 @@ def backtest_model(
     unknown_team_policy: str = "error",
     association_smoothing_alpha: float = 0.5,
     association_power: float = 1.0,
+    association_half_life_days: float | None = None,
     competition_key: str | None = None,
     dataset_manifest_hash: str | None = None,
     seed_method: str = "empirical_association",
@@ -1897,12 +2088,12 @@ def backtest_model(
                 group_cursor += 1
             test_start_date = block_groups[0][0]
             test_end_date = block_groups[-1][0]
-            training_records = [
-                row for row in records if row["date"] < test_start_date
-            ]
+            training_records = [row for row in records if row["date"] < test_start_date]
             test_records = [row for _, group in block_groups for row in group]
             if len(training_records) < min_train_matches:
-                raise HTFTModelError("walk-forward training window is unexpectedly short")
+                raise HTFTModelError(
+                    "walk-forward training window is unexpectedly short"
+                )
             if any(row["date"] >= test_start_date for row in training_records):
                 raise HTFTModelError("walk-forward cutoff leaked a test date")
 
@@ -1924,6 +2115,7 @@ def backtest_model(
                     ipf_max_iterations=ipf_max_iterations,
                     association_smoothing_alpha=association_smoothing_alpha,
                     association_power=association_power,
+                    association_half_life_days=association_half_life_days,
                     competition_key=competition_key,
                     dataset_manifest_hash=dataset_manifest_hash,
                 )
@@ -1962,9 +2154,7 @@ def backtest_model(
                     unknown_team_policy=unknown_team_policy,
                     seed_method=seed_method,
                 )
-                half_result = _result(
-                    row["half_home_goals"], row["half_away_goals"]
-                )
+                half_result = _result(row["half_home_goals"], row["half_away_goals"])
                 full_result = _result(row["home_goals"], row["away_goals"])
                 actual_class = f"{half_result}_{full_result}"
                 probabilities = prediction["htft"]["probabilities"]
@@ -1978,9 +2168,7 @@ def backtest_model(
                     ** 2
                     for class_name in HTFT_CLASSES
                 )
-                top_two = [
-                    item["class"] for item in prediction["htft"]["top_two"]
-                ]
+                top_two = [item["class"] for item in prediction["htft"]["top_two"]]
                 top_one_hit = top_two[0] == actual_class
                 top_two_hit = actual_class in top_two
                 top_one_hits += int(top_one_hit)
@@ -2064,6 +2252,7 @@ def backtest_model(
             "unknown_team_policy": unknown_team_policy,
             "association_smoothing_alpha": association_smoothing_alpha,
             "association_power": association_power,
+            "association_half_life_days": association_half_life_days,
             "seed_method": seed_method,
             "competition_key": competition_key,
             "dataset_manifest_hash": dataset_manifest_hash,
@@ -2097,9 +2286,7 @@ def backtest_model(
     return artifact
 
 
-def validate_backtest(
-    backtest: Mapping[str, Any], *, verify_hash: bool = True
-) -> None:
+def validate_backtest(backtest: Mapping[str, Any], *, verify_hash: bool = True) -> None:
     if not isinstance(backtest, Mapping):
         raise HTFTModelError("backtest must be a JSON object")
     if backtest.get("artifact_type") != BACKTEST_ARTIFACT_TYPE:
@@ -2157,7 +2344,9 @@ def validate_backtest(
         if block_number != expected_number:
             raise HTFTModelError("backtest blocks must be sequential from one")
         training_match_count = _require_integer(
-            raw_block.get("training_match_count"), "blocks.training_match_count", minimum=2
+            raw_block.get("training_match_count"),
+            "blocks.training_match_count",
+            minimum=2,
         )
         test_match_count = _require_integer(
             raw_block.get("test_match_count"), "blocks.test_match_count"
@@ -2175,7 +2364,9 @@ def validate_backtest(
             raw_block.get("test_end_date"), "blocks.test_end_date"
         )
         if not training_start <= training_cutoff < test_start <= test_end:
-            raise HTFTModelError("backtest block date cutoffs are not strictly out of sample")
+            raise HTFTModelError(
+                "backtest block date cutoffs are not strictly out of sample"
+            )
         model_hash = raw_block.get("model_hash")
         if not isinstance(model_hash, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", model_hash
@@ -2191,14 +2382,19 @@ def validate_backtest(
             )
         if prior_block is not None:
             if training_start != prior_block["training_start"]:
-                raise HTFTModelError("backtest expanding windows changed training start")
+                raise HTFTModelError(
+                    "backtest expanding windows changed training start"
+                )
             if test_start <= prior_block["test_end"]:
-                raise HTFTModelError("backtest test blocks overlap or split the same date")
+                raise HTFTModelError(
+                    "backtest test blocks overlap or split the same date"
+                )
             if training_cutoff < prior_block["test_end"]:
-                raise HTFTModelError("backtest expanding window omitted an earlier test date")
+                raise HTFTModelError(
+                    "backtest expanding window omitted an earlier test date"
+                )
             if training_match_count != (
-                prior_block["training_match_count"]
-                + prior_block["test_match_count"]
+                prior_block["training_match_count"] + prior_block["test_match_count"]
             ):
                 raise HTFTModelError(
                     "backtest expanding-window training count is inconsistent"
@@ -2254,12 +2450,17 @@ def validate_backtest(
             forecast.get("training_cutoff_date"),
             "predictions.training_cutoff_date",
         )
-        if training_cutoff != block["training_cutoff"] or training_cutoff >= prediction_date:
+        if (
+            training_cutoff != block["training_cutoff"]
+            or training_cutoff >= prediction_date
+        ):
             raise HTFTModelError(
                 "backtest prediction training cutoff is not strictly before the fixture"
             )
         if forecast.get("model_hash") != block["model_hash"]:
-            raise HTFTModelError("backtest prediction model_hash does not match its block")
+            raise HTFTModelError(
+                "backtest prediction model_hash does not match its block"
+            )
         prediction_hash = forecast.get("prediction_hash")
         if not isinstance(prediction_hash, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", prediction_hash
@@ -2307,7 +2508,9 @@ def validate_backtest(
             "predictions.actual_full_time_score",
         )
         if half_score[0] > full_score[0] or half_score[1] > full_score[1]:
-            raise HTFTModelError("backtest half-time score cannot exceed full-time score")
+            raise HTFTModelError(
+                "backtest half-time score cannot exceed full-time score"
+            )
         expected_actual_class = f"{_result(*half_score)}_{_result(*full_score)}"
         actual_class = forecast.get("actual_class")
         if actual_class != expected_actual_class:
@@ -2317,7 +2520,9 @@ def validate_backtest(
         if not isinstance(probabilities, Mapping) or set(probabilities) != set(
             HTFT_CLASSES
         ):
-            raise HTFTModelError("backtest prediction must store all nine probabilities")
+            raise HTFTModelError(
+                "backtest prediction must store all nine probabilities"
+            )
         normalized_probabilities: dict[str, float] = {}
         for class_name in HTFT_CLASSES:
             probability = _require_finite(
@@ -2330,13 +2535,16 @@ def validate_backtest(
         if abs(math.fsum(normalized_probabilities.values()) - 1.0) > 1e-12:
             raise HTFTModelError("backtest class probabilities must sum to one")
         actual_probability = normalized_probabilities[actual_class]
-        if abs(
-            _require_finite(
-                forecast.get("actual_class_probability"),
-                "predictions.actual_class_probability",
+        if (
+            abs(
+                _require_finite(
+                    forecast.get("actual_class_probability"),
+                    "predictions.actual_class_probability",
+                )
+                - actual_probability
             )
-            - actual_probability
-        ) > 1e-15:
+            > 1e-15
+        ):
             raise HTFTModelError(
                 "backtest actual-class probability does not match probability vector"
             )
@@ -2370,19 +2578,24 @@ def validate_backtest(
         scores = forecast.get("scores")
         if not isinstance(scores, Mapping):
             raise HTFTModelError("backtest per-prediction scores are required")
-        if abs(
-            _require_finite(
-                scores.get("nine_class_log_loss"),
-                "predictions.scores.nine_class_log_loss",
+        if (
+            abs(
+                _require_finite(
+                    scores.get("nine_class_log_loss"),
+                    "predictions.scores.nine_class_log_loss",
+                )
+                - log_loss
             )
-            - log_loss
-        ) > 1e-12 or abs(
-            _require_finite(
-                scores.get("nine_class_brier"),
-                "predictions.scores.nine_class_brier",
+            > 1e-12
+            or abs(
+                _require_finite(
+                    scores.get("nine_class_brier"),
+                    "predictions.scores.nine_class_brier",
+                )
+                - brier
             )
-            - brier
-        ) > 1e-12:
+            > 1e-12
+        ):
             raise HTFTModelError("backtest per-prediction scores do not recompute")
         if (
             scores.get("top_one_hit") is not top_one_hit
@@ -2403,7 +2616,9 @@ def validate_backtest(
             for number, block in block_by_number.items()
         )
     ):
-        raise HTFTModelError("backtest sample counts do not match blocks and predictions")
+        raise HTFTModelError(
+            "backtest sample counts do not match blocks and predictions"
+        )
     expected_metrics = {
         "nine_class_log_loss": math.fsum(recomputed_log_losses) / sample_count,
         "nine_class_brier": math.fsum(recomputed_brier_scores) / sample_count,
@@ -2427,9 +2642,8 @@ def validate_backtest(
         raise HTFTModelError("backtest aggregate hit counts do not recompute")
     if verify_hash:
         stored_hash = backtest.get("backtest_hash")
-        if (
-            not isinstance(stored_hash, str)
-            or stored_hash != calculate_backtest_hash(backtest)
+        if not isinstance(stored_hash, str) or stored_hash != calculate_backtest_hash(
+            backtest
         ):
             raise HTFTModelError("backtest_hash does not match backtest contents")
 
@@ -2438,14 +2652,10 @@ def _parse_probability_triplet(raw: str, name: str) -> dict[str, float]:
     try:
         parts = [float(part.strip()) for part in raw.split(",")]
     except ValueError as exc:
-        raise HTFTModelError(
-            f"{name} must be HOME,DRAW,AWAY probabilities"
-        ) from exc
+        raise HTFTModelError(f"{name} must be HOME,DRAW,AWAY probabilities") from exc
     if len(parts) != 3:
         raise HTFTModelError(f"{name} must contain exactly three probabilities")
-    return _validated_marginal(
-        dict(zip(RESULTS, parts)), name, require_positive=True
-    )
+    return _validated_marginal(dict(zip(RESULTS, parts)), name, require_positive=True)
 
 
 def _cli_anchor(
@@ -2484,6 +2694,14 @@ def _add_fit_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--association-smoothing-alpha", type=float, default=0.5)
     parser.add_argument("--association-power", type=float, default=1.0)
     parser.add_argument(
+        "--association-half-life-days",
+        type=float,
+        help=(
+            "optional exponential half-life for HT/FT association counts; "
+            "omitting it preserves the validated uniform-weight configuration"
+        ),
+    )
+    parser.add_argument(
         "--competition-key",
         help="single competition identifier; must match CSV league_key when present",
     )
@@ -2508,6 +2726,7 @@ def _fit_kwargs(arguments: argparse.Namespace) -> dict[str, Any]:
         "ipf_max_iterations": arguments.ipf_max_iterations,
         "association_smoothing_alpha": arguments.association_smoothing_alpha,
         "association_power": arguments.association_power,
+        "association_half_life_days": arguments.association_half_life_days,
         "competition_key": arguments.competition_key,
         "dataset_manifest_hash": arguments.dataset_manifest_hash,
     }

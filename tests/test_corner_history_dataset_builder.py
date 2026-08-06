@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import copy
 import csv
-from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from scripts import corner_history_dataset_builder as builder
 
@@ -25,10 +24,12 @@ def _record(
     regime: str | None = None,
     season_year: int | None = None,
 ) -> dict:
-    total = None if home_corners is None or away_corners is None else home_corners + away_corners
-    local = datetime.fromisoformat(kickoff).replace(
-        tzinfo=timezone(timedelta(hours=8))
+    total = (
+        None
+        if home_corners is None or away_corners is None
+        else home_corners + away_corners
     )
+    local = datetime.fromisoformat(kickoff).replace(tzinfo=timezone(timedelta(hours=8)))
     kickoff_utc = local.astimezone(timezone.utc)
     year = season_year if season_year is not None else local.year
     if phase is None:
@@ -50,9 +51,7 @@ def _record(
         "phase": phase,
         "round": round_value,
         "kickoff": kickoff,
-        "kickoff_utc": kickoff_utc.isoformat(timespec="seconds").replace(
-            "+00:00", "Z"
-        ),
+        "kickoff_utc": kickoff_utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "kickoff_epoch": int(kickoff_utc.timestamp()),
         "source_timezone": "Asia/Shanghai",
         "match_id": str(match_id),
@@ -129,9 +128,7 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
             self.assertEqual(targeted["leagues"], [expected])
             self.assertEqual(targeted["selection_policy"], full["selection_policy"])
             self.assertEqual(targeted["source_bundle_hash"], full["source_bundle_hash"])
-            self.assertEqual(
-                targeted["source_file_sha256"], full["source_file_sha256"]
-            )
+            self.assertEqual(targeted["source_file_sha256"], full["source_file_sha256"])
             self.assertTrue(
                 (root / "targeted" / "korea_k_league_1-corners.csv").is_file()
             )
@@ -215,7 +212,8 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                 source["bundle_hash"],
             )
             finland = next(
-                row for row in manifest["leagues"]
+                row
+                for row in manifest["leagues"]
                 if row["league_key"] == "finland_veikkausliiga"
             )
             self.assertEqual(finland["rows"], 2)
@@ -241,7 +239,9 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
             source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
             source_path = root / "corner_history.json"
             _write(source_path, source)
-            with self.assertRaisesRegex(builder.CornerDatasetError, "does not reconcile"):
+            with self.assertRaisesRegex(
+                builder.CornerDatasetError, "does not reconcile"
+            ):
                 builder.build_dataset(
                     source_path, root / "dataset", as_of_date="2026-08-03"
                 )
@@ -293,7 +293,8 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                 source_path, root / "dataset", as_of_date="2026-08-03"
             )
             finland = next(
-                row for row in manifest["leagues"]
+                row
+                for row in manifest["leagues"]
                 if row["league_key"] == "finland_veikkausliiga"
             )
             self.assertEqual(finland["qa"]["excluded_reasons"], {"post_as_of_date": 1})
@@ -333,9 +334,7 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
         additions = {
             "france-ligue-1": [("20-team", "regular")],
             "south-korea-k-league-1": [("covid-27-round", "regular")],
-            "uefa-champions-league": [
-                ("36-team-league-phase", "league_phase")
-            ],
+            "uefa-champions-league": [("36-team-league-phase", "league_phase")],
             "afc-champions-league": [
                 ("cross-year-acl", "group_stage"),
                 ("24-team-acl-elite", "group_stage"),

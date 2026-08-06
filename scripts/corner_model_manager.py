@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import argparse
 import copy
-from datetime import date, datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import tempfile
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 try:  # Imported from the repository root.
@@ -125,8 +125,10 @@ class CornerModelManagerError(ValueError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -148,9 +150,11 @@ def _parse_aware_datetime(value: Any, name: str) -> datetime:
 
 
 def _canonical_datetime(value: Any, name: str) -> str:
-    return _parse_aware_datetime(value, name).isoformat(
-        timespec="microseconds"
-    ).replace("+00:00", "Z")
+    return (
+        _parse_aware_datetime(value, name)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -260,9 +264,7 @@ def _safe_filename(value: Any, name: str, *, suffix: str) -> str:
         or "\\" in filename
         or not filename.lower().endswith(suffix.lower())
     ):
-        raise CornerModelManagerError(
-            f"{name} must be a local {suffix} filename"
-        )
+        raise CornerModelManagerError(f"{name} must be a local {suffix} filename")
     return filename
 
 
@@ -448,20 +450,26 @@ def _validate_source_bound_dataset(
     manifest_path = manifest_path.resolve()
     manifest = _read_json(manifest_path, "corner dataset manifest")
     if (
-        manifest.get("artifact_type")
-        != corner_history_dataset_builder.ARTIFACT_TYPE
+        manifest.get("artifact_type") != corner_history_dataset_builder.ARTIFACT_TYPE
         or manifest.get("schema_version")
         != corner_history_dataset_builder.SCHEMA_VERSION
         or manifest.get("builder_version")
         != corner_history_dataset_builder.BUILDER_VERSION
     ):
-        raise CornerModelManagerError("dataset manifest is not the supported v2 builder artifact")
+        raise CornerModelManagerError(
+            "dataset manifest is not the supported v2 builder artifact"
+        )
     stored_manifest_hash = _required_hash(
         manifest.get("bundle_hash"), "dataset manifest bundle_hash"
     )
     if stored_manifest_hash != _manifest_bundle_hash(manifest):
-        raise CornerModelManagerError("dataset manifest bundle_hash does not match contents")
-    if manifest.get("selection_policy") != corner_history_dataset_builder.SELECTION_POLICY:
+        raise CornerModelManagerError(
+            "dataset manifest bundle_hash does not match contents"
+        )
+    if (
+        manifest.get("selection_policy")
+        != corner_history_dataset_builder.SELECTION_POLICY
+    ):
         raise CornerModelManagerError(
             "dataset manifest selection_policy is not the installed safe policy"
         )
@@ -470,7 +478,9 @@ def _validate_source_bound_dataset(
         manifest.get("source_file"), "dataset manifest source_file", suffix=".json"
     )
     if source_name != corner_history_dataset_builder.SOURCE_COPY_FILENAME:
-        raise CornerModelManagerError("dataset manifest source_file is not the v2 evidence copy")
+        raise CornerModelManagerError(
+            "dataset manifest source_file is not the v2 evidence copy"
+        )
     actual_source_path = (
         source_bundle_path.resolve()
         if source_bundle_path is not None
@@ -480,13 +490,19 @@ def _validate_source_bound_dataset(
         manifest.get("source_file_sha256"), "dataset manifest source_file_sha256"
     )
     if _file_hash(actual_source_path) != source_file_hash:
-        raise CornerModelManagerError("dataset source bundle file hash does not match manifest")
+        raise CornerModelManagerError(
+            "dataset source bundle file hash does not match manifest"
+        )
     try:
         source_bundle = corner_history_dataset_builder.load_source(actual_source_path)
     except corner_history_dataset_builder.CornerDatasetError as exc:
-        raise CornerModelManagerError(f"dataset source bundle is invalid: {exc}") from exc
+        raise CornerModelManagerError(
+            f"dataset source bundle is invalid: {exc}"
+        ) from exc
     if source_bundle.get("bundle_hash") != manifest.get("source_bundle_hash"):
-        raise CornerModelManagerError("dataset source bundle lineage does not match manifest")
+        raise CornerModelManagerError(
+            "dataset source bundle lineage does not match manifest"
+        )
 
     league_entry = _league_manifest_entry(manifest, league_key)
     expected_dataset_name = _safe_filename(
@@ -498,7 +514,9 @@ def _validate_source_bound_dataset(
     # registries use a content-addressed filename and are accepted through the
     # explicit path only after all hashes and replay output agree.
     if require_canonical_dataset_name and dataset_path.name != expected_dataset_name:
-        raise CornerModelManagerError("input CSV filename does not match dataset manifest")
+        raise CornerModelManagerError(
+            "input CSV filename does not match dataset manifest"
+        )
     dataset_hash = _required_hash(
         league_entry.get("dataset_sha256"), "dataset manifest dataset_sha256"
     )
@@ -507,10 +525,14 @@ def _validate_source_bound_dataset(
     try:
         records = corner_model.load_training_csv(dataset_path)
     except corner_model.CornerModelError as exc:
-        raise CornerModelManagerError(f"source-bound dataset CSV is invalid: {exc}") from exc
+        raise CornerModelManagerError(
+            f"source-bound dataset CSV is invalid: {exc}"
+        ) from exc
     profile = corner_model.training_dataset_profile(records)
     if profile["league_key"] != league_key:
-        raise CornerModelManagerError("dataset CSV league_key does not match requested league")
+        raise CornerModelManagerError(
+            "dataset CSV league_key does not match requested league"
+        )
     if league_entry.get("rows") != len(records):
         raise CornerModelManagerError("dataset manifest row count does not match CSV")
     for manifest_field, profile_field in (
@@ -568,7 +590,9 @@ def _validate_source_bound_dataset(
             ]
         )
     ):
-        raise CornerModelManagerError("dataset league selection policy binding is invalid")
+        raise CornerModelManagerError(
+            "dataset league selection policy binding is invalid"
+        )
 
     # Re-run the installed builder from the copied source.  A coordinated
     # manifest/CSV re-hash cannot bypass the actual v2 selection implementation.
@@ -613,7 +637,9 @@ def _validate_source_bound_dataset(
     if replay_result["dataset_hashes"].get(league_key) != dataset_hash:
         raise CornerModelManagerError("dataset CSV does not match builder replay")
     if replay_entry != league_entry:
-        raise CornerModelManagerError("dataset league manifest does not match builder replay")
+        raise CornerModelManagerError(
+            "dataset league manifest does not match builder replay"
+        )
     if replay_all_leagues and replay_manifest.get("leagues") != manifest.get("leagues"):
         raise CornerModelManagerError(
             "dataset manifest league inventory does not match builder replay"
@@ -678,9 +704,7 @@ def _validate_backtest_structure_v1(
         raise CornerModelManagerError("backtest dependence must be independent_nb")
     stored_hash = _required_hash(backtest.get("backtest_hash"), "backtest_hash")
     if stored_hash != corner_model.calculate_backtest_hash(backtest):
-        raise CornerModelManagerError(
-            "backtest_hash does not match backtest contents"
-        )
+        raise CornerModelManagerError("backtest_hash does not match backtest contents")
     source_hash = _required_hash(
         backtest.get("source_data_hash"), "backtest.source_data_hash"
     )
@@ -828,7 +852,9 @@ def _validate_backtest_structure_v1(
         rows_by_date: dict[str, int] = {}
         for row in dataset_records:
             raw_date = row.get("date")
-            row_date = raw_date.isoformat() if isinstance(raw_date, date) else str(raw_date)
+            row_date = (
+                raw_date.isoformat() if isinstance(raw_date, date) else str(raw_date)
+            )
             fixture = (row_date, str(row.get("home_team")), str(row.get("away_team")))
             if fixture in dataset_fixtures:
                 raise CornerModelManagerError(
@@ -854,7 +880,9 @@ def _validate_backtest_structure_v1(
                 "backtest test dates are not the complete trailing dataset date groups"
             )
         if first_test_index < 1:
-            raise CornerModelManagerError("backtest has no chronological training dates")
+            raise CornerModelManagerError(
+                "backtest has no chronological training dates"
+            )
         if blocks[0].get("training_cutoff_date") != dataset_dates[first_test_index - 1]:
             raise CornerModelManagerError(
                 "backtest initial cutoff does not match the reopened dataset"
@@ -869,7 +897,9 @@ def _validate_backtest_structure_v1(
                 )
             first_block_date = block_dates[0]
             expected_training_matches = sum(
-                rows_by_date[value] for value in dataset_dates if value < first_block_date
+                rows_by_date[value]
+                for value in dataset_dates
+                if value < first_block_date
             )
             if block.get("training_matches") != expected_training_matches:
                 raise CornerModelManagerError(
@@ -931,9 +961,13 @@ def _validate_backtest_structure_v1(
         if actual_home > 99 or actual_away > 99:
             raise CornerModelManagerError(f"{name} has implausible corner counts")
         if prediction.get("actual_total_corners") != actual_home + actual_away:
-            raise CornerModelManagerError(f"{name}.actual_total_corners is inconsistent")
+            raise CornerModelManagerError(
+                f"{name}.actual_total_corners is inconsistent"
+            )
         if prediction.get("actual_corner_margin") != actual_home - actual_away:
-            raise CornerModelManagerError(f"{name}.actual_corner_margin is inconsistent")
+            raise CornerModelManagerError(
+                f"{name}.actual_corner_margin is inconsistent"
+            )
         if dataset_fixtures is not None:
             expected_result = dataset_fixtures.get(fixture)
             if expected_result is None:
@@ -1087,7 +1121,9 @@ def validate_backtest(
             source_lineage=normalized_lineage,
         )
     except corner_model.CornerModelError as exc:
-        raise CornerModelManagerError(f"backtest deterministic replay failed: {exc}") from exc
+        raise CornerModelManagerError(
+            f"backtest deterministic replay failed: {exc}"
+        ) from exc
     if _canonical_bytes(dict(backtest)) != _canonical_bytes(reproduced):
         raise CornerModelManagerError(
             "backtest differs from deterministic prediction-level replay"
@@ -1109,11 +1145,12 @@ def derive_historical_deployment(backtest: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(holdout, Mapping)
         or holdout.get("policy_version") != corner_model.HOLDOUT_POLICY_VERSION
         or holdout.get("status") not in {"available", "insufficient_history"}
-        or holdout.get("development_only")
-        is not (holdout.get("status") != "available")
+        or holdout.get("development_only") is not (holdout.get("status") != "available")
         or holdout.get("not_used_in_candidate_metric_thresholds") is not True
     ):
-        raise CornerModelManagerError("deployment requires a valid untouched holdout report")
+        raise CornerModelManagerError(
+            "deployment requires a valid untouched holdout report"
+        )
     predictions = int(sample["predictions"])
     excluded = int(sample["excluded_unknown_team_matches"])
     component_excluded = int(sample["excluded_component_incomparable_matches"])
@@ -1157,8 +1194,7 @@ def derive_historical_deployment(backtest: Mapping[str, Any]) -> dict[str, Any]:
                 or not isinstance(independent_units, int)
                 or independent_units < 1
                 or independent_units > int(sample["blocks"])
-                or comparison.get("uncertainty_unit")
-                != "walk_forward_block_cluster"
+                or comparison.get("uncertainty_unit") != "walk_forward_block_cluster"
             ):
                 raise CornerModelManagerError(
                     f"deployment comparison {baseline}.{metric} uncertainty units are invalid"
@@ -1207,9 +1243,7 @@ def derive_historical_deployment(backtest: Mapping[str, Any]) -> dict[str, Any]:
                 raise CornerModelManagerError(
                     f"deployment comparison {baseline}.{metric} mean is inconsistent"
                 )
-            expected_relative = (
-                mean / baseline_mean if baseline_mean > 0.0 else None
-            )
+            expected_relative = mean / baseline_mean if baseline_mean > 0.0 else None
             if (
                 (expected_relative is None) != (relative is None)
                 or expected_relative is not None
@@ -1250,9 +1284,7 @@ def derive_historical_deployment(backtest: Mapping[str, Any]) -> dict[str, Any]:
                 and standard_error is not None
                 and standard_error >= 0.0
                 and lower is not None
-                and lower > CANDIDATE_GATE[
-                    "minimum_one_sided_95_lower_bound"
-                ]
+                and lower > CANDIDATE_GATE["minimum_one_sided_95_lower_bound"]
             )
             observed_comparisons[baseline][metric] = copy.deepcopy(dict(comparison))
     passed = all(checks.values())
@@ -1386,9 +1418,7 @@ def _validate_stored_deployment_shape_v1(entry: Mapping[str, Any], name: str) ->
     predictions = _positive_int(
         observed.get("predictions"), f"{name}.deployment.gate.predictions"
     )
-    blocks = _positive_int(
-        observed.get("blocks"), f"{name}.deployment.gate.blocks"
-    )
+    blocks = _positive_int(observed.get("blocks"), f"{name}.deployment.gate.blocks")
     exclusion_fraction = _finite(
         observed.get("unknown_exclusion_fraction"),
         f"{name}.deployment.gate.unknown_exclusion_fraction",
@@ -1401,9 +1431,7 @@ def _validate_stored_deployment_shape_v1(entry: Mapping[str, Any], name: str) ->
     if not isinstance(observed_metrics, Mapping) or set(observed_metrics) != set(
         CANDIDATE_GATE["maximum_metrics"]
     ):
-        raise CornerModelManagerError(
-            f"{name}.deployment.gate metrics are incomplete"
-        )
+        raise CornerModelManagerError(f"{name}.deployment.gate metrics are incomplete")
     recomputed_checks: dict[str, bool] = {
         "minimum_predictions": predictions >= CANDIDATE_GATE["minimum_predictions"],
         "minimum_blocks": blocks >= CANDIDATE_GATE["minimum_blocks"],
@@ -1482,7 +1510,9 @@ def _validate_stored_deployment_shape(entry: Mapping[str, Any], name: str) -> No
         "development_only",
     }
     if not isinstance(observed, Mapping) or set(observed) != expected_observed_fields:
-        raise CornerModelManagerError(f"{name}.deployment.gate observed evidence is invalid")
+        raise CornerModelManagerError(
+            f"{name}.deployment.gate observed evidence is invalid"
+        )
     predictions = _positive_int(
         observed.get("predictions"), f"{name}.deployment.gate.predictions"
     )
@@ -1497,24 +1527,30 @@ def _validate_stored_deployment_shape(entry: Mapping[str, Any], name: str) -> No
     )
     attempted = predictions + excluded + component_excluded
     expected_fraction = excluded / attempted if attempted else 0.0
-    if abs(
-        _finite(
-            observed.get("unknown_exclusion_fraction"),
-            f"{name}.deployment.gate.unknown_exclusion_fraction",
+    if (
+        abs(
+            _finite(
+                observed.get("unknown_exclusion_fraction"),
+                f"{name}.deployment.gate.unknown_exclusion_fraction",
+            )
+            - expected_fraction
         )
-        - expected_fraction
-    ) > 1e-15:
+        > 1e-15
+    ):
         raise CornerModelManagerError(
             f"{name}.deployment unknown exclusion fraction is inconsistent"
         )
     expected_component_fraction = component_excluded / attempted if attempted else 0.0
-    if abs(
-        _finite(
-            observed.get("component_incomparable_exclusion_fraction"),
-            f"{name}.deployment.gate.component_incomparable_exclusion_fraction",
+    if (
+        abs(
+            _finite(
+                observed.get("component_incomparable_exclusion_fraction"),
+                f"{name}.deployment.gate.component_incomparable_exclusion_fraction",
+            )
+            - expected_component_fraction
         )
-        - expected_component_fraction
-    ) > 1e-15:
+        > 1e-15
+    ):
         raise CornerModelManagerError(
             f"{name}.deployment component exclusion fraction is inconsistent"
         )
@@ -1639,7 +1675,9 @@ def _validate_model_and_evaluation_binding(
         entry.get("model_file_sha256"), f"{name}.model_file_sha256"
     )
     if _file_hash(model_path) != expected_model_file_hash:
-        raise CornerModelManagerError(f"{name} registered model file hash does not match")
+        raise CornerModelManagerError(
+            f"{name} registered model file hash does not match"
+        )
     try:
         model = corner_model.load_model(model_path)
     except corner_model.CornerModelError as exc:
@@ -1668,7 +1706,9 @@ def _validate_model_and_evaluation_binding(
             f"{name} model source filename does not match registered dataset"
         )
     if training.get("matches") != len(records):
-        raise CornerModelManagerError(f"{name} model match count does not match dataset")
+        raise CornerModelManagerError(
+            f"{name} model match count does not match dataset"
+        )
     if (
         training.get("source_lineage") != context["lineage"]
         or training.get("dataset_profile") != context["profile"]
@@ -1681,7 +1721,9 @@ def _validate_model_and_evaluation_binding(
         or training.get("end_date") != actual_cutoff
         or training.get("cutoff_date") != actual_cutoff
     ):
-        raise CornerModelManagerError(f"{name} model training dates do not match dataset")
+        raise CornerModelManagerError(
+            f"{name} model training dates do not match dataset"
+        )
     if (
         training.get("start_kickoff_utc") != actual_start_kickoff
         or training.get("end_kickoff_utc") != actual_cutoff_kickoff
@@ -1704,7 +1746,9 @@ def _validate_model_and_evaluation_binding(
             source_lineage=context["lineage"],
         )
     except corner_model.CornerModelError as exc:
-        raise CornerModelManagerError(f"{name} deterministic model refit failed: {exc}") from exc
+        raise CornerModelManagerError(
+            f"{name} deterministic model refit failed: {exc}"
+        ) from exc
     if _canonical_bytes(model) != _canonical_bytes(reproduced_model):
         raise CornerModelManagerError(
             f"{name} model differs from deterministic source-bound refit"
@@ -1729,10 +1773,9 @@ def _validate_model_and_evaluation_binding(
         source_lineage=context["lineage"],
         expected_config=evaluation_config,
     )
-    if (
-        entry.get("evaluation_hash") != backtest.get("backtest_hash")
-        or entry.get("backtest_hash") != backtest.get("backtest_hash")
-    ):
+    if entry.get("evaluation_hash") != backtest.get("backtest_hash") or entry.get(
+        "backtest_hash"
+    ) != backtest.get("backtest_hash"):
         raise CornerModelManagerError(
             f"{name}.evaluation_hash does not match evaluation file"
         )
@@ -1805,9 +1848,7 @@ def validate_registry(
         if observed_aliases.intersection(normalized_aliases):
             raise CornerModelManagerError("registry league aliases are ambiguous")
         observed_aliases.update(normalized_aliases)
-        dataset_hash = _required_hash(
-            entry.get("dataset_hash"), f"{name}.dataset_hash"
-        )
+        dataset_hash = _required_hash(entry.get("dataset_hash"), f"{name}.dataset_hash")
         expected_dataset_hashes[league_key] = dataset_hash
         _positive_int(entry.get("dataset_rows"), f"{name}.dataset_rows")
         training_start = _iso_date(
@@ -1852,8 +1893,7 @@ def validate_registry(
         source_lineage = entry.get("source_lineage")
         if (
             not isinstance(source_lineage, Mapping)
-            or corner_model._normalize_source_lineage(source_lineage)
-            != source_lineage
+            or corner_model._normalize_source_lineage(source_lineage) != source_lineage
             or source_lineage.get("league_key") != league_key
             or source_lineage.get("dataset_hash") != dataset_hash
         ):
@@ -1866,17 +1906,23 @@ def validate_registry(
         ):
             raise CornerModelManagerError(f"{name}.dataset_profile is invalid")
         for field in ("fixture_set_hash", "response_set_hash", "semantic_rows_hash"):
-            _required_hash(dataset_profile.get(field), f"{name}.dataset_profile.{field}")
+            _required_hash(
+                dataset_profile.get(field), f"{name}.dataset_profile.{field}"
+            )
         fixture_graph = dataset_profile.get("fixture_graph")
         if not isinstance(fixture_graph, Mapping):
-            raise CornerModelManagerError(f"{name}.dataset_profile.fixture_graph is missing")
+            raise CornerModelManagerError(
+                f"{name}.dataset_profile.fixture_graph is missing"
+            )
         _required_hash(
             fixture_graph.get("components_hash"),
             f"{name}.dataset_profile.fixture_graph.components_hash",
         )
         for field in ("training_start_kickoff_utc", "training_cutoff_kickoff_utc"):
             _parse_aware_datetime(entry.get(field), f"{name}.{field}")
-        _validate_fit_config(entry.get("evaluation_config"), f"{name}.evaluation_config")
+        _validate_fit_config(
+            entry.get("evaluation_config"), f"{name}.evaluation_config"
+        )
         if entry.get("lineage_hash") != calculate_lineage_hash(entry):
             raise CornerModelManagerError(
                 f"{name}.lineage_hash does not match dataset/model/evaluation binding"
@@ -1898,9 +1944,7 @@ def validate_registry(
         )
 
 
-def _registry_content_cache_key(
-    directory: Path, registry: Mapping[str, Any]
-) -> str:
+def _registry_content_cache_key(directory: Path, registry: Mapping[str, Any]) -> str:
     files: set[str] = {REGISTRY_FILENAME}
     for index, entry in enumerate(registry["leagues"]):
         for field, suffix in (
@@ -2118,14 +2162,22 @@ def train_registered_model(
     expected_display = str(manifest_league.get("league") or "").strip()
     if not expected_display:
         raise CornerModelManagerError("dataset manifest league display name is missing")
-    if isinstance(league, str) and league.strip() and league.strip() != expected_display:
-        raise CornerModelManagerError("requested league name does not match dataset manifest")
+    if (
+        isinstance(league, str)
+        and league.strip()
+        and league.strip() != expected_display
+    ):
+        raise CornerModelManagerError(
+            "requested league name does not match dataset manifest"
+        )
     manifest_aliases = manifest_league.get("aliases")
     if not isinstance(manifest_aliases, list):
         raise CornerModelManagerError("dataset manifest league aliases are invalid")
     allowed_aliases = {str(value).casefold() for value in manifest_aliases}
     if any(str(value).strip().casefold() not in allowed_aliases for value in aliases):
-        raise CornerModelManagerError("requested league alias is not source-bound in manifest")
+        raise CornerModelManagerError(
+            "requested league alias is not source-bound in manifest"
+        )
     display_name = expected_display
     normalized_aliases = _normalize_aliases(
         league_key, display_name, (str(value) for value in manifest_aliases)
@@ -2136,7 +2188,9 @@ def train_registered_model(
     existing_entries: list[dict[str, Any]] = []
     if registry_path.exists():
         existing_registry = load_registry(destination)
-        existing_entries = [copy.deepcopy(entry) for entry in existing_registry["leagues"]]
+        existing_entries = [
+            copy.deepcopy(entry) for entry in existing_registry["leagues"]
+        ]
 
     dataset_filename = (
         f"{league_key}-corners-{dataset_hash.removeprefix('sha256:')[:16]}.csv"
@@ -2167,8 +2221,7 @@ def train_registered_model(
     source_bundle_payload = context["source_bundle_path"].read_bytes()
     source_file_hash = context["source_file_sha256"]
     registered_source_filename = (
-        "corner-history-source-"
-        f"{source_file_hash.removeprefix('sha256:')[:16]}.json"
+        f"corner-history-source-{source_file_hash.removeprefix('sha256:')[:16]}.json"
     )
     registered_source_path = destination / registered_source_filename
     if registered_source_path.exists():
@@ -2204,7 +2257,9 @@ def train_registered_model(
             source_lineage=context["lineage"],
         )
     except corner_model.CornerModelError as exc:
-        raise CornerModelManagerError(f"corner training or backtest failed: {exc}") from exc
+        raise CornerModelManagerError(
+            f"corner training or backtest failed: {exc}"
+        ) from exc
 
     evaluation_config = dict(backtest["fit_config"])
     validate_backtest(
@@ -2278,7 +2333,9 @@ def train_registered_model(
         "manager_version": MANAGER_VERSION,
         "generated_at": _canonical_datetime(model_time, "generated_at"),
         "deployment_policy": copy.deepcopy(DEPLOYMENT_POLICY),
-        "dataset_hashes": {item["league_key"]: item["dataset_hash"] for item in entries},
+        "dataset_hashes": {
+            item["league_key"]: item["dataset_hash"] for item in entries
+        },
         "leagues": entries,
     }
     registry["registry_hash"] = calculate_registry_hash(registry)
@@ -2422,10 +2479,9 @@ def validate_registered_prediction(
                 f"prediction {field} does not match the registry entry"
             )
     stored_prediction_hash = prediction.get("prediction_hash")
-    if (
-        not isinstance(stored_prediction_hash, str)
-        or stored_prediction_hash != corner_model.calculate_prediction_hash(prediction)
-    ):
+    if not isinstance(
+        stored_prediction_hash, str
+    ) or stored_prediction_hash != corner_model.calculate_prediction_hash(prediction):
         raise CornerModelManagerError(
             "registered corner prediction_hash does not match contents"
         )
@@ -2528,7 +2584,9 @@ def predict_registered_model(
             corner_handicaps=corner_handicaps,
         )
     except corner_model.CornerModelError as exc:
-        raise CornerModelManagerError(f"registered corner prediction failed: {exc}") from exc
+        raise CornerModelManagerError(
+            f"registered corner prediction failed: {exc}"
+        ) from exc
     prediction["registry_binding"] = {
         "registry_hash": registry["registry_hash"],
         "league_key": entry["league_key"],

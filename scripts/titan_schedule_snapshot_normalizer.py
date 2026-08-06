@@ -10,7 +10,9 @@ from typing import Sequence
 
 try:  # Imported from the repository root.
     from scripts import titan_corner_history_collector as collector
-except ImportError:  # Invoked directly as scripts/titan_schedule_snapshot_normalizer.py.
+except (
+    ImportError
+):  # Invoked directly as scripts/titan_schedule_snapshot_normalizer.py.
     import titan_corner_history_collector as collector  # type: ignore[no-redef]
 
 
@@ -51,8 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Validate every file before writing any of them.  This prevents a bad
         # later input from leaving an earlier snapshot partially upgraded.
         checks = [
-            collector.normalize_schedule_snapshot(path, write=False)
-            for path in paths
+            collector.normalize_schedule_snapshot(path, write=False) for path in paths
         ]
         reports = (
             [collector.normalize_schedule_snapshot(path, write=True) for path in paths]

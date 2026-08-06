@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import copy
 import csv
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import math
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from scripts import corner_model
-
 
 TEAMS = ("A", "B", "C", "D")
 
 
-def write_history(path: Path, *, days: int = 36, start: date = date(2023, 1, 1)) -> None:
+def write_history(
+    path: Path, *, days: int = 36, start: date = date(2023, 1, 1)
+) -> None:
     schedules = (
         (("A", "B"), ("C", "D")),
         (("A", "C"), ("D", "B")),
@@ -42,12 +43,14 @@ def write_history(path: Path, *, days: int = 36, start: date = date(2023, 1, 1))
                 home_corners = 3 + (2 * home_index + day) % 7
                 away_corners = 2 + (away_index + 2 * day) % 6
                 match_number += 1
-                fixture_hash = "sha256:" + hashlib.sha256(
-                    f"fixture:{match_number}".encode()
-                ).hexdigest()
-                response_hash = "sha256:" + hashlib.sha256(
-                    f"response:{match_number}".encode()
-                ).hexdigest()
+                fixture_hash = (
+                    "sha256:"
+                    + hashlib.sha256(f"fixture:{match_number}".encode()).hexdigest()
+                )
+                response_hash = (
+                    "sha256:"
+                    + hashlib.sha256(f"response:{match_number}".encode()).hexdigest()
+                )
                 writer.writerow(
                     [
                         match_date.isoformat(),
@@ -64,9 +67,9 @@ def write_history(path: Path, *, days: int = 36, start: date = date(2023, 1, 1))
                         "regular",
                         fixture_hash,
                         f"https://example.test/{match_number}",
-                        (kickoff + timedelta(hours=3)).isoformat().replace(
-                            "+00:00", "Z"
-                        ),
+                        (kickoff + timedelta(hours=3))
+                        .isoformat()
+                        .replace("+00:00", "Z"),
                         response_hash,
                     ]
                 )
@@ -129,8 +132,7 @@ class CornerModelTests(unittest.TestCase):
         mean = math.fsum(index * value for index, value in enumerate(probabilities))
         self.assertAlmostEqual(mean, 6.25, places=7)
         variance = math.fsum(
-            (index - mean) ** 2 * value
-            for index, value in enumerate(probabilities)
+            (index - mean) ** 2 * value for index, value in enumerate(probabilities)
         )
         self.assertAlmostEqual(variance, 6.25 + 6.25**2 / 2.5, places=5)
         self.assertAlmostEqual(
@@ -173,21 +175,19 @@ class CornerModelTests(unittest.TestCase):
                 "fitted_correlation": False,
             },
         )
-        self.assertEqual(
-            set(self.model["parameters"]["attack"]), set(TEAMS)
-        )
-        self.assertEqual(
-            set(self.model["parameters"]["concession"]), set(TEAMS)
-        )
+        self.assertEqual(set(self.model["parameters"]["attack"]), set(TEAMS))
+        self.assertEqual(set(self.model["parameters"]["concession"]), set(TEAMS))
         self.assertEqual(self.model["config"]["half_life_days"], 180.0)
         corner_model.validate_model(self.model)
 
-    def test_disconnected_fixture_components_are_retained_audited_and_fail_cross_component(self):
+    def test_disconnected_fixture_components_are_retained_audited_and_fail_cross_component(
+        self,
+    ):
         disconnected = self.base / "disconnected.csv"
         with self.history.open("r", encoding="utf-8", newline="") as source:
             rows = list(csv.DictReader(source))
         for index, row in enumerate(rows):
-            first, second = (("A", "B") if index % 2 == 0 else ("C", "D"))
+            first, second = ("A", "B") if index % 2 == 0 else ("C", "D")
             if index % 4 >= 2:
                 first, second = second, first
             row["home_team"] = first
@@ -253,9 +253,9 @@ class CornerModelTests(unittest.TestCase):
         forged_cross_component["fixture"]["away_team"] = "C"
         forged_cross_component["fixture"]["unknown_teams"] = ["C"]
         component_map = corner_model._fixture_graph_team_components(graph)
-        forged_cross_component["fixture"]["away_training_component_id"] = (
-            component_map["C"]
-        )
+        forged_cross_component["fixture"]["away_training_component_id"] = component_map[
+            "C"
+        ]
         forged_cross_component["fixture"]["same_training_component"] = None
         forged_cross_component["prediction_hash"] = (
             corner_model.calculate_prediction_hash(forged_cross_component)
@@ -277,9 +277,9 @@ class CornerModelTests(unittest.TestCase):
             )
 
         forged = copy.deepcopy(model)
-        forged["training"]["dataset_profile"]["fixture_graph"][
-            "components_hash"
-        ] = "sha256:" + "0" * 64
+        forged["training"]["dataset_profile"]["fixture_graph"]["components_hash"] = (
+            "sha256:" + "0" * 64
+        )
         forged["model_hash"] = corner_model.calculate_model_hash(forged)
         with self.assertRaisesRegex(
             corner_model.CornerModelError, "fixture graph aggregate audit"
@@ -291,7 +291,7 @@ class CornerModelTests(unittest.TestCase):
         with self.history.open("r", encoding="utf-8", newline="") as source:
             rows = list(csv.DictReader(source))
         for index in range(8):
-            home, away = (("A", "B") if index % 2 == 0 else ("C", "D"))
+            home, away = ("A", "B") if index % 2 == 0 else ("C", "D")
             rows[index]["home_team"] = home
             rows[index]["away_team"] = away
         rows[8]["home_team"], rows[8]["away_team"] = "A", "C"
@@ -387,9 +387,9 @@ class CornerModelTests(unittest.TestCase):
                     "season": "2026",
                     "competition_regime": "regular",
                     "phase": "regular_season",
-                    "source_collected_at": (
-                        kickoff + timedelta(hours=3)
-                    ).isoformat().replace("+00:00", "Z"),
+                    "source_collected_at": (kickoff + timedelta(hours=3))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                 }
             )
         with research.open("w", encoding="utf-8", newline="") as target:
@@ -421,9 +421,7 @@ class CornerModelTests(unittest.TestCase):
         self.assertAlmostEqual(
             math.fsum(math.fsum(row) for row in matrix), 1.0, places=12
         )
-        self.assertLessEqual(
-            prediction["tail_mass"]["raw_omitted_probability"], 1e-8
-        )
+        self.assertLessEqual(prediction["tail_mass"]["raw_omitted_probability"], 1e-8)
         self.assertTrue(prediction["tail_mass"]["tolerance_met"])
         parameters = prediction["distribution_parameters"]
         expected = prediction["expected_corners"]
@@ -437,12 +435,8 @@ class CornerModelTests(unittest.TestCase):
         self.assertEqual(prediction["fixture"]["league_key"], "test_league")
         self.assertEqual(prediction["usage_policy"]["status"], "observation_only")
         self.assertTrue(prediction["usage_policy"]["known_team_model_input"])
-        self.assertFalse(
-            prediction["usage_policy"]["source_bound_manager_verified"]
-        )
-        self.assertFalse(
-            prediction["usage_policy"]["eligible_for_formal_model_input"]
-        )
+        self.assertFalse(prediction["usage_policy"]["source_bound_manager_verified"])
+        self.assertFalse(prediction["usage_policy"]["eligible_for_formal_model_input"])
         corner_model.validate_prediction(prediction, model=self.model)
 
         forged_authority = copy.deepcopy(prediction)
@@ -464,9 +458,7 @@ class CornerModelTests(unittest.TestCase):
     def test_integer_half_and_quarter_lines_have_correct_five_state_support(self):
         prediction = self.prediction()
         totals = {item["line"]: item for item in prediction["corner_totals"]}
-        handicaps = {
-            abs(item["line"]): item for item in prediction["corner_handicaps"]
-        }
+        handicaps = {abs(item["line"]): item for item in prediction["corner_handicaps"]}
         for item in prediction["corner_totals"] + prediction["corner_handicaps"]:
             self.assertEqual(
                 set(item["probabilities"]), set(corner_model.SETTLEMENT_STATES)
@@ -515,9 +507,7 @@ class CornerModelTests(unittest.TestCase):
         )
         self.assertEqual(fallback["fixture"]["unknown_teams"], ["Promoted FC"])
         self.assertEqual(fallback["usage_policy"]["status"], "observation_only")
-        self.assertFalse(
-            fallback["usage_policy"]["eligible_for_formal_model_input"]
-        )
+        self.assertFalse(fallback["usage_policy"]["eligible_for_formal_model_input"])
         self.assertTrue(fallback["warnings"])
         corner_model.validate_prediction(fallback, model=self.model)
 
@@ -600,9 +590,7 @@ class CornerModelTests(unittest.TestCase):
             regularization=0.03,
             hard_max_corners=70,
         )
-        self.assertTrue(
-            result["evaluation_policy"]["same_date_groups_kept_together"]
-        )
+        self.assertTrue(result["evaluation_policy"]["same_date_groups_kept_together"])
         self.assertGreater(result["sample"]["predictions"], 0)
         test_date_to_block = {}
         for block in result["blocks"]:

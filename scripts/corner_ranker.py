@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import argparse
 import copy
-from datetime import datetime, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:  # Imported from the repository root.
@@ -93,8 +93,10 @@ class CornerRankerError(ValueError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -114,9 +116,11 @@ def _parse_aware_datetime(value: Any, name: str) -> datetime:
 
 
 def _canonical_datetime(value: Any, name: str) -> str:
-    return _parse_aware_datetime(value, name).isoformat(
-        timespec="microseconds"
-    ).replace("+00:00", "Z")
+    return (
+        _parse_aware_datetime(value, name)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _finite(value: Any, name: str) -> float:
@@ -268,7 +272,9 @@ def _normalize_evidence(
     if len(components) < 2:
         failed.append("fewer than two independent corner-profile components")
     if not QUANTITATIVE_CORNER_COMPONENTS.intersection(components):
-        failed.append("quantitative home/away or opponent-adjusted corner rates unavailable")
+        failed.append(
+            "quantitative home/away or opponent-adjusted corner rates unavailable"
+        )
     return {
         "available": True,
         "independent_from_goal_model": independent,
@@ -317,9 +323,7 @@ def _normalize_adverse_corroboration(
     source = value.get("source")
     summary = value.get("summary")
     if kind not in ADVERSE_CORROBORATION_KINDS:
-        raise CornerRankerError(
-            f"{name}.kind must be confirmed_lineup or fundamental"
-        )
+        raise CornerRankerError(f"{name}.kind must be confirmed_lineup or fundamental")
     if not isinstance(source, str) or not source.strip():
         raise CornerRankerError(f"{name}.source is required")
     if not isinstance(summary, str) or not summary.strip():
@@ -353,7 +357,9 @@ def _normalize_market_snapshot(
         raise CornerRankerError(f"{name} must be an object")
     market = value.get("market")
     if market not in MARKETS:
-        raise CornerRankerError(f"{name}.market must be corner_total or corner_handicap")
+        raise CornerRankerError(
+            f"{name}.market must be corner_total or corner_handicap"
+        )
     line = _quarter_line(value.get("line"), f"{name}.line")
     if market == "corner_total" and line < 0.0:
         raise CornerRankerError(f"{name}.line cannot be negative for corner totals")
@@ -421,9 +427,9 @@ def _normalize_market_snapshot(
         "firm_count": firm_count,
         "market_complete": complete,
         "market_source": source.strip(),
-        "market_collected_at": collected.isoformat(
-            timespec="microseconds"
-        ).replace("+00:00", "Z"),
+        "market_collected_at": collected.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        ),
         "price_basis": str(price_basis),
         "market_signal": str(market_signal),
         "adverse_signal_corroboration": adverse,
@@ -438,9 +444,7 @@ def _entry_for_prediction(
         raise CornerRankerError("registered prediction binding is missing")
     league_key = binding.get("league_key")
     matches = [
-        entry
-        for entry in registry["leagues"]
-        if entry.get("league_key") == league_key
+        entry for entry in registry["leagues"] if entry.get("league_key") == league_key
     ]
     if len(matches) != 1:
         raise CornerRankerError("prediction league is not uniquely registered")
@@ -524,7 +528,9 @@ def _prediction_market_distribution(
             raw_probabilities[state], f"{market} {side}:{line:g}.{state}"
         )
         if not 0.0 <= probability <= 1.0:
-            raise CornerRankerError("corner settlement probabilities must be within [0,1]")
+            raise CornerRankerError(
+                "corner settlement probabilities must be within [0,1]"
+            )
         probabilities[state] = probability
     if abs(math.fsum(probabilities.values()) - 1.0) > 1e-9:
         raise CornerRankerError("corner settlement probabilities must sum to one")
@@ -567,12 +573,8 @@ def _settlement_equivalent_probability(
     when comparing the model with a two-way no-vig market probability.
     """
 
-    win_mass = float(probabilities["full_win"]) + 0.5 * float(
-        probabilities["half_win"]
-    )
-    loss_mass = float(probabilities["loss"]) + 0.5 * float(
-        probabilities["half_loss"]
-    )
+    win_mass = float(probabilities["full_win"]) + 0.5 * float(probabilities["half_win"])
+    loss_mass = float(probabilities["loss"]) + 0.5 * float(probabilities["half_loss"])
     directional_mass = win_mass + loss_mass
     if directional_mass <= 0.0 or not math.isfinite(directional_mass):
         raise CornerRankerError("settlement distribution has no directional stake mass")
@@ -581,7 +583,13 @@ def _settlement_equivalent_probability(
 
 def _candidate_rank_key(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
     data_rank = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
-    signal_rank = {"aligned": 0, "neutral": 1, "against": 2, "conflicting": 3, "unknown": 4}
+    signal_rank = {
+        "aligned": 0,
+        "neutral": 1,
+        "against": 2,
+        "conflicting": 3,
+        "unknown": 4,
+    }
     side_rank = {
         "corner_total": {"over": 0, "under": 1},
         "corner_handicap": {"home": 0, "away": 1},
@@ -628,9 +636,11 @@ def _build_ranking(
         raise CornerRankerError("ranking generated_at cannot predate the prediction")
     if ranking_time >= kickoff:
         raise CornerRankerError("ranking generated_at must be strictly before kickoff")
-    if not isinstance(market_snapshots, Sequence) or isinstance(
-        market_snapshots, (str, bytes)
-    ) or not market_snapshots:
+    if (
+        not isinstance(market_snapshots, Sequence)
+        or isinstance(market_snapshots, (str, bytes))
+        or not market_snapshots
+    ):
         raise CornerRankerError("at least one current corner market is required")
     normalized_markets = [
         _normalize_market_snapshot(
@@ -656,9 +666,9 @@ def _build_ranking(
     )
 
     candidates: list[dict[str, Any]] = []
-    model_input_eligible = prediction["usage_policy"].get(
-        "eligible_for_formal_model_input"
-    ) is True
+    model_input_eligible = (
+        prediction["usage_policy"].get("eligible_for_formal_model_input") is True
+    )
     deployment_status = prediction.get("deployment_status")
     for snapshot in normalized_markets:
         market = str(snapshot["market"])
@@ -679,7 +689,9 @@ def _build_ranking(
                 raw_implied[side] = 1.0 / decimal_odds
             implied_total = math.fsum(raw_implied.values())
             if implied_total <= 0.0 or not math.isfinite(implied_total):
-                raise CornerRankerError("complete market implied probability is invalid")
+                raise CornerRankerError(
+                    "complete market implied probability is invalid"
+                )
             no_vig = {side: raw_implied[side] / implied_total for side in sides}
             overround = implied_total - 1.0
 
@@ -720,9 +732,13 @@ def _build_ranking(
 
             diagnostic_failures: list[str] = []
             if not complete:
-                diagnostic_failures.append("complete current two-way corner market unavailable")
+                diagnostic_failures.append(
+                    "complete current two-way corner market unavailable"
+                )
             if quoted_odds is None:
-                diagnostic_failures.append("selected current executable odds unavailable")
+                diagnostic_failures.append(
+                    "selected current executable odds unavailable"
+                )
             if snapshot["firm_count"] < MINIMUM_FIRMS:
                 diagnostic_failures.append(
                     f"firm count {snapshot['firm_count']} < {MINIMUM_FIRMS}"
@@ -736,7 +752,9 @@ def _build_ranking(
                     "registered model input is observation-only (unknown-team fallback)"
                 )
             if deployment_status == "shadow":
-                diagnostic_failures.append("registered model deployment status is shadow")
+                diagnostic_failures.append(
+                    "registered model deployment status is shadow"
+                )
             if snapshot["market_signal"] == "unknown":
                 diagnostic_failures.append("current market signal is unknown")
             if ev is None:
@@ -744,7 +762,9 @@ def _build_ranking(
             elif ev <= 0.0:
                 diagnostic_failures.append(f"EV {ev * 100:.2f}% is not positive")
             if edge_pp is None:
-                diagnostic_failures.append("no-vig model-versus-market edge unavailable")
+                diagnostic_failures.append(
+                    "no-vig model-versus-market edge unavailable"
+                )
             elif edge_pp <= 0.0:
                 diagnostic_failures.append(f"edge {edge_pp:.2f}pp is not positive")
             if snapshot["market_signal"] in {"against", "conflicting"}:
@@ -843,9 +863,7 @@ def _build_ranking(
     upstream_policy = {
         "deployment_status": prediction.get("deployment_status"),
         "deployment_policy_version": prediction.get("deployment_policy_version"),
-        "formal_corner_total_eligible": prediction.get(
-            "formal_corner_total_eligible"
-        ),
+        "formal_corner_total_eligible": prediction.get("formal_corner_total_eligible"),
         "formal_corner_handicap_eligible": prediction.get(
             "formal_corner_handicap_eligible"
         ),

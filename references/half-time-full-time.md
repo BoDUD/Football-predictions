@@ -31,7 +31,11 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
 2. Estimate the league's nine-cell HT/FT association from training rows only. Add Jeffreys
    smoothing of 0.5 to every cell, divide the joint by the product of its historical row and
    column marginals, and apply the resulting association lift to the fixture-specific
-   first-half and full-time marginals.
+   first-half and full-time marginals. The registered fixed configuration retains uniform
+   association weights. `--association-half-life-days` is an explicit experiment that
+   exponentially downweights older rows and records its raw/weighted counts, effective
+   sample weight, reference date, formula, and half-life in both model and prediction audits;
+   it must be compared chronologically before any registered-default change.
 3. Use iterative proportional fitting (IPF) so the final 3x3 matrix reproduces the fixture's
    half-time and full-time marginals exactly. The resulting cells are HH, HD, HA, DH, DD, DA,
    AH, AD, and AA.

@@ -12,23 +12,22 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, tzinfo
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import random
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
 
 BASE_URL = "https://m.titan007.com"
 ENDPOINT = BASE_URL + "/HandicapDataInterface.ashx"
@@ -99,8 +98,8 @@ MARKET_ORDER = {
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
 
 
@@ -193,11 +192,15 @@ def _optional_bool(value: Any) -> bool | None:
 
 def _epoch_iso(value: int) -> str:
     try:
-        return datetime.fromtimestamp(value, timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+        return (
+            datetime.fromtimestamp(value, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
         )
     except (OverflowError, OSError, ValueError) as error:
-        raise CornerOddsCollectionError("epoch is outside the supported range") from error
+        raise CornerOddsCollectionError(
+            "epoch is outside the supported range"
+        ) from error
 
 
 def _match_id(raw: Mapping[str, Any], source: str) -> str:
@@ -367,7 +370,9 @@ def build_request_plan(
         _fixture_kickoff_epoch(fixture)
         match_id = str(fixture["match_id"])
         if match_id in seen_match_ids:
-            raise CornerOddsCollectionError("fixtures contain duplicate match_id values")
+            raise CornerOddsCollectionError(
+                "fixtures contain duplicate match_id values"
+            )
         seen_match_ids.add(match_id)
         fingerprint = _fixture_fingerprint(fixture)
         for spec in specs:
@@ -418,9 +423,7 @@ def _time_epoch(
     if isinstance(value, bool) or value is None or value == "":
         raise CornerOddsCollectionError(f"{field} is missing")
     if isinstance(value, (int, float)) or (
-        isinstance(value, str)
-        and value.strip().isdigit()
-        and len(value.strip()) <= 10
+        isinstance(value, str) and value.strip().isdigit() and len(value.strip()) <= 10
     ):
         return _epoch(value, field)
     if numeric_epoch_only:
@@ -784,7 +787,9 @@ def fetch_request(
             if not raw:
                 raise CornerOddsCollectionError("Titan returned an empty response")
             if len(raw) > MAX_RESPONSE_BYTES:
-                raise CornerOddsCollectionError("Titan response exceeds the safety limit")
+                raise CornerOddsCollectionError(
+                    "Titan response exceeds the safety limit"
+                )
             result = parse_source_response(request_item, raw, _utc_now())
             result["attempts_used"] = attempt
             if raw_dir is not None:
@@ -817,17 +822,18 @@ def load_checkpoint(
     try:
         raw_checkpoint = path.read_bytes()
     except OSError as error:
-        raise CornerOddsCollectionError(f"cannot read checkpoint {path}: {error}") from error
+        raise CornerOddsCollectionError(
+            f"cannot read checkpoint {path}: {error}"
+        ) from error
     lines = raw_checkpoint.splitlines(keepends=True)
     valid_bytes = 0
     for line_number, raw_line in enumerate(lines, start=1):
         try:
             line = raw_line.decode("utf-8")
         except UnicodeError as error:
-            is_truncated_tail = (
-                line_number == len(lines)
-                and not raw_checkpoint.endswith((b"\n", b"\r"))
-            )
+            is_truncated_tail = line_number == len(
+                lines
+            ) and not raw_checkpoint.endswith((b"\n", b"\r"))
             if repair_truncated_tail and is_truncated_tail:
                 with path.open("r+b") as handle:
                     handle.truncate(valid_bytes)
@@ -841,10 +847,9 @@ def load_checkpoint(
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
-            is_truncated_tail = (
-                line_number == len(lines)
-                and not raw_checkpoint.endswith((b"\n", b"\r"))
-            )
+            is_truncated_tail = line_number == len(
+                lines
+            ) and not raw_checkpoint.endswith((b"\n", b"\r"))
             if repair_truncated_tail and is_truncated_tail:
                 with path.open("r+b") as handle:
                     handle.truncate(valid_bytes)
@@ -877,11 +882,9 @@ def _record_matches_request_identity(
         record.get("schema_version") == SCHEMA_VERSION
         and record.get("collector_version") == COLLECTOR_VERSION
         and record.get("request_key") == request_item.get("request_key")
-        and record.get("fixture_fingerprint")
-        == request_item.get("fixture_fingerprint")
+        and record.get("fixture_fingerprint") == request_item.get("fixture_fingerprint")
         and record.get("fixture") == _fixture_summary(fixture)
-        and str(record.get("match_id") or "")
-        == str(request_item.get("match_id") or "")
+        and str(record.get("match_id") or "") == str(request_item.get("match_id") or "")
         and record.get("company_id") == int(request_item["company_id"])
         and record.get("market_key") == spec.key
         and record.get("period") == spec.period
@@ -914,10 +917,9 @@ def _can_resume(
 ) -> bool:
     """Resume only a source-replayable record bound to this exact request."""
 
-    if (
-        not _record_matches_request_identity(record, request_item)
-        or record.get("status") not in {"complete", "no_verified_snapshot"}
-    ):
+    if not _record_matches_request_identity(record, request_item) or record.get(
+        "status"
+    ) not in {"complete", "no_verified_snapshot"}:
         return False
     raw_path = _raw_response_path(output_dir, record.get("source_response_path"))
     if raw_path is None or not raw_path.is_file():
@@ -945,9 +947,7 @@ def _can_resume(
         if not isinstance(collected_at, str) or not collected_at:
             return False
         normalized_time = (
-            collected_at[:-1] + "+00:00"
-            if collected_at.endswith("Z")
-            else collected_at
+            collected_at[:-1] + "+00:00" if collected_at.endswith("Z") else collected_at
         )
         parsed_time = datetime.fromisoformat(normalized_time)
         if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
@@ -1005,9 +1005,9 @@ def build_qa(
             reasons = filtering.get("rejection_reason_counts")
             if isinstance(reasons, Mapping):
                 for reason, count in reasons.items():
-                    rejection_reasons[str(reason)] = (
-                        rejection_reasons.get(str(reason), 0) + int(count)
-                    )
+                    rejection_reasons[str(reason)] = rejection_reasons.get(
+                        str(reason), 0
+                    ) + int(count)
     return {
         "fixtures": fixtures,
         "planned_requests": len(records),
@@ -1015,7 +1015,9 @@ def build_qa(
         "fetched_requests": fetched_requests,
         "status_counts": dict(sorted(status_counts.items())),
         "market_counts": dict(sorted(market_counts.items())),
-        "company_counts": dict(sorted(company_counts.items(), key=lambda item: int(item[0]))),
+        "company_counts": dict(
+            sorted(company_counts.items(), key=lambda item: int(item[0]))
+        ),
         "match_market_pairs": len(planned_match_markets),
         "match_market_pairs_with_at_least_one_verified_company": len(
             covered_match_markets
@@ -1079,9 +1081,7 @@ def collect(
     plan = build_request_plan(
         fixtures, company_ids, include_half_total=include_half_total
     )
-    checkpoint_records = load_checkpoint(
-        checkpoint_path, repair_truncated_tail=True
-    )
+    checkpoint_records = load_checkpoint(checkpoint_path, repair_truncated_tail=True)
     current: dict[str, dict[str, Any]] = {}
     pending: list[dict[str, Any]] = []
     for request_item in plan:
@@ -1130,9 +1130,10 @@ def collect(
                     raise CornerOddsCollectionError(
                         f"fetched record {record.get('request_key')} does not match request identity"
                     )
-                if record.get("status") in {"complete", "no_verified_snapshot"} and not _can_resume(
-                    record, request_item, output_dir
-                ):
+                if record.get("status") in {
+                    "complete",
+                    "no_verified_snapshot",
+                } and not _can_resume(record, request_item, output_dir):
                     raise CornerOddsCollectionError(
                         f"fetched record {record.get('request_key')} cannot be replayed from raw evidence"
                     )
@@ -1226,7 +1227,9 @@ def _parser() -> argparse.ArgumentParser:
             "content-addressed raw/ storage for checkpoint replay"
         ),
     )
-    parser.add_argument("--limit", type=int, help="limit input fixtures for a smoke run")
+    parser.add_argument(
+        "--limit", type=int, help="limit input fixtures for a smoke run"
+    )
     return parser
 
 
