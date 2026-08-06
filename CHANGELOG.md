@@ -4,6 +4,24 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-08-07
+
+### Added
+- Added a frozen forward-policy manifest and untouched live-forward cohort contract that bind code, data, model, selector, gate, market-status, and display-policy identities without fabricating promotion evidence from historical or reviewed matches.
+- Added executable source-evidence envelopes with raw payload hashes, parser versions, offline replay, fixture binding, and schema canaries for provider adapters.
+- Added an installable `soccer-predict` command with a side-effect-safe `doctor` covering Python, optional raster support, Chinese fonts, timezone data, workspace state, model artifacts, and scheduler/watchdog health; external connectivity remains explicit opt-in.
+- Added categorized test inventory, clean-wheel smoke installation, Windows and PowerShell watchdog coverage, and real notebook execution against an explicitly non-evidence CI fixture.
+
+### Changed
+- Replaced the two-stage Dixon–Coles fit with a jointly bounded attack/defence/home/rho optimizer, retained deterministic legacy cross-checks, and exposed convergence, objective, gradient, iteration, and boundary diagnostics. Optional HT/FT association time decay remains experimental until chronological evidence supports promotion.
+- Renamed and expanded the public joint-scenario uncertainty display so the Rank-1-derived goal band, independent goal-range audit, Top-2 cumulative mass, remaining mass, and entropy state cannot be mistaken for certainty or independently paired selections.
+- Hardened one-time scheduling with exact UTC/date-bound schedule specifications and returned next-run verification across day, month, DST, and past-hour boundaries.
+- Extracted pure probability, settlement, policy, validation, and source-evidence boundaries from monolithic workflow code while preserving frozen archive and settlement behavior.
+- Expanded Ruff lint and format checks to all Python package, script, and test files, while keeping current coverage and typing gates explicit about their measured scope.
+
+### Security
+- Pinned GitHub Actions to immutable commit SHAs and kept all new release, validation, and display changes fail-closed; no market was promoted and no historical artifact was rewritten.
+
 ## [3.3.0] - 2026-08-06
 
 ### Added
