@@ -5,7 +5,8 @@ The command accepts only a reviewed history record and a match id.  It never
 accepts recommendation, HT/FT, or score text from the caller.  All pre-match
 content is read from ``settlement_basis``; HT/FT and score references are two
 views of the same validated joint-path events returned by
-``public_market_outlook``.
+``public_market_outlook``.  Each ranked row also retains the score-derived
+goal-range projection from that same event.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ COLUMNS = (
     ("全场", "final_score", 100),
     ("主推结算", "primary_settlement", 250),
     ("半全场参考", "htft_reference", 260),
-    ("波胆参考", "score_reference", 280),
+    ("总进球/波胆参考", "score_reference", 280),
 )
 
 if sum(width for _label, _key, width in COLUMNS) != TABLE_WIDTH:
@@ -92,6 +93,9 @@ class JointEvent:
     rank: int
     htft: str
     htft_label: str
+    goal_range_code: str
+    goal_range_label: str
+    total_goals: int
     score: str
     probability: float
 
@@ -136,7 +140,10 @@ class ReviewCard:
     def score_reference(self) -> str:
         if not self.events:
             return "数据不足"
-        lines = ["高方差·非推荐"]
+        lines = [
+            f"总进球 {self.events[0].goal_range_label}",
+            "高方差·非推荐",
+        ]
         lines.extend(
             f"{event.rank}. {event.score} {event.percentage:.1f}%"
             for event in self.events
@@ -343,6 +350,22 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                 raise ReviewCardError("public joint display event violates safety policy")
             home_goals = int(score_match.group(1))
             away_goals = int(score_match.group(2))
+            total_goals = home_goals + away_goals
+            expected_goal_range = (
+                "0-1" if total_goals <= 1 else
+                "2-3" if total_goals <= 3 else
+                "4-6" if total_goals <= 6 else
+                "7+"
+            )
+            goal_range_label = str(item.get("goal_range_label") or "")
+            if (
+                item.get("total_goals") != total_goals
+                or item.get("goal_range_code") != expected_goal_range
+                or goal_range_label != f"{expected_goal_range}球"
+            ):
+                raise ReviewCardError(
+                    "public joint display goal range conflicts with its score"
+                )
             if item.get("home_goals") != home_goals or item.get("away_goals") != away_goals:
                 raise ReviewCardError("public joint display score fields conflict")
             full_time_result = (
@@ -359,6 +382,9 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                     rank=rank,
                     htft=htft,
                     htft_label=f"{HTFT_LABELS[htft[0]]}/{HTFT_LABELS[htft[1]]}",
+                    goal_range_code=expected_goal_range,
+                    goal_range_label=goal_range_label,
+                    total_goals=total_goals,
                     score=score,
                     probability=probability,
                 )

@@ -86,7 +86,6 @@ ARCHIVE_DERIVED_ROW_FIELDS = frozenset(
 )
 ALLOWED_STATUSES = frozenset({"formal_primary", "observation", "no_bet"})
 HTFT_RESULT_LABELS = {"H": "胜", "D": "平", "A": "负"}
-ONE_X_TWO_RESULT_LABELS = {"home": "主胜", "draw": "平局", "away": "客胜"}
 FORBIDDEN_METADATA = re.compile(r"[★◇]|主推|推荐|稳胆|必中|必红")
 FORBIDDEN_ELLIPSES = ("…", "...")
 
@@ -106,7 +105,7 @@ COLORS = {
 }
 
 FOOTER_SOURCE_NOTE = (
-    "半全场与波胆按冻结联合概率 Top 2 逐行配对；不展示独立榜单或第三项。"
+    "总进球取冻结联合第1名比分映射；半全场与波胆按联合 Top 2 配对，不展示独立榜单或第三项。"
 )
 
 
@@ -262,14 +261,15 @@ def _expected_kickoff_date(version: Mapping[str, Any]) -> str:
 
 def _joint_artifact_display(
     record: Mapping[str, Any],
-) -> tuple[str, str, str, str | None]:
+) -> tuple[str, str, str]:
     """Return display values from one validated artifact, or fail closed as a unit.
 
-    The optional fourth value is a diagnostic 1X2 model leader.  It is never a
-    formal recommendation and may be shown only for a ``no_bet`` row.
+    The single goal-range value is projected from frozen joint rank 1.  The
+    HT/FT and score columns are the same two frozen joint events.  No
+    independently ranked marginal may occupy a compact scenario field.
     """
 
-    insufficient = ("数据不足", "数据不足", "数据不足", None)
+    insufficient = ("数据不足", "数据不足", "数据不足")
     try:
         artifact = memory_store.validated_joint_scenario_audit(record)
     except (TypeError, ValueError):
@@ -279,34 +279,6 @@ def _joint_artifact_display(
 
     try:
         public = public_market_outlook.build_public_market_outlook(artifact)
-        total_market = public["markets"]["goal_ranges"]
-        top1 = total_market["top1"]
-        gap = float(total_market["gap_percentage_points"])
-        clarity = "明确" if total_market.get("clarity") == "clear" else "分歧"
-        total_goals = (
-            f"{top1['label']} {float(top1['percentage']):.1f}%\n"
-            f"{clarity}·领先{gap:.1f}pp"
-        )
-
-        one_x_two_market = public["markets"]["one_x_two"]
-        if one_x_two_market.get("recommendation_eligible") is not False:
-            raise ValueError("1X2 model leader must remain recommendation-ineligible")
-        one_x_two_top1 = one_x_two_market["top1"]
-        one_x_two_code = str(one_x_two_top1["code"])
-        if one_x_two_code not in ONE_X_TWO_RESULT_LABELS:
-            raise ValueError("invalid 1X2 display code")
-        one_x_two_percentage = float(one_x_two_top1["percentage"])
-        if (
-            not math.isfinite(one_x_two_percentage)
-            or one_x_two_percentage <= 0.0
-            or one_x_two_percentage > 100.0
-        ):
-            raise ValueError("invalid 1X2 display probability")
-        model_leader = (
-            f"◇ 模型首选：{ONE_X_TWO_RESULT_LABELS[one_x_two_code]} "
-            f"{one_x_two_percentage:.1f}%\n（不计主推、不计战绩）"
-        )
-
         scenario_block = public["joint_scenarios"]
         scenario_items = scenario_block["items"]
         if (
@@ -317,6 +289,7 @@ def _joint_artifact_display(
             != public_market_outlook.JOINT_DISPLAY_POLICY
         ):
             raise ValueError("joint scenarios must contain the global joint Top 2")
+        rank_one_goal_range: str | None = None
         htft_lines: list[str] = []
         seen_events: set[tuple[str, str]] = set()
         score_lines: list[str] = []
@@ -333,6 +306,20 @@ def _joint_artifact_display(
                 raise ValueError("invalid joint display score")
             home_goals = int(score_match.group(1))
             away_goals = int(score_match.group(2))
+            scenario_total_goals = home_goals + away_goals
+            expected_goal_range = (
+                "0-1" if scenario_total_goals <= 1 else
+                "2-3" if scenario_total_goals <= 3 else
+                "4-6" if scenario_total_goals <= 6 else
+                "7+"
+            )
+            if item.get("total_goals") != scenario_total_goals:
+                raise ValueError("joint display total-goals field conflicts with score")
+            if item.get("goal_range_code") != expected_goal_range:
+                raise ValueError("joint display goal range conflicts with score")
+            goal_range_label = str(item.get("goal_range_label") or "")
+            if goal_range_label != f"{expected_goal_range}球":
+                raise ValueError("joint display goal-range label is invalid")
             full_result = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
             if htft_code[1] != full_result:
                 raise ValueError("joint display score conflicts with HT/FT result")
@@ -348,9 +335,13 @@ def _joint_artifact_display(
                 raise ValueError("joint Top 2 must be probability-ranked")
             previous_probability = probability
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
+            if rank == 1:
+                rank_one_goal_range = goal_range_label
             htft_lines.append(label)
             score_lines.append(f"{score} {percentage:.1f}%")
-        return total_goals, "\n".join(htft_lines), "\n".join(score_lines), model_leader
+        if rank_one_goal_range is None:
+            raise ValueError("joint rank-1 goal range is unavailable")
+        return rank_one_goal_range, "\n".join(htft_lines), "\n".join(score_lines)
     except (
         KeyError,
         TypeError,
@@ -483,7 +474,7 @@ def validate_payload(
         if supplied_league not in accepted_league_values:
             raise ValueError(f"{prefix}.league does not match the selected archived fixture ({expected_league})")
 
-        total_goals, htft, scores, model_leader = _joint_artifact_display(
+        total_goals, htft, scores = _joint_artifact_display(
             archived_version
         )
 
@@ -520,19 +511,8 @@ def validate_payload(
                 raise ValueError(f"{prefix}.primary does not match the archived active primary")
             primary = archived_primary
             star = True
-        elif derived_status == "observation":
-            primary = authorized_labels[0]
-            supplied_primary = raw.get("primary")
-            if supplied_primary is not None and _display_value(
-                supplied_primary, f"{prefix}.primary"
-            ) != primary:
-                raise ValueError(
-                    f"{prefix}.primary does not match the archived best observation"
-                )
-            primary = f"◇ {primary}\n（不计主推、不计战绩）"
-            star = False
         else:
-            primary = model_leader or "数据不足"
+            primary = "无正式主推"
             star = False
 
         rows.append(
@@ -756,7 +736,7 @@ def render_svg(card: Card) -> str:
     parts.extend(
         [
             f'<text x="72" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["star"]}">★ 正式主推中的最高信心方向</text>',
-            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["observation"]}">◇ 观察/模型首选（不计主推战绩）</text>',
+            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["observation"]}">无正式主推＝不下注、不结算、不计战绩</text>',
             f'<text x="{WIDTH - 76}" y="{footer_y}" text-anchor="end" font-family="Microsoft YaHei, sans-serif" font-size="20" fill="{COLORS["muted"]}">正式主推 {formal_count} 场</text>',
             f'<line x1="72" y1="{footer_y + 22}" x2="{WIDTH - 72}" y2="{footer_y + 22}" stroke="{COLORS["grid"]}"/>',
             f'<text x="72" y="{footer_y + 61}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["warning"]}">提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。</text>',
@@ -927,7 +907,7 @@ def render_raster(card: Card, output_format: str) -> bytes:
     draw.text((72, footer_y), "★ 正式主推中的最高信心方向", font=footer_font, fill=COLORS["star"])
     draw.text(
         (455, footer_y),
-        "◇ 观察/模型首选（不计主推战绩）",
+        "无正式主推＝不下注、不结算、不计战绩",
         font=footer_font,
         fill=COLORS["observation"],
     )

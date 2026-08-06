@@ -1,4 +1,4 @@
 interface:
   display_name: "Soccer Predict"
   short_description: "Audited football posters and joint match-path models"
-  default_prompt: "Use $soccer-predict to generate a deterministic prediction poster plus concise analysis text, mark only a gate-qualified formal primary with a star, derive HT/FT, exact score, 1X2 and total-goal fields from one validated joint match-path posterior, compare complete current markets without double counting, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."
+  default_prompt: "Use $soccer-predict to generate a deterministic prediction poster plus concise analysis text, show only a gate-qualified formal primary or an explicit no-primary state, map the single public goal range from the frozen joint Rank 1 score, keep the frozen HT/FT-score Top 2 paired, retain independent marginals as audits only, compare complete current markets without double counting, enforce strict pre-kickoff archiving, and provide lineup-time rechecking plus verified post-match review."

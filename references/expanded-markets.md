@@ -36,6 +36,15 @@ Use the same complete score matrix as exact-score and total-goals analysis:
 
 Do not create a new goal distribution only to favor a market. Preserve 0-0 and the distribution tail when calculating every band, including `7+`.
 
+Keep the complete goal-range marginal and its ranking as an audit distribution. Its Top-1
+cannot fill the card's `总进球` or `主推` cell merely because it has the largest marginal
+probability. The compact `总进球` value is instead the band deterministically mapped from the
+frozen global joint-event Rank 1 score. The Rank 2 event's score-derived band remains an
+internal consistency field and is not repeated in the image or normal text. A `goal_range`
+direction may still become the unique formal primary only when it has an executable complete
+market and passes every formal price, EV, edge, evidence, timing, data-quality, and policy
+gate; marginal rank alone never qualifies it.
+
 Build corner probabilities separately with the registered corner-count model. Its training
 data must contain verified 90-minute home and away corner counts, chronological fixture
 times, normalized league/team identities, dataset hash, and an as-of cutoff. Derive both the
@@ -59,6 +68,23 @@ goals, possession, or xG alone are not corner evidence.
 Compare candidates using an executable consensus or median price, edge, evidence quality, and market depth. Do not rank a single-firm outlier price as the best candidate merely because its raw EV is highest.
 
 ## Archive and lineup check
+
+For every new normal initial and lineup-check archive, evaluate this whole pool through one
+fixture-bound `candidate-evaluation/2.0.0` file and pass
+`--candidate-evaluation-file ... --require-candidate-evaluations`. Its manifest must contain
+all eight primary-market keys, marking each as `evaluated` with at least one candidate or
+`unavailable` with a concrete reason. The archive reopens the canonical model distribution,
+recalculates complete-market no-vig probabilities, EV, edge, timing, evidence, and policy
+gates, and chooses at most one counterfactual shadow per match and market. A shadow remains
+non-monetary and cannot become the card primary. Release-gate failures are measured separately
+so paused markets can accumulate clean forward evidence; they never weaken integrity, value,
+or risk gates. See [model-validation.md](model-validation.md#forward-candidate-evaluation-cohort).
+
+The candidate artifact must be generated at or after every market collection time and every
+bound joint/corner model or ranker generation time. The archive freezes its normalized source
+payload and active-version/evidence lineage; review and statistics replay all derived fields and
+the verified-result diagnostic. A derivative edit with a new self-hash is invalid, and the same
+match/market counts once even when equivalent artifacts have different byte hashes.
 
 The audit contract applies to the original markets as well as the expanded markets. Asian
 handicap, full-time total, and first-half Asian/total picks must include explicit odds
@@ -84,7 +110,7 @@ Store fixed, explicit fields:
 - Corner total: `side` (`over` or `under`), `line`, the common fields, and a settlement-probability distribution.
 - Corner handicap: `side` (`home` or `away`), `line`, the common fields, and a settlement-probability distribution.
 
-Explicitly set `odds_format` to `decimal` or `hong_kong`. Recalculate no-push EV as `p * decimal_odds - 1` or `p * (1 + hong_kong_odds) - 1`; reject a supplied EV that differs. For every split-settlement market, persist `full_win`, `half_win`, `push`, `half_loss`, and `loss` probabilities, require them to sum to one, and calculate EV with the actual split settlement. Set impossible states to zero: half-lines allow only full win/loss, integer lines allow full win/push/loss, and quarter lines allow full/half win and full/half loss but no push. Preserve legacy records with no format under their historic behavior in a quarantined cohort; never rewrite old reviewed ROI or describe it as strict forward performance.
+Explicitly set `odds_format` to `decimal` or `hong_kong`. Recalculate no-push EV as `p * decimal_odds - 1` or `p * (1 + hong_kong_odds) - 1`; reject a supplied EV that differs. For every split-settlement market, persist `full_win`, `half_win`, `push`, `half_loss`, and `loss` probabilities, require them to sum to one, and calculate EV with the actual split settlement. For comparable model-versus-no-vig edge, calculate `edge_probability = (full_win + 0.5 * half_win) / (full_win + 0.5 * half_win + loss + 0.5 * half_loss)` and `edge_pp = 100 * (edge_probability - market_probability)`; push has zero active stake, and an all-push distribution fails closed. Set impossible states to zero: half-lines allow only full win/loss, integer lines allow full win/push/loss, and quarter lines allow full/half win and full/half loss but no push. Preserve legacy records with no format under their historic behavior in a quarantined cohort; never rewrite old reviewed ROI or describe it as strict forward performance.
 
 Use the dedicated `record` arguments:
 
@@ -95,7 +121,7 @@ Use the dedicated `record` arguments:
 - `--corner-profile-evidence` whenever a future policy-enabled formal corner pick is archived
 
 Pass the relevant `--*-market-complete` flag only after every required outcome of that current market has been verified. While the manager formal flags remain false, keep these values in a corner-ranker observation artifact and do not pass formal corner-pick arguments to `memory_store.py record`.
-The archive retains the complete outcome prices, raw implied probabilities, server-calculated no-vig probabilities, and audit metadata. The validator checks `edge_pp = 100 * (model_probability - market_probability)`.
+The archive retains the complete outcome prices, raw implied probabilities, server-calculated no-vig probabilities, and audit metadata. Binary markets check `edge_pp = 100 * (model_probability - market_probability)`; five-state markets use the stake-weighted `edge_probability` formula above.
 
 A lineup check may maintain, replace, or cancel any market. Compare goal-range identity by its range, BTTS identity by its side, and corner identity by side plus line. Recalculate the versioned selection policy at current prices: when the old thesis remains eligible, replacement needs a current confidence gain of at least five points; when hard information invalidates it, archive that reason and use the new safe Rank 1 or no primary. Preserve the previous version append-only in `revisions` and settle only the final active version.
 

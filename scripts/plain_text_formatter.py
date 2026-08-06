@@ -31,7 +31,6 @@ RESULT_LABELS = {
 }
 HTFT_LABELS = {"H": "主", "D": "平", "A": "客"}
 HTFT_SCENARIO_LABELS = {"H": "胜", "D": "平", "A": "负"}
-ONE_X_TWO_LABELS = {"home": "主胜", "draw": "平局", "away": "客胜"}
 BTTS_LABELS = {"yes": "是", "no": "否"}
 MARKET_DIRECTION_TEXT = re.compile(
     r"(?:"
@@ -345,9 +344,15 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
                 markets["one_x_two"],
                 {"home": "主胜", "draw": "平", "away": "客胜"},
             ),
-            "goal_range": _format_public_market(markets["goal_ranges"]),
+            "goal_range": (
+                f"{scenario_items[0]['goal_range_label']}"
+                "（联合第1名比分映射）"
+            ),
             "btts": _format_public_market(markets["btts"]),
-            "scenarios": f"联合事件 Top 2（按联合概率排序，高方差，不作推荐）：{path_text}",
+            "scenarios": (
+                "联合事件 Top 2（半全场＋波胆逐行同源，"
+                f"按联合概率排序，高方差，不作推荐）：{path_text}"
+            ),
             "source": source,
         }
     except (KeyError, TypeError, ValueError, public_market_outlook.PublicMarketOutlookError):
@@ -355,7 +360,7 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
 
 
 def model_leader_reference(version: dict[str, Any]) -> str:
-    """Return the same non-primary reference selected by the image renderer."""
+    """Return a separately qualified observation, never a marginal fallback."""
 
     if isinstance(resolved_primary_pick(version), dict):
         return "无"
@@ -365,32 +370,7 @@ def model_leader_reference(version: dict[str, Any]) -> str:
             f"◇ 观察方向：{observations[0]}"
             "（不计主推、不计战绩）"
         )
-    artifact = memory_store.validated_joint_scenario_audit(version)
-    if not isinstance(artifact, dict):
-        return "无"
-    try:
-        market = public_market_outlook.build_public_market_outlook(artifact)["markets"][
-            "one_x_two"
-        ]
-        if market.get("recommendation_eligible") is not False:
-            return "无"
-        top1 = market["top1"]
-        code = str(top1["code"])
-        label = ONE_X_TWO_LABELS[code]
-        probability_value = float(top1["probability"])
-        if not math.isfinite(probability_value) or not 0.0 < probability_value <= 1.0:
-            return "无"
-        return (
-            f"◇ 模型首选：{label}{percentage(probability_value)}"
-            "（不计主推、不计战绩）"
-        )
-    except (
-        KeyError,
-        TypeError,
-        ValueError,
-        public_market_outlook.PublicMarketOutlookError,
-    ):
-        return "无"
+    return "无"
 
 
 def display_text(version: dict[str, Any], field: str) -> str:

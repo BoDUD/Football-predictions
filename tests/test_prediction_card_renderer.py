@@ -41,7 +41,6 @@ def _payload() -> dict:
                 "league": "瑞典超",
                 "home_team": "观察队",
                 "away_team": "样本队",
-                "primary": "角球大9.5 @0.91",
                 "status": "observation",
             },
             {
@@ -52,7 +51,6 @@ def _payload() -> dict:
                 "league": "英超",
                 "home_team": "待定队",
                 "away_team": "不追队",
-                "primary": "输入内容不会冒充主推",
                 "status": "no_bet",
             },
         ],
@@ -349,16 +347,13 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertFalse(card.rows[2].star)
         self.assertEqual(card.rows[0].primary, "小2.5 @0.92")
 
-    def test_no_bet_uses_validated_joint_1x2_leader_without_becoming_primary(self) -> None:
+    def test_no_bet_never_turns_a_marginal_leader_into_a_primary(self) -> None:
         payload = _payload()
         payload["rows"] = payload["rows"][2:]
         card = renderer.validate_payload(payload, _history_index())
         row = card.rows[0]
 
-        self.assertEqual(
-            row.primary,
-            "◇ 模型首选：主胜 42.0%\n（不计主推、不计战绩）",
-        )
+        self.assertEqual(row.primary, "无正式主推")
         self.assertEqual(row.status, "no_bet")
         self.assertFalse(row.star)
         svg = renderer.render_svg(card)
@@ -464,18 +459,13 @@ class PredictionCardRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without validated candidate_audits"):
             renderer.validate_payload(payload, history)
 
-    def test_observation_text_must_match_the_archived_best_candidate(self) -> None:
+    def test_observation_does_not_occupy_the_formal_primary_column(self) -> None:
         payload = _payload()
         payload["rows"][1]["primary"] = "角球小9.5 @0.91"
-        with self.assertRaisesRegex(ValueError, "archived best observation"):
-            renderer.validate_payload(payload, _history_index())
-
-        card = renderer.validate_payload(_payload(), _history_index())
-        self.assertEqual(
-            card.rows[1].primary,
-            "◇ 角球大9.5 @0.91\n（不计主推、不计战绩）",
-        )
+        card = renderer.validate_payload(payload, _history_index())
+        self.assertEqual(card.rows[1].primary, "无正式主推")
         self.assertFalse(card.rows[1].star)
+        self.assertNotIn("角球小9.5", renderer.render_svg(card))
 
     def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(self) -> None:
         payload = _payload()
@@ -664,7 +654,7 @@ class PredictionCardRendererTests(unittest.TestCase):
         history = _history_index()
         card = renderer.validate_payload(_payload(), history)
         first = card.rows[0]
-        self.assertEqual(first.total_goals, "2-3球 60.0%\n明确·领先40.0pp")
+        self.assertEqual(first.total_goals, "2-3球")
         self.assertEqual(first.htft, "平平\n负负")
         self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
         self.assertEqual(self.validated_joint.call_count, 3)
@@ -678,6 +668,40 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertNotIn("胜平负", svg)
         self.assertNotIn("BTTS", svg)
         self.assertNotIn("9-9", svg)
+
+    def test_goal_range_uses_joint_rank_one_while_htft_and_score_keep_top_two(self) -> None:
+        history = _history_index()
+        history["9001"]["_validated_joint_artifact"] = _joint_artifact(
+            first=("DD", "0-0", 0.1086),
+            second=("DA", "0-1", 0.0684),
+            third=("HH", "2-0", 0.0500),
+        )
+        payload = _payload()
+        _rebind_row(payload, 0, history)
+
+        row = renderer.validate_payload(payload, history).rows[0]
+
+        self.assertEqual(row.total_goals, "0-1球")
+        self.assertEqual(row.htft.splitlines(), ["平平", "平负"])
+        self.assertEqual(row.scores.splitlines(), ["0-0 10.9%", "0-1 6.8%"])
+        self.assertNotIn("2-3球", row.total_goals)
+
+    def test_rank_two_goal_range_is_validated_but_not_displayed(self) -> None:
+        history = _history_index()
+        history["9001"]["_validated_joint_artifact"] = _joint_artifact(
+            first=("DD", "0-0", 0.1086),
+            second=("DD", "1-1", 0.0684),
+            third=("HH", "2-0", 0.0500),
+        )
+        payload = _payload()
+        _rebind_row(payload, 0, history)
+
+        row = renderer.validate_payload(payload, history).rows[0]
+
+        self.assertEqual(row.total_goals, "0-1球")
+        self.assertEqual(row.htft.splitlines(), ["平平", "平平"])
+        self.assertEqual(row.scores.splitlines(), ["0-0 10.9%", "1-1 6.8%"])
+        self.assertNotIn("2-3球", row.total_goals)
 
     def test_joint_distribution_displays_only_frozen_global_top_two(self) -> None:
         history = _history_index()
@@ -751,7 +775,7 @@ class PredictionCardRendererTests(unittest.TestCase):
                 history["9003"]["_validated_joint_artifact"] = malformed
                 card = renderer.validate_payload(_payload(), history)
                 row = card.rows[2]
-                self.assertEqual(row.primary, "数据不足")
+                self.assertEqual(row.primary, "无正式主推")
                 self.assertEqual(row.total_goals, "数据不足")
                 self.assertEqual(row.htft, "数据不足")
                 self.assertEqual(row.scores, "数据不足")
@@ -771,7 +795,7 @@ class PredictionCardRendererTests(unittest.TestCase):
                 card.rows[2].htft,
                 card.rows[2].scores,
             ),
-            ("数据不足", "数据不足", "数据不足", "数据不足"),
+            ("无正式主推", "数据不足", "数据不足", "数据不足"),
         )
 
     def test_history_is_required(self) -> None:
@@ -798,10 +822,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertIn("红&amp;蓝&lt;队&gt;", svg)
         self.assertIn("小2.5 @0.92 ★", svg)
         self.assertIn("★", svg)
-        self.assertIn("◇ 角球大9.5 @0.91", svg)
         rendered_text = "".join(root.itertext())
-        self.assertIn("◇ 模型首选：主胜 42.0%", rendered_text)
-        self.assertNotIn("输入内容不会冒充主推", rendered_text)
+        self.assertEqual(rendered_text.count("无正式主推"), 3)
+        self.assertNotIn("模型首选", rendered_text)
 
     def test_svg_file_is_written_and_height_tracks_rows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -837,7 +860,7 @@ class PredictionCardRendererTests(unittest.TestCase):
         footnote = next(
             node
             for node in root.findall("svg:text", namespace)
-            if "半全场与波胆按冻结联合概率 Top 2" in (node.text or "")
+            if "总进球取冻结联合第1名比分映射" in (node.text or "")
         )
         self.assertIn("不展示独立榜单或第三项", footnote.text or "")
         panel_bottom = int(panel.attrib["y"]) + int(panel.attrib["height"])

@@ -20,26 +20,24 @@ Show user-facing text as ordinary wrapped text, not a fenced code block.
 
 ## Required fields
 
-- Initial: match identity and kickoff, primary or explicit no-primary, probability and EV when applicable, non-settled secondary references, complete half-time, full-time 1X2, goal-range and BTTS distributions derived from the validated joint posterior, each field's Top-1/Top-2 gap and `较明确/分歧` status, and exactly the frozen, validated global joint-event Top 2 in descending joint-probability order. For each event, show its inseparable HT/FT label, full-time score, and genuine joint probability; preserve both rows when their HT/FT labels match but their scores differ. Include structured evidence coverage and the analysis disclaimer. If the joint artifact is unavailable or invalid, show `数据不足` for every descriptive field and no scenario fallback.
-- Lineup check: match identity and check time, explicit maintained/changed/cancelled primary state, current primary or no-primary, non-settled secondary references, the same complete distributions/gaps, and the active lineup-check artifact's frozen global joint-event Top 2 with each HT/FT-score pairing intact, structured evidence coverage, and the analysis disclaimer. If validation fails, show `数据不足`; never reuse the initial version's scenarios manually.
-- Review: the verified final score and, when available, the verified half-time score; when a half-time score was not required for settlement and could not be verified, show `未取得` and leave the related observation ungraded. Also include the final active settlement basis, primary result or `主推：无正式推荐（不结算、不计战绩）`, learning scope, non-settled secondary references, the frozen public joint-event Top 2 in its original order, causal learning, league primary record, cumulative primary record, and the review disclaimer. Keep independent unconditional exact-score and HT/FT Top-2 selections, hit ranks, and grading machine-only. The same information must support the deterministic review image without rewriting any pre-match direction.
+- Initial: match identity and kickoff, formal primary or explicit no-primary, probability and EV when applicable, non-settled secondary references, complete half-time, full-time 1X2, goal-range and BTTS marginal distributions derived from the validated joint posterior, each field's Top-1/Top-2 gap and `较明确/分歧` status, the one public total-goal range deterministically mapped from the frozen joint Rank 1 score, and exactly the frozen, validated global joint-event Top 2 in descending joint-probability order. For each event, show its inseparable HT/FT label, full-time score, and genuine joint probability; preserve both rows when their HT/FT labels match but their scores differ. Do not repeat Rank 2's goal-range label in normal text. Include structured evidence coverage and the analysis disclaimer. If the joint artifact is unavailable or invalid, show `数据不足` for the public range and paired events with no fallback.
+- Lineup check: match identity and check time, explicit maintained/changed/cancelled formal-primary state, current primary or no-primary, non-settled secondary references, the same complete marginal distributions/gaps, the active lineup-check artifact's single Rank-1-score-derived range, and its frozen global joint-event Top 2 with each HT/FT-score pairing intact, structured evidence coverage, and the analysis disclaimer. If validation fails, show `数据不足`; never reuse the initial version's scenarios manually.
+- Review: the verified final score and, when available, the verified half-time score; when a half-time score was not required for settlement and could not be verified, show `未取得` and leave the related observation ungraded. Also include the final active settlement basis, primary result or `主推：无正式推荐（不结算、不计战绩）`, learning scope, non-settled secondary references, the frozen public joint Rank-1-derived range and joint-event Top 2 in their original order, causal learning, league primary record, cumulative primary record, and the review disclaimer. Keep independent unconditional exact-score and HT/FT Top-2 selections, hit ranks, and grading machine-only. The same information must support the deterministic review image without rewriting any pre-match direction.
 
-## Headline-direction precedence
+## Primary and observation placement
 
-Derive the compact headline direction from the archive in this exact order; caller prose cannot
-change it:
+Derive the card's `主推` cell from the archive; caller prose cannot change it:
 
-1. The unique formal primary, with archive-derived `★`.
-2. If no formal primary exists, the highest-ranked separately archived and diagnostically
-   qualified observation, with `◇` and an explicit no-bet/non-counting label.
-3. If neither of the above exists but the joint artifact is valid, its validated 1X2 Top-1 as
-   `◇ 模型首选（不计主推、不计战绩）`.
-4. If the required joint artifact is absent or invalid, `数据不足`; retain the explicit
-   no-formal-primary state and do not create a fallback direction.
+1. Show the unique formal primary, with archive-derived `★`.
+2. If no formal primary exists, show exactly `无正式主推` in the card and
+   `主推：无正式推荐` in initial/lineup text.
 
-Never print both a qualified observation and the joint-model leader as competing headline
-directions. Omit the model-leader line when a formal primary or qualified observation already
-has priority, and do not emit an unlabelled standalone `无` placeholder.
+A separately archived and diagnostically qualified observation may appear once in accompanying
+text or audit with `◇` and an explicit no-bet/non-counting label. It never replaces the card's
+no-primary wording. Never derive a headline from the independent 1X2 or goal-range marginal
+Top-1, and do not emit an unlabelled standalone `无` placeholder. If the required joint artifact
+is absent or invalid, retain the no-primary state and show `数据不足` only for the public range
+and paired-event projections.
 
 In initial, lineup, and review output, never print the independent unconditional exact-score
 Top 2, legacy total-conditioned score pair, HT/FT Top 2, their hit ranks or grading, or the
@@ -52,16 +50,16 @@ Top 2. Never describe an observation or
 secondary reference as won or lost.
 
 When an image is rendered, follow [image-output.md](image-output.md). Initial and lineup images
-use the fixed simple eight-column table; total goals show only the highest-probability range
-and its lead, while full half-time, 1X2, goal-range and BTTS calculations remain in this text or
-the audit. A formal primary carries the archive-derived `★`. A separately qualified
-observation or the validated joint 1X2 model leader may carry `◇`, and both remain explicitly
-non-primary and excluded from stake, settlement, win/loss, profit, and ROI; no other status may
-use the star. The image and normal text must use the same headline precedence and reference the
-same paired joint events and probabilities. The text adds probability, EV/evidence,
-failed-gate, or risk context instead of transcribing every table cell. If either side cannot validate the joint artifact,
-both use `数据不足` rather than independent lists, prose inference, or hand-filled values. No
-image may replace clipped content with an ellipsis; wrap, reduce the font, or grow the layout.
+use the fixed simple eight-column table. Total goals show exactly the range mapped from the
+frozen joint Rank 1 score; HT/FT and score show the frozen joint Top 2. Complete half-time, 1X2,
+goal-range and BTTS marginal calculations remain in text or audit but cannot fill those compact
+slots. A formal primary carries the archive-derived `★`. A separately qualified observation
+may carry `◇` only in accompanying text/audit and remains excluded from stake, settlement,
+win/loss, profit, and ROI. The image and normal text must reference the same Rank 1 range and
+paired joint events. Normal text does not repeat the two internal score-derived range labels.
+If either side cannot validate the joint artifact, both use `数据不足` rather than independent
+lists, prose inference, or hand-filled values. No image may replace clipped content with an
+ellipsis; wrap, reduce the font, or grow the layout.
 
 ## Output boundary
 
