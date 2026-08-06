@@ -1,0 +1,45 @@
+{
+  "schema_version": "visible-market-snapshot/1.0.0",
+  "source_url": "https://zq.titan007.com/analysis/123cn.htm",
+  "collected_at": "2026-08-06T09:30:00Z",
+  "http_metadata": {
+    "status_code": 200,
+    "date": "Thu, 06 Aug 2026 09:30:00 GMT",
+    "content_type": "application/json"
+  },
+  "fixture": {
+    "match_id": "123",
+    "home_team": "Alpha",
+    "away_team": "Bravo",
+    "kickoff": "2026-08-06T10:00:00Z"
+  },
+  "markets": [
+    {
+      "market": "total",
+      "odds_format": "decimal",
+      "firms": [
+        {
+          "name": "A",
+          "outcomes": {
+            "over:2.5": 2.0,
+            "under:2.5": 1.9
+          }
+        },
+        {
+          "name": "B",
+          "outcomes": {
+            "over:2.5": 2.2,
+            "under:2.5": 1.8
+          }
+        },
+        {
+          "name": "C",
+          "outcomes": {
+            "over:2.5": 2.1,
+            "under:2.5": 1.85
+          }
+        }
+      ]
+    }
+  ]
+}
