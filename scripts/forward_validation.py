@@ -37,7 +37,9 @@ INPUT_SCHEMA_VERSION = "forward-observations/2.0.0"
 QUEUE_SCHEMA_VERSION = "forward-eligibility-queue/1.0.0"
 COMMITMENT_SCHEMA_VERSION = "forward-observation-commitment/1.0.0"
 SETTLEMENT_SCHEMA_VERSION = "forward-observation-settlement/1.0.0"
-HISTORY_LEDGER_BINDING_SCHEMA_VERSION = "memory-forward-history-ledger-binding/1.0.0"
+HISTORY_LEDGER_BINDING_SCHEMA_VERSION = "memory-forward-history-ledger-binding/2.0.0"
+HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/1.0.0"
+HISTORY_AGGREGATE_ARTIFACT_TYPE = "memory_store_forward_validation_cohort_export"
 REPORT_SCHEMA_VERSION = "forward-validation/2.0.0"
 BASELINE_NAMES = (
     "historical_frequency",
@@ -625,90 +627,244 @@ def _market_commitment_identities(payload: Mapping[str, Any]) -> list[dict[str, 
     return identities
 
 
-def build_history_ledger_binding(
-    payload: Mapping[str, Any],
-    *,
-    archive_version_hash: str,
-    record_commitment_hash: str,
-) -> dict[str, Any]:
-    """Build the content-addressed hand-off used only after memory-store archival."""
+def _require_repository_commit(commit: str) -> str:
+    """Require the claimed policy commit to exist in this repository.
 
+    The policy freeze still supplies the reviewed final-merge SHA.  This independent
+    evaluation check prevents a self-contained payload from satisfying that contract by
+    merely putting the same invented 40-hex string in both commit fields.
+    """
+
+    checked = forward_policy._require_git_commit(commit, "history policy Git commit")
+    repository = Path(__file__).resolve().parents[1]
+    try:
+        forward_policy._git(repository, "cat-file", "-e", f"{checked}^{{commit}}")
+    except forward_policy.ForwardPolicyError as exc:
+        raise ForwardValidationError(
+            "history policy Git commit does not exist in the evaluation repository"
+        ) from exc
+    return checked
+
+
+def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ForwardValidationError("history record receipt must be an object")
+    value = deepcopy(dict(raw))
+    required = {
+        "schema_version",
+        "fixture_id",
+        "record_archived_at",
+        "archive_version_hash",
+        "record_commitment_hash",
+        "record_binding_hash",
+        "prematch_ledger_hash",
+        "ledger_payload_hash",
+        "market_commitments",
+        "ledger_payload",
+        "archive_snapshot_payload",
+        "receipt_hash",
+    }
+    _exact_keys(value, required, "history record receipt")
+    if value.get("schema_version") != HISTORY_RECORD_RECEIPT_SCHEMA_VERSION:
+        raise ForwardValidationError("history record receipt schema is unsupported")
+    supplied_receipt_hash = value.pop("receipt_hash", None)
+    if supplied_receipt_hash != _hash(value):
+        raise ForwardValidationError("history record receipt hash is invalid")
+
+    fixture_id = str(value.get("fixture_id") or "").strip()
+    if not fixture_id:
+        raise ForwardValidationError("history record receipt fixture_id is missing")
+    archived_at = _aware(value.get("record_archived_at"), "receipt record_archived_at")
+    archive_version_hash = _sha256(
+        value.get("archive_version_hash"), "receipt archive_version_hash"
+    )
+    record_commitment_hash = _sha256(
+        value.get("record_commitment_hash"), "receipt record_commitment_hash"
+    )
+    record_binding_hash = _sha256(
+        value.get("record_binding_hash"), "receipt record_binding_hash"
+    )
+    prematch_ledger_hash = _sha256(
+        value.get("prematch_ledger_hash"), "receipt prematch_ledger_hash"
+    )
+    ledger_payload_hash = _sha256(
+        value.get("ledger_payload_hash"), "receipt ledger_payload_hash"
+    )
+
+    ledger_payload = value.get("ledger_payload")
+    if (
+        not isinstance(ledger_payload, Mapping)
+        or _hash(ledger_payload) != ledger_payload_hash
+    ):
+        raise ForwardValidationError("history receipt ledger payload hash is invalid")
     fixture_ids = sorted(
         {
             str(item.get("prediction_payload", {}).get("fixture_id") or "")
-            for item in payload.get("commitments", [])
+            for item in ledger_payload.get("commitments", [])
             if isinstance(item, Mapping)
             and isinstance(item.get("prediction_payload"), Mapping)
         }
     )
-    if not fixture_ids or "" in fixture_ids:
-        raise ForwardValidationError("history ledger fixture IDs are missing")
-    binding: dict[str, Any] = {
-        "schema_version": HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
-        "fixture_ids": fixture_ids,
-        "archive_version_hash": _sha256(
-            archive_version_hash, "history ledger archive_version_hash"
-        ),
-        "record_commitment_hash": _sha256(
-            record_commitment_hash, "history ledger record_commitment_hash"
-        ),
-        "prematch_ledger_hash": _hash(_prematch_ledger_view(payload)),
-        "market_commitments": _market_commitment_identities(payload),
+    if fixture_ids != [fixture_id]:
+        raise ForwardValidationError(
+            "history record receipt must replay exactly one fixture"
+        )
+    market_commitments = _market_commitment_identities(ledger_payload)
+    if value.get("market_commitments") != market_commitments:
+        raise ForwardValidationError(
+            "history record receipt market commitments do not replay"
+        )
+
+    snapshot = value.get("archive_snapshot_payload")
+    if not isinstance(snapshot, Mapping) or _hash(snapshot) != archive_version_hash:
+        raise ForwardValidationError("history record archive snapshot hash is invalid")
+    record_commitment = snapshot.get("forward_prediction_commitment")
+    if not isinstance(record_commitment, Mapping):
+        raise ForwardValidationError("history record commitment is missing")
+    commitment = deepcopy(dict(record_commitment))
+    expected_commitment_fields = {
+        "schema_version",
+        "prediction_payload",
+        "prediction_hash",
+        "forward_policy_binding",
+        "commitment_hash",
     }
-    binding["binding_hash"] = _hash(binding)
-    return binding
+    _exact_keys(commitment, expected_commitment_fields, "history record commitment")
+    supplied_commitment_hash = commitment.pop("commitment_hash", None)
+    if (
+        record_commitment.get("schema_version") != "memory-forward-commitment/1.0.0"
+        or supplied_commitment_hash != record_commitment_hash
+        or supplied_commitment_hash != _hash(commitment)
+    ):
+        raise ForwardValidationError("history record commitment hash is invalid")
+    prediction_payload = record_commitment.get("prediction_payload")
+    if not isinstance(prediction_payload, Mapping):
+        raise ForwardValidationError("history record prediction payload is missing")
+    prediction_hash = _hash(prediction_payload)
+    if record_commitment.get("prediction_hash") != prediction_hash:
+        raise ForwardValidationError("history record prediction hash is invalid")
+    try:
+        record_binding = forward_policy.validate_record_binding(
+            record_commitment.get("forward_policy_binding")
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ForwardValidationError(
+            "history record policy binding is invalid"
+        ) from exc
+    if (
+        record_binding is None
+        or record_binding.get("schema_version")
+        != forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        or record_binding.get("binding_hash") != record_binding_hash
+        or record_binding.get("observation_commitment_hash") != prediction_hash
+        or snapshot.get("forward_policy_binding") != record_binding
+    ):
+        raise ForwardValidationError(
+            "history record does not preserve its committed policy binding"
+        )
+    policy_snapshot = record_binding.get("policy_snapshot")
+    if not isinstance(policy_snapshot, Mapping):
+        raise ForwardValidationError("history record policy snapshot is missing")
+    claimed_commit = str(policy_snapshot.get("code", {}).get("commit") or "")
+    expected_commit = str(
+        policy_snapshot.get("code", {}).get("expected_final_merge_commit") or ""
+    )
+    if _require_repository_commit(claimed_commit) != expected_commit:
+        raise ForwardValidationError(
+            "history record is not bound to the reviewed final merge commit"
+        )
+    if (
+        _aware(record_binding.get("archived_at"), "history binding archived_at")
+        != archived_at
+        or _aware(
+            prediction_payload.get("archived_at"), "history prediction archived_at"
+        )
+        != archived_at
+    ):
+        raise ForwardValidationError(
+            "history record archived_at does not match its committed binding"
+        )
+
+    archive = snapshot.get("forward_validation_ledger")
+    if not isinstance(archive, Mapping):
+        raise ForwardValidationError("history record ledger archive is missing")
+    archive_without_hash = deepcopy(dict(archive))
+    supplied_archive_hash = archive_without_hash.pop("archive_hash", None)
+    archived_ledger = archive.get("ledger_payload")
+    if (
+        archive.get("schema_version") != "memory-forward-ledger-archive/1.0.0"
+        or supplied_archive_hash != _hash(archive_without_hash)
+        or str(archive.get("fixture_id") or "") != fixture_id
+        or not isinstance(archived_ledger, Mapping)
+        or archive.get("ledger_hash") != _hash(archived_ledger)
+        or archive.get("ledger_hash") != prematch_ledger_hash
+        or archive.get("market_commitments")
+        != _market_commitment_identities(archived_ledger)
+        or _prematch_ledger_view(ledger_payload) != archived_ledger
+    ):
+        raise ForwardValidationError(
+            "history record receipt does not reproduce its archived pre-match ledger"
+        )
+    prediction_ledger = prediction_payload.get("ledger")
+    if (
+        not isinstance(prediction_ledger, Mapping)
+        or prediction_ledger.get("ledger_hash") != prematch_ledger_hash
+        or prediction_ledger.get("archive_hash") != supplied_archive_hash
+        or prediction_ledger.get("market_commitments") != market_commitments
+    ):
+        raise ForwardValidationError(
+            "history record prediction does not commit the replayed ledger"
+        )
+
+    value["record_archived_at"] = archived_at.isoformat()
+    value["archive_version_hash"] = archive_version_hash
+    value["record_commitment_hash"] = record_commitment_hash
+    value["record_binding_hash"] = record_binding_hash
+    value["prematch_ledger_hash"] = prematch_ledger_hash
+    value["ledger_payload_hash"] = ledger_payload_hash
+    value["receipt_hash"] = supplied_receipt_hash
+    return value
 
 
-def _validate_history_ledger_binding(payload: Mapping[str, Any]) -> dict[str, Any]:
-    raw = payload.get("history_ledger_binding")
+def _validate_history_ledger_binding(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise ForwardValidationError(
-            "v2 evaluation requires a memory-store history ledger binding"
+            "v2 evaluation requires a memory-store cohort aggregate binding"
         )
-    value = dict(raw)
+    value = deepcopy(dict(raw))
     required = {
         "schema_version",
+        "artifact_type",
+        "cohort_id",
+        "policy_id",
+        "policy_hash",
         "fixture_ids",
-        "archive_version_hash",
-        "record_commitment_hash",
-        "prematch_ledger_hash",
-        "market_commitments",
+        "receipts",
         "binding_hash",
     }
     _exact_keys(value, required, "history_ledger_binding")
-    if value.get("schema_version") != HISTORY_LEDGER_BINDING_SCHEMA_VERSION:
+    if (
+        value.get("schema_version") != HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+        or value.get("artifact_type") != HISTORY_AGGREGATE_ARTIFACT_TYPE
+    ):
         raise ForwardValidationError("history_ledger_binding schema is unsupported")
     supplied_hash = value.pop("binding_hash", None)
     if supplied_hash != _hash(value):
         raise ForwardValidationError("history_ledger_binding hash is invalid")
-    for field in (
-        "archive_version_hash",
-        "record_commitment_hash",
-        "prematch_ledger_hash",
+    raw_receipts = value.get("receipts")
+    if not isinstance(raw_receipts, list) or not raw_receipts:
+        raise ForwardValidationError("history_ledger_binding receipts are missing")
+    receipts = [_validate_history_record_receipt(item) for item in raw_receipts]
+    fixture_ids = [receipt["fixture_id"] for receipt in receipts]
+    if (
+        fixture_ids != sorted(fixture_ids)
+        or len(set(fixture_ids)) != len(fixture_ids)
+        or value.get("fixture_ids") != fixture_ids
     ):
-        _sha256(value.get(field), f"history_ledger_binding.{field}")
-    expected_fixture_ids = sorted(
-        {
-            str(item.get("prediction_payload", {}).get("fixture_id") or "")
-            for item in payload.get("commitments", [])
-            if isinstance(item, Mapping)
-            and isinstance(item.get("prediction_payload"), Mapping)
-        }
-    )
-    if value.get("fixture_ids") != expected_fixture_ids or "" in expected_fixture_ids:
-        raise ForwardValidationError("history_ledger_binding fixture IDs do not replay")
-    identities = _market_commitment_identities(payload)
-    if value.get("market_commitments") != identities:
         raise ForwardValidationError(
-            "history_ledger_binding market commitments do not replay"
+            "history record receipts must be unique and canonically ordered by fixture_id"
         )
-    for identity in identities:
-        for field in ("prediction_hash", "commitment_hash", "binding_hash"):
-            _sha256(identity.get(field), f"history ledger commitment {field}")
-    if value.get("prematch_ledger_hash") != _hash(_prematch_ledger_view(payload)):
-        raise ForwardValidationError(
-            "history_ledger_binding does not reproduce the archived pre-match ledger"
-        )
+    value["receipts"] = receipts
     value["binding_hash"] = supplied_hash
     return value
 
@@ -1509,11 +1665,10 @@ def _validate_v2_input(
         raise ForwardValidationError(
             f"settlements must explicitly include pending rows (missing={missing})"
         )
-    history_ledger_binding = (
-        _validate_history_ledger_binding(value)
-        if require_history_ledger_binding
-        else None
-    )
+    if require_history_ledger_binding:
+        raise ForwardValidationError(
+            "formal v2 evaluation requires a memory-store cohort aggregate export"
+        )
     value["policy_manifest"] = policy
     value["cohort_manifest"] = cohort
     value["cohort_closure"] = closure
@@ -1523,7 +1678,7 @@ def _validate_v2_input(
     value["records"] = rows
     value["validation_protocol"] = protocol
     value["provenance_binding"] = rows[0]["provenance_binding"]
-    value["history_ledger_binding"] = history_ledger_binding
+    value["history_ledger_binding"] = None
     value["evidence_contract"] = "v2_pre_match_commitment_and_post_match_settlement"
     value["legacy_uncommitted"] = False
     value["external_timestamp_anchor"] = False
@@ -1532,12 +1687,132 @@ def _validate_v2_input(
     return value
 
 
+def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ForwardValidationError("forward observations must be a JSON object")
+    value = deepcopy(dict(payload))
+    required = {
+        "schema_version",
+        "artifact_type",
+        "cohort_id",
+        "policy_id",
+        "policy_hash",
+        "policy_manifest",
+        "cohort_manifest",
+        "cohort_closure",
+        "history_ledger_binding",
+    }
+    _exact_keys(value, required, "forward cohort aggregate")
+    if (
+        value.get("schema_version") != INPUT_SCHEMA_VERSION
+        or value.get("artifact_type") != HISTORY_AGGREGATE_ARTIFACT_TYPE
+    ):
+        raise ForwardValidationError(
+            "formal v2 evaluation requires a memory-store cohort aggregate export"
+        )
+    binding = _validate_history_ledger_binding(value.get("history_ledger_binding"))
+    for field in ("cohort_id", "policy_id", "policy_hash"):
+        if value.get(field) != binding.get(field):
+            raise ForwardValidationError(
+                f"forward cohort aggregate {field} does not match its history binding"
+            )
+
+    normalized_ledgers: list[dict[str, Any]] = []
+    for receipt in binding["receipts"]:
+        normalized = _validate_v2_input(
+            receipt["ledger_payload"], require_history_ledger_binding=False
+        )
+        if (
+            normalized["cohort_id"] != value["cohort_id"]
+            or normalized["policy_id"] != value["policy_id"]
+            or normalized["policy_hash"] != value["policy_hash"]
+            or normalized["policy_manifest"] != value["policy_manifest"]
+            or normalized["cohort_manifest"] != value["cohort_manifest"]
+            or normalized["cohort_closure"] != value["cohort_closure"]
+        ):
+            raise ForwardValidationError(
+                "history record receipt does not match the aggregate cohort/policy"
+            )
+        if any(
+            row.get("fixture_id") != receipt["fixture_id"]
+            for row in normalized["records"]
+        ):
+            raise ForwardValidationError(
+                "history record receipt contains rows for another fixture"
+            )
+        normalized_ledgers.append(normalized)
+
+    records: list[dict[str, Any]] = []
+    market_schemas: dict[str, dict[str, Any]] = {}
+    queue_manifests: list[dict[str, Any]] = []
+    observation_ids: set[str] = set()
+    provenance_binding: dict[str, Any] | None = None
+    validation_protocol: dict[str, Any] | None = None
+    for normalized in normalized_ledgers:
+        for market, schema in normalized["market_schemas"].items():
+            existing = market_schemas.get(market)
+            if existing is not None and existing != schema:
+                raise ForwardValidationError(
+                    f"aggregate market schema differs across receipts: {market}"
+                )
+            market_schemas[market] = deepcopy(schema)
+        queue_manifests.append(deepcopy(normalized["queue_manifest"]))
+        if provenance_binding is None:
+            provenance_binding = deepcopy(normalized["provenance_binding"])
+            validation_protocol = deepcopy(normalized["validation_protocol"])
+        elif (
+            provenance_binding != normalized["provenance_binding"]
+            or validation_protocol != normalized["validation_protocol"]
+        ):
+            raise ForwardValidationError(
+                "aggregate receipts do not share one frozen provenance/configuration"
+            )
+        for row in normalized["records"]:
+            observation_id = str(row.get("observation_id") or "")
+            if not observation_id or observation_id in observation_ids:
+                raise ForwardValidationError(
+                    "aggregate receipts contain duplicate observation IDs"
+                )
+            observation_ids.add(observation_id)
+            records.append(deepcopy(row))
+
+    records.sort(
+        key=lambda row: (
+            str(row.get("fixture_id") or ""),
+            str(row.get("market") or ""),
+            str(row.get("observation_id") or ""),
+        )
+    )
+    value["history_ledger_binding"] = binding
+    value["market_schemas"] = market_schemas
+    value["queue_manifest"] = None
+    value["queue_manifests"] = queue_manifests
+    value["records"] = records
+    value["validation_protocol"] = validation_protocol
+    value["provenance_binding"] = provenance_binding
+    value["cohort_closed"] = value.get("cohort_closure") is not None
+    value["evidence_contract"] = (
+        "v2_memory_store_record_receipts_and_replayed_post_match_settlements"
+    )
+    value["legacy_uncommitted"] = False
+    value["external_timestamp_anchor"] = False
+    value["baseline_artifact_replay_complete"] = all(
+        item.get("baseline_artifact_replay_complete") is True
+        for item in normalized_ledgers
+    )
+    value["execution_price_source_replay_complete"] = all(
+        item.get("execution_price_source_replay_complete") is True
+        for item in normalized_ledgers
+    )
+    return value
+
+
 def validate_input(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ForwardValidationError("forward observations must be a JSON object")
     schema_version = payload.get("schema_version")
     if schema_version == INPUT_SCHEMA_VERSION:
-        return _validate_v2_input(payload)
+        return _validate_aggregate_input(payload)
     if schema_version == LEGACY_INPUT_SCHEMA_VERSION:
         return _validate_legacy_input(payload)
     raise ForwardValidationError("unsupported forward-observations schema_version")

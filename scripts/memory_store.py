@@ -179,7 +179,11 @@ FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/1.0.0"
 FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/1.0.0"
 FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/1.0.0"
 FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
-    "memory-forward-history-ledger-binding/1.0.0"
+    "memory-forward-history-ledger-binding/2.0.0"
+)
+FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/1.0.0"
+FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE = (
+    "memory_store_forward_validation_cohort_export"
 )
 JOINT_SCENARIO_AUDIT_SCHEMA_VERSION = "joint-scenario-audit/1.0.0"
 MARKET_EVIDENCE_MAX_AGE_MINUTES_BY_STAGE = {
@@ -6273,7 +6277,7 @@ def _forward_observed_outcome(
     return None
 
 
-def forward_validation_input_for_record(
+def _forward_validation_micro_ledger_for_record(
     record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Replay one archived micro-ledger and append only verified post-match settlement.
@@ -6332,22 +6336,232 @@ def forward_validation_input_for_record(
             )
             settlement.pop("settlement_hash", None)
             settlement["settlement_hash"] = forward_policy._hash_json(settlement)
-    forward_validation = _forward_validation_module()
-    history_binding = forward_validation.build_history_ledger_binding(
-        payload,
-        archive_version_hash=require_sha256(
-            record.get("archive_version_hash"), "forward archive version hash"
-        ),
-        record_commitment_hash=require_sha256(
+    return payload
+
+
+def _forward_history_record_receipt(
+    record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build one self-contained receipt only after replaying the stored record chain."""
+
+    commitment = validate_forward_record_prediction_commitment(record)
+    if commitment is None:
+        raise ValueError("Record has no replayable forward prediction commitment")
+    ledger_archive = validate_forward_validation_ledger_archive(
+        record.get("forward_validation_ledger"), record=record
+    )
+    ledger_payload = _forward_validation_micro_ledger_for_record(
+        record, cohort_closure=cohort_closure
+    )
+    prediction_payload = commitment.get("prediction_payload")
+    binding = commitment.get("forward_policy_binding")
+    if not isinstance(prediction_payload, dict) or not isinstance(binding, dict):
+        raise ValueError("Forward record commitment is incomplete")
+    archived_at = str(prediction_payload.get("archived_at") or "")
+    if parse_aware_datetime(
+        archived_at, "forward record archived_at"
+    ) != parse_aware_datetime(
+        str(binding.get("archived_at") or ""), "forward binding archived_at"
+    ):
+        raise ValueError(
+            "Forward record archived_at does not match its committed binding"
+        )
+    archive_version_hash = require_sha256(
+        record.get("archive_version_hash"), "forward archive version hash"
+    )
+    snapshot = snapshot_payload(revision_snapshot(record))
+    if forward_policy._hash_json(snapshot) != archive_version_hash:
+        raise ValueError("Forward record archive snapshot does not replay")
+    market_commitments = _forward_market_commitments(ledger_archive["ledger_payload"])
+    receipt: dict[str, Any] = {
+        "schema_version": FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION,
+        "fixture_id": str(record.get("match_id") or ""),
+        "record_archived_at": archived_at,
+        "archive_version_hash": archive_version_hash,
+        "record_commitment_hash": require_sha256(
             commitment.get("commitment_hash"), "forward record commitment hash"
         ),
+        "record_binding_hash": require_sha256(
+            binding.get("binding_hash"), "forward record binding hash"
+        ),
+        "prematch_ledger_hash": require_sha256(
+            ledger_archive.get("ledger_hash"), "forward pre-match ledger hash"
+        ),
+        "ledger_payload_hash": forward_policy._hash_json(ledger_payload),
+        "market_commitments": market_commitments,
+        "ledger_payload": ledger_payload,
+        "archive_snapshot_payload": snapshot,
+    }
+    if not receipt["fixture_id"]:
+        raise ValueError("Forward history receipt fixture_id is missing")
+    receipt["receipt_hash"] = forward_policy._hash_json(receipt)
+    return receipt
+
+
+def forward_validation_input_for_records(
+    records: list[dict[str, Any]], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Export one canonical cohort envelope from independently committed records."""
+
+    if not records:
+        raise ValueError("Forward cohort export requires at least one record")
+    receipts = [
+        _forward_history_record_receipt(record, cohort_closure=cohort_closure)
+        for record in records
+    ]
+    receipts.sort(key=lambda item: str(item["fixture_id"]))
+    fixture_ids = [str(item["fixture_id"]) for item in receipts]
+    if len(set(fixture_ids)) != len(fixture_ids):
+        raise ValueError("Forward cohort export contains duplicate fixture records")
+
+    first_ledger = receipts[0]["ledger_payload"]
+    policy = deepcopy(first_ledger.get("policy_manifest"))
+    cohort = deepcopy(first_ledger.get("cohort_manifest"))
+    if not isinstance(policy, dict) or not isinstance(cohort, dict):
+        raise ValueError("Forward cohort export policy/cohort is missing")
+    cohort_id = str(first_ledger.get("cohort_id") or "")
+    policy_id = str(first_ledger.get("policy_id") or "")
+    policy_hash = require_sha256(
+        first_ledger.get("policy_hash"), "forward cohort policy hash"
     )
-    if history_binding["prematch_ledger_hash"] != ledger_archive["ledger_hash"]:
+    for receipt in receipts:
+        ledger = receipt["ledger_payload"]
+        if (
+            ledger.get("cohort_id") != cohort_id
+            or ledger.get("policy_id") != policy_id
+            or ledger.get("policy_hash") != policy_hash
+            or ledger.get("policy_manifest") != policy
+            or ledger.get("cohort_manifest") != cohort
+            or ledger.get("cohort_closure") != cohort_closure
+        ):
+            raise ValueError(
+                "Forward cohort export cannot mix policies, cohorts, or closures"
+            )
+
+    history_binding: dict[str, Any] = {
+        "schema_version": FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
+        "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
+        "cohort_id": cohort_id,
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "fixture_ids": fixture_ids,
+        "receipts": receipts,
+    }
+    history_binding["binding_hash"] = forward_policy._hash_json(history_binding)
+    return {
+        "schema_version": "forward-observations/2.0.0",
+        "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
+        "cohort_id": cohort_id,
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "policy_manifest": policy,
+        "cohort_manifest": cohort,
+        "cohort_closure": deepcopy(cohort_closure),
+        "history_ledger_binding": history_binding,
+    }
+
+
+def forward_validation_input_for_record(
+    record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Compatibility wrapper returning a one-record canonical cohort envelope."""
+
+    return forward_validation_input_for_records([record], cohort_closure=cohort_closure)
+
+
+def _raw_forward_policy_binding(record: dict[str, Any]) -> dict[str, Any] | None:
+    basis = record.get("settlement_basis")
+    if isinstance(basis, dict) and isinstance(
+        basis.get("forward_policy_binding"), dict
+    ):
+        return basis["forward_policy_binding"]
+    binding = record.get("forward_policy_binding")
+    return binding if isinstance(binding, dict) else None
+
+
+def cmd_export_forward_validation(args: argparse.Namespace) -> dict[str, Any]:
+    """Export a canonical multi-record cohort envelope from archived history only."""
+
+    history_file = data_path(args.base_dir)
+    history = load_history(history_file)
+    requested_ids = [str(item).strip() for item in (args.match_id or [])]
+    if any(not item for item in requested_ids) or len(set(requested_ids)) != len(
+        requested_ids
+    ):
+        raise ValueError("--match-id values must be unique non-empty identifiers")
+
+    requested_cohort = str(args.cohort_id or "").strip()
+    if requested_ids:
+        by_match = {str(record.get("match_id") or ""): record for record in history}
+        missing = sorted(set(requested_ids) - set(by_match))
+        if missing:
+            raise ValueError(f"Forward cohort export records are missing: {missing}")
+        selected = [by_match[match_id] for match_id in requested_ids]
+    else:
+        bound = [
+            record
+            for record in history
+            if _raw_forward_policy_binding(record) is not None
+        ]
+        cohort_ids = {
+            str(_raw_forward_policy_binding(record).get("cohort_id") or "")
+            for record in bound
+            if _raw_forward_policy_binding(record) is not None
+        }
+        cohort_ids.discard("")
+        if not requested_cohort:
+            if len(cohort_ids) != 1:
+                raise ValueError(
+                    "--cohort-id is required unless history contains exactly one "
+                    "forward cohort"
+                )
+            requested_cohort = next(iter(cohort_ids))
+        selected = [
+            record
+            for record in bound
+            if str(_raw_forward_policy_binding(record).get("cohort_id") or "")
+            == requested_cohort
+        ]
+
+    if not selected:
+        raise ValueError("Forward cohort export selected no archived records")
+    selected_cohorts = {
+        str((_raw_forward_policy_binding(record) or {}).get("cohort_id") or "")
+        for record in selected
+    }
+    if "" in selected_cohorts or len(selected_cohorts) != 1:
         raise ValueError(
-            "Forward history export does not reproduce its pre-match ledger"
+            "Forward cohort export records do not share one cohort binding"
         )
-    payload["history_ledger_binding"] = history_binding
-    return payload
+    selected_cohort = next(iter(selected_cohorts))
+    if requested_cohort and selected_cohort != requested_cohort:
+        raise ValueError("Selected records do not match --cohort-id")
+
+    closure = None
+    closure_file = str(args.cohort_closure_file or "").strip()
+    if closure_file:
+        loaded_closure = json.loads(Path(closure_file).read_text(encoding="utf-8"))
+        if not isinstance(loaded_closure, dict):
+            raise ValueError("--cohort-closure-file must contain a JSON object")
+        closure = loaded_closure
+
+    payload = forward_validation_input_for_records(selected, cohort_closure=closure)
+    output = Path(args.output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(output)
+    history_binding = payload["history_ledger_binding"]
+    return {
+        "ok": True,
+        "path": str(output),
+        "cohort_id": selected_cohort,
+        "fixture_ids": history_binding["fixture_ids"],
+        "receipt_count": len(history_binding["receipts"]),
+        "binding_hash": history_binding["binding_hash"],
+    }
 
 
 def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
@@ -10505,6 +10719,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--write", action="store_true", help="Persist review-learning metadata"
     )
 
+    export_forward = sub.add_parser(
+        "export-forward-validation",
+        help=(
+            "Export a receipt-bound forward-validation cohort envelope from archived "
+            "memory-store records"
+        ),
+    )
+    export_forward.add_argument("--output", required=True)
+    export_forward.add_argument("--cohort-id")
+    export_forward.add_argument(
+        "--match-id",
+        action="append",
+        help="Optional repeatable fixture filter; all selected records must share one cohort",
+    )
+    export_forward.add_argument(
+        "--cohort-closure-file",
+        help="Optional immutable cohort-closure JSON applied to every exported receipt",
+    )
+
     sub.add_parser("pending", help="List pending pre-match predictions")
     due = sub.add_parser(
         "due-lineup-check",
@@ -10550,6 +10783,8 @@ def main() -> int:
             result = cmd_migrate_settlement_basis(args)
         elif args.command == "migrate-learning-scopes":
             result = cmd_migrate_learning_scopes(args)
+        elif args.command == "export-forward-validation":
+            result = cmd_export_forward_validation(args)
         elif args.command == "due-lineup-check":
             if args.min_minutes < 0 or args.max_minutes < args.min_minutes:
                 raise ValueError("Require 0 <= min-minutes <= max-minutes")

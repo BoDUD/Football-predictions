@@ -376,14 +376,18 @@ retrospective generation, late market snapshots and post-result edits to model p
 closed. Close the cohort with the separate closure receipt while preserving the original active
 cohort manifest and hash; a rewritten closed pointer is not a substitute for that pair.
 
-Public v2 evaluation also requires a `memory-forward-history-ledger-binding/1.0.0` produced by
-replaying the archived record. It binds the pre-match ledger hash, archive-version hash, record
-commitment hash, and exact market commitments. Deleting, copying, reordering, truncating, or
-retrofitting commitments fails closed even if the attacker recomputes the wrapper hash. Legacy
-v1 and uncommitted v2.0 base bindings remain readable for quarantine only and cannot enter the
-untouched confirmation summary or promotion gate. Local content hashes still cannot prove wall
-clock time against an attacker who can reseal the entire local chain, so the external timestamp
-promotion blocker remains mandatory.
+Public v2 evaluation also requires a canonical memory-store cohort export carrying
+`memory-forward-history-ledger-binding/2.0.0`. Its canonically ordered receipt list contains one
+`memory-forward-record-receipt/1.0.0` per archived fixture. Every receipt embeds the replayed
+micro-ledger and immutable archive snapshot, and reproduces the pre-match ledger hash,
+archive-version hash, record commitment, committed policy binding, archived time, and exact market
+commitments. The evaluator aggregates normalized rows only after validating each receipt; a naked
+v2 payload or caller-supplied SHA wrapper cannot enter formal evaluation. Deleting, copying,
+reordering, replacing, truncating, or retrofitting a receipt fails closed even if the attacker
+recomputes outer wrapper hashes. Legacy v1 and uncommitted v2.0 base bindings remain readable for
+quarantine only and cannot enter the untouched confirmation summary or promotion gate. Local
+content hashes still cannot prove wall clock time against an attacker who can reseal the entire
+local chain, so the external timestamp promotion blocker remains mandatory.
 
 Each market now declares its own outcome schema, so 1X2, HT/FT and five-state return distributions
 cannot accidentally share one top-level outcome list. Model baselines carry generated time,
@@ -401,6 +405,10 @@ and calibration threshold. CLI overrides are explicitly experimental and block t
 the report with:
 
 ```bash
+python scripts/memory_store.py --base-dir <workspace> export-forward-validation \
+  --cohort-id <cohort-id> \
+  --output <forward-observations.json>
+
 python scripts/forward_validation.py \
   --input <forward-observations.json> \
   --output <forward-validation.json>
