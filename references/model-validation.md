@@ -311,7 +311,8 @@ python scripts/forward_policy.py --base-dir <workspace> --repo-root <repo> start
   --policy-file <forward-policy.json> \
   --cohort-id <stable-cohort-id>
 
-python scripts/forward_policy.py --base-dir <workspace> close \
+python scripts/memory_store.py --base-dir <workspace> close-forward-cohort \
+  --cohort-id <stable-cohort-id> \
   --closed-at <timezone-aware-ISO>
 ```
 
@@ -373,19 +374,28 @@ Finally add a separate settlement that binds the commitment hash and contains th
 and optional closing snapshot. The evaluator requires exact queue coverage, one commitment and one
 explicit settled-or-pending settlement per key; caller-chosen duplicate observation IDs,
 retrospective generation, late market snapshots and post-result edits to model probabilities fail
-closed. Close the cohort with the separate closure receipt while preserving the original active
-cohort manifest and hash; a rewritten closed pointer is not a substitute for that pair.
+closed. Close the cohort only through `memory_store.py close-forward-cohort`. It holds the history
+lock while selecting every bound record in the named cohort, writes a canonical
+`live-forward-record-manifest/1.0.0`, embeds that manifest in the
+`live-forward-cohort-closure/2.0.0`, and closes the active pointer before releasing the lock. Each
+canonically sorted manifest entry binds the fixture ID, archive-version hash, record-commitment
+hash, committed-binding hash, and pre-match-ledger hash. The lower-level `forward_policy.py close`
+requires this manifest explicitly; a preview manifest followed by a later close is not the formal
+workflow because another record could enter between those operations.
 
 Public v2 evaluation also requires a canonical memory-store cohort export carrying
-`memory-forward-history-ledger-binding/2.0.0`. Its canonically ordered receipt list contains one
-`memory-forward-record-receipt/1.0.0` per archived fixture. Every receipt embeds the replayed
-micro-ledger and immutable archive snapshot, and reproduces the pre-match ledger hash,
-archive-version hash, record commitment, committed policy binding, archived time, and exact market
-commitments. The evaluator aggregates normalized rows only after validating each receipt; a naked
-v2 payload or caller-supplied SHA wrapper cannot enter formal evaluation. Deleting, copying,
-reordering, replacing, truncating, or retrofitting a receipt fails closed even if the attacker
-recomputes outer wrapper hashes. Legacy v1 and uncommitted v2.0 base bindings remain readable for
-quarantine only and cannot enter the untouched confirmation summary or promotion gate. Local
+`memory-forward-history-ledger-binding/2.0.0`. Formal export requires the v2 closure file and has no
+fixture filter: it always selects every history record bound to the named cohort. Its canonically
+ordered receipt list contains one `memory-forward-record-receipt/1.0.0` per manifest entry. Every
+receipt embeds the replayed micro-ledger and immutable archive snapshot, and reproduces the
+pre-match ledger hash, archive-version hash, record commitment, committed policy binding, archived
+time, and exact market commitments. The evaluator first requires a closed cohort, then compares
+those four receipt anchors with the independently closure-bound manifest before aggregating rows. A
+naked v2 payload, open cohort, caller-supplied SHA wrapper, or selected fixture subset cannot enter
+formal evaluation. Deleting, copying, reordering, replacing, truncating, or retrofitting a receipt
+fails closed even if the attacker recomputes the aggregate binding hash and fixture list. Legacy v1
+closures and uncommitted v2.0 base bindings remain readable for historical/quarantine inspection
+only and cannot enter the untouched confirmation summary or promotion gate. Local
 content hashes still cannot prove wall clock time against an attacker who can reseal the entire
 local chain, so the external timestamp promotion blocker remains mandatory.
 
@@ -407,6 +417,7 @@ the report with:
 ```bash
 python scripts/memory_store.py --base-dir <workspace> export-forward-validation \
   --cohort-id <cohort-id> \
+  --cohort-closure-file <workspace>/.codex/soccer-predict/forward-cohorts/<cohort-id>-closure.json \
   --output <forward-observations.json>
 
 python scripts/forward_validation.py \

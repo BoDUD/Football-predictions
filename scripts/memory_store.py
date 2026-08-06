@@ -6398,6 +6398,67 @@ def _forward_history_record_receipt(
     return receipt
 
 
+def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, str]:
+    return {
+        "fixture_id": str(receipt.get("fixture_id") or ""),
+        "archive_version_hash": require_sha256(
+            receipt.get("archive_version_hash"), "forward archive version hash"
+        ),
+        "record_commitment_hash": require_sha256(
+            receipt.get("record_commitment_hash"), "forward record commitment hash"
+        ),
+        "record_binding_hash": require_sha256(
+            receipt.get("record_binding_hash"), "forward record binding hash"
+        ),
+        "prematch_ledger_hash": require_sha256(
+            receipt.get("prematch_ledger_hash"), "forward pre-match ledger hash"
+        ),
+    }
+
+
+def forward_record_manifest_for_records(
+    records: list[dict[str, Any]], *, cohort_manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the complete canonical record index used to close one cohort."""
+
+    try:
+        cohort = forward_policy.validate_cohort(cohort_manifest)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward record manifest cohort is invalid") from exc
+    receipts = [_forward_history_record_receipt(record) for record in records]
+    receipts.sort(key=lambda item: str(item["fixture_id"]))
+    entries = [_record_manifest_entry_from_receipt(receipt) for receipt in receipts]
+    fixture_ids = [entry["fixture_id"] for entry in entries]
+    if len(set(fixture_ids)) != len(fixture_ids):
+        raise ValueError("Forward record manifest contains duplicate fixture records")
+    for receipt in receipts:
+        ledger = receipt["ledger_payload"]
+        if (
+            ledger.get("cohort_id") != cohort["cohort_id"]
+            or ledger.get("policy_id") != cohort["policy_id"]
+            or ledger.get("policy_hash") != cohort["policy_hash"]
+            or ledger.get("cohort_manifest") != cohort
+        ):
+            raise ValueError(
+                "Forward record manifest cannot mix records from another cohort or policy"
+            )
+    manifest: dict[str, Any] = {
+        "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "soccer_untouched_live_forward_record_manifest",
+        "cohort_id": cohort["cohort_id"],
+        "cohort_hash": cohort["cohort_hash"],
+        "policy_id": cohort["policy_id"],
+        "policy_hash": cohort["policy_hash"],
+        "record_count": len(entries),
+        "records": entries,
+    }
+    manifest["manifest_hash"] = forward_policy._hash_json(manifest)
+    try:
+        return forward_policy.validate_record_manifest(manifest, cohort=cohort)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward record manifest is invalid") from exc
+
+
 def forward_validation_input_for_records(
     records: list[dict[str, Any]], *, cohort_closure: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -6405,8 +6466,18 @@ def forward_validation_input_for_records(
 
     if not records:
         raise ValueError("Forward cohort export requires at least one record")
+    if cohort_closure is None:
+        raise ValueError(
+            "Formal forward cohort export requires a closed cohort record manifest"
+        )
+    try:
+        closure = forward_policy.validate_closure(
+            cohort_closure, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort closure is invalid") from exc
     receipts = [
-        _forward_history_record_receipt(record, cohort_closure=cohort_closure)
+        _forward_history_record_receipt(record, cohort_closure=closure)
         for record in records
     ]
     receipts.sort(key=lambda item: str(item["fixture_id"]))
@@ -6419,6 +6490,14 @@ def forward_validation_input_for_records(
     cohort = deepcopy(first_ledger.get("cohort_manifest"))
     if not isinstance(policy, dict) or not isinstance(cohort, dict):
         raise ValueError("Forward cohort export policy/cohort is missing")
+    try:
+        closure = forward_policy.validate_closure(
+            closure, cohort=cohort, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError(
+            "Forward cohort closure does not bind the archived cohort"
+        ) from exc
     cohort_id = str(first_ledger.get("cohort_id") or "")
     policy_id = str(first_ledger.get("policy_id") or "")
     policy_hash = require_sha256(
@@ -6432,11 +6511,19 @@ def forward_validation_input_for_records(
             or ledger.get("policy_hash") != policy_hash
             or ledger.get("policy_manifest") != policy
             or ledger.get("cohort_manifest") != cohort
-            or ledger.get("cohort_closure") != cohort_closure
+            or ledger.get("cohort_closure") != closure
         ):
             raise ValueError(
                 "Forward cohort export cannot mix policies, cohorts, or closures"
             )
+
+    receipt_manifest_entries = [
+        _record_manifest_entry_from_receipt(receipt) for receipt in receipts
+    ]
+    if receipt_manifest_entries != closure["record_manifest"]["records"]:
+        raise ValueError(
+            "Forward cohort receipts do not exactly cover the closed record manifest"
+        )
 
     history_binding: dict[str, Any] = {
         "schema_version": FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
@@ -6456,7 +6543,7 @@ def forward_validation_input_for_records(
         "policy_hash": policy_hash,
         "policy_manifest": policy,
         "cohort_manifest": cohort,
-        "cohort_closure": deepcopy(cohort_closure),
+        "cohort_closure": deepcopy(closure),
         "history_ledger_binding": history_binding,
     }
 
@@ -6479,49 +6566,123 @@ def _raw_forward_policy_binding(record: dict[str, Any]) -> dict[str, Any] | None
     return binding if isinstance(binding, dict) else None
 
 
+def _load_immutable_forward_cohort(
+    base_dir: str | Path, cohort_id: str
+) -> dict[str, Any]:
+    cohort_path = forward_policy.cohort_manifest_path(base_dir, cohort_id)
+    try:
+        raw = json.loads(cohort_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Forward cohort manifest is unavailable or invalid: {cohort_path}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ValueError("Forward cohort manifest must be a JSON object")
+    try:
+        return forward_policy.validate_cohort(raw)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort manifest is invalid") from exc
+
+
+def _all_forward_records_for_cohort(
+    history: list[dict[str, Any]], cohort_id: str
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for record in history:
+        binding = _raw_forward_policy_binding(record)
+        if binding is None:
+            continue
+        if str(binding.get("cohort_id") or "") == cohort_id:
+            selected.append(record)
+    return selected
+
+
+def _write_json_atomically(output: str | Path, payload: dict[str, Any]) -> Path:
+    path = Path(output).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+@locked_history_transaction
+def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    """Write the complete record index for one immutable cohort from history."""
+
+    cohort_id = str(args.cohort_id or "").strip()
+    if not cohort_id:
+        raise ValueError("--cohort-id is required")
+    history = load_history(data_path(args.base_dir))
+    cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
+    selected = _all_forward_records_for_cohort(history, cohort_id)
+    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    output = _write_json_atomically(args.output, manifest)
+    return {
+        "ok": True,
+        "path": str(output),
+        "cohort_id": cohort_id,
+        "fixture_ids": [entry["fixture_id"] for entry in manifest["records"]],
+        "record_count": manifest["record_count"],
+        "manifest_hash": manifest["manifest_hash"],
+    }
+
+
+@locked_history_transaction
+def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
+    """Atomically snapshot all cohort records and close the active policy boundary."""
+
+    cohort_id = str(args.cohort_id or "").strip()
+    if not cohort_id:
+        raise ValueError("--cohort-id is required")
+    history = load_history(data_path(args.base_dir))
+    cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
+    selected = _all_forward_records_for_cohort(history, cohort_id)
+    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    requested_output = str(getattr(args, "record_manifest_output", "") or "").strip()
+    manifest_output = (
+        Path(requested_output).resolve()
+        if requested_output
+        else forward_policy.cohort_directory(args.base_dir)
+        / f"{cohort_id}-record-manifest.json"
+    )
+    manifest_path = _write_json_atomically(manifest_output, manifest)
+    try:
+        closure_path, closure = forward_policy.close_cohort(
+            base_dir=args.base_dir,
+            record_manifest=manifest,
+            closed_at=getattr(args, "closed_at", None),
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort could not be closed") from exc
+    return {
+        "ok": True,
+        "cohort_id": cohort_id,
+        "record_manifest_path": str(manifest_path),
+        "record_count": manifest["record_count"],
+        "manifest_hash": manifest["manifest_hash"],
+        "closure_path": str(closure_path),
+        "closure_hash": closure["closure_hash"],
+    }
+
+
+@locked_history_transaction
 def cmd_export_forward_validation(args: argparse.Namespace) -> dict[str, Any]:
     """Export a canonical multi-record cohort envelope from archived history only."""
 
     history_file = data_path(args.base_dir)
     history = load_history(history_file)
-    requested_ids = [str(item).strip() for item in (args.match_id or [])]
-    if any(not item for item in requested_ids) or len(set(requested_ids)) != len(
-        requested_ids
-    ):
-        raise ValueError("--match-id values must be unique non-empty identifiers")
-
     requested_cohort = str(args.cohort_id or "").strip()
-    if requested_ids:
-        by_match = {str(record.get("match_id") or ""): record for record in history}
-        missing = sorted(set(requested_ids) - set(by_match))
-        if missing:
-            raise ValueError(f"Forward cohort export records are missing: {missing}")
-        selected = [by_match[match_id] for match_id in requested_ids]
-    else:
-        bound = [
-            record
-            for record in history
-            if _raw_forward_policy_binding(record) is not None
-        ]
-        cohort_ids = {
-            str(_raw_forward_policy_binding(record).get("cohort_id") or "")
-            for record in bound
-            if _raw_forward_policy_binding(record) is not None
-        }
-        cohort_ids.discard("")
-        if not requested_cohort:
-            if len(cohort_ids) != 1:
-                raise ValueError(
-                    "--cohort-id is required unless history contains exactly one "
-                    "forward cohort"
-                )
-            requested_cohort = next(iter(cohort_ids))
-        selected = [
-            record
-            for record in bound
-            if str(_raw_forward_policy_binding(record).get("cohort_id") or "")
-            == requested_cohort
-        ]
+    if not requested_cohort:
+        raise ValueError("--cohort-id is required")
+    if getattr(args, "match_id", None):
+        raise ValueError(
+            "--match-id is not supported for formal validation; export the complete cohort"
+        )
+    selected = _all_forward_records_for_cohort(history, requested_cohort)
 
     if not selected:
         raise ValueError("Forward cohort export selected no archived records")
@@ -6537,22 +6698,27 @@ def cmd_export_forward_validation(args: argparse.Namespace) -> dict[str, Any]:
     if requested_cohort and selected_cohort != requested_cohort:
         raise ValueError("Selected records do not match --cohort-id")
 
-    closure = None
     closure_file = str(args.cohort_closure_file or "").strip()
-    if closure_file:
+    if not closure_file:
+        raise ValueError("--cohort-closure-file is required for formal validation")
+    try:
         loaded_closure = json.loads(Path(closure_file).read_text(encoding="utf-8"))
-        if not isinstance(loaded_closure, dict):
-            raise ValueError("--cohort-closure-file must contain a JSON object")
-        closure = loaded_closure
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("--cohort-closure-file is unavailable or invalid") from exc
+    if not isinstance(loaded_closure, dict):
+        raise ValueError("--cohort-closure-file must contain a JSON object")
+    cohort = _load_immutable_forward_cohort(args.base_dir, requested_cohort)
+    try:
+        closure = forward_policy.validate_closure(
+            loaded_closure, cohort=cohort, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("--cohort-closure-file is invalid") from exc
+    if closure["cohort_id"] != requested_cohort:
+        raise ValueError("Cohort closure does not match --cohort-id")
 
     payload = forward_validation_input_for_records(selected, cohort_closure=closure)
-    output = Path(args.output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary.replace(output)
+    output = _write_json_atomically(args.output, payload)
     history_binding = payload["history_ledger_binding"]
     return {
         "ok": True,
@@ -10719,6 +10885,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--write", action="store_true", help="Persist review-learning metadata"
     )
 
+    export_manifest = sub.add_parser(
+        "export-forward-record-manifest",
+        help="Preview the complete canonical record manifest for one forward cohort",
+    )
+    export_manifest.add_argument("--output", required=True)
+    export_manifest.add_argument("--cohort-id", required=True)
+
+    close_forward = sub.add_parser(
+        "close-forward-cohort",
+        help=(
+            "Atomically build the complete record manifest from history and close the "
+            "active forward cohort"
+        ),
+    )
+    close_forward.add_argument("--cohort-id", required=True)
+    close_forward.add_argument("--closed-at")
+    close_forward.add_argument(
+        "--record-manifest-output",
+        help="Optional output path; defaults beside the immutable cohort manifests",
+    )
+
     export_forward = sub.add_parser(
         "export-forward-validation",
         help=(
@@ -10727,15 +10914,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     export_forward.add_argument("--output", required=True)
-    export_forward.add_argument("--cohort-id")
-    export_forward.add_argument(
-        "--match-id",
-        action="append",
-        help="Optional repeatable fixture filter; all selected records must share one cohort",
-    )
+    export_forward.add_argument("--cohort-id", required=True)
     export_forward.add_argument(
         "--cohort-closure-file",
-        help="Optional immutable cohort-closure JSON applied to every exported receipt",
+        required=True,
+        help="Record-manifest-bound immutable cohort closure",
     )
 
     sub.add_parser("pending", help="List pending pre-match predictions")
@@ -10783,6 +10966,10 @@ def main() -> int:
             result = cmd_migrate_settlement_basis(args)
         elif args.command == "migrate-learning-scopes":
             result = cmd_migrate_learning_scopes(args)
+        elif args.command == "export-forward-record-manifest":
+            result = cmd_export_forward_record_manifest(args)
+        elif args.command == "close-forward-cohort":
+            result = cmd_close_forward_cohort(args)
         elif args.command == "export-forward-validation":
             result = cmd_export_forward_validation(args)
         elif args.command == "due-lineup-check":

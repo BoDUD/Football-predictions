@@ -176,8 +176,8 @@ python scripts/source_evidence.py build --source-file visible-page-export.json -
 python scripts/source_evidence.py verify --evidence .codex/soccer-predict/source-evidence/MATCH-source-evidence.json
 python scripts/forward_policy.py --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA
 python scripts/forward_policy.py --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID
-python scripts/forward_policy.py --base-dir . close --closed-at TIMEZONE_AWARE_ISO
-python scripts/memory_store.py --base-dir . export-forward-validation --cohort-id COHORT_ID --output forward-observations.json
+python scripts/memory_store.py --base-dir . close-forward-cohort --cohort-id COHORT_ID --closed-at TIMEZONE_AWARE_ISO
+python scripts/memory_store.py --base-dir . export-forward-validation --cohort-id COHORT_ID --cohort-closure-file .codex/soccer-predict/forward-cohorts/COHORT_ID-closure.json --output forward-observations.json
 python scripts/forward_validation.py --input forward-observations.json --output forward-validation.json
 ```
 

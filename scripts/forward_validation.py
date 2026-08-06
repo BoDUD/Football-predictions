@@ -1710,12 +1710,43 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         raise ForwardValidationError(
             "formal v2 evaluation requires a memory-store cohort aggregate export"
         )
+    raw_closure = value.get("cohort_closure")
+    if not isinstance(raw_closure, Mapping):
+        raise ForwardValidationError(
+            "formal v2 evaluation requires a closed cohort with a complete record manifest"
+        )
+    try:
+        closure = forward_policy.validate_closure(
+            raw_closure,
+            cohort=value.get("cohort_manifest") or {},
+            require_record_manifest=True,
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ForwardValidationError(
+            "formal v2 cohort closure or complete record manifest is invalid"
+        ) from exc
+    value["cohort_closure"] = closure
     binding = _validate_history_ledger_binding(value.get("history_ledger_binding"))
     for field in ("cohort_id", "policy_id", "policy_hash"):
         if value.get(field) != binding.get(field):
             raise ForwardValidationError(
                 f"forward cohort aggregate {field} does not match its history binding"
             )
+    manifest_entries = closure["record_manifest"]["records"]
+    receipt_entries = [
+        {
+            "fixture_id": receipt["fixture_id"],
+            "archive_version_hash": receipt["archive_version_hash"],
+            "record_commitment_hash": receipt["record_commitment_hash"],
+            "record_binding_hash": receipt["record_binding_hash"],
+            "prematch_ledger_hash": receipt["prematch_ledger_hash"],
+        }
+        for receipt in binding["receipts"]
+    ]
+    if receipt_entries != manifest_entries:
+        raise ForwardValidationError(
+            "history record receipts do not exactly cover the closed cohort record manifest"
+        )
 
     normalized_ledgers: list[dict[str, Any]] = []
     for receipt in binding["receipts"]:
@@ -1790,7 +1821,7 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
     value["records"] = records
     value["validation_protocol"] = validation_protocol
     value["provenance_binding"] = provenance_binding
-    value["cohort_closed"] = value.get("cohort_closure") is not None
+    value["cohort_closed"] = True
     value["evidence_contract"] = (
         "v2_memory_store_record_receipts_and_replayed_post_match_settlements"
     )

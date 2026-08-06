@@ -24,7 +24,9 @@ from soccer_predict import __version__ as SOCCER_PREDICT_VERSION
 LEGACY_POLICY_SCHEMA_VERSION = "forward-policy/1.0.0"
 POLICY_SCHEMA_VERSION = "forward-policy/2.0.0"
 COHORT_SCHEMA_VERSION = "live-forward-cohort/1.0.0"
-CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/1.0.0"
+LEGACY_CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/1.0.0"
+CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.0.0"
+RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/1.0.0"
 POLICY_ID_PREFIX = "untouched-live-forward"
 ACTIVE_COHORT_NAME = "active-forward-cohort.json"
 RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/1.0.0"
@@ -813,8 +815,111 @@ def start_cohort(
     return active_path, cohort
 
 
+def validate_record_manifest(
+    manifest: Mapping[str, Any], *, cohort: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Validate the complete immutable record index sealed at cohort closure."""
+
+    if not isinstance(manifest, Mapping):
+        raise ForwardPolicyError("live-forward record manifest must be an object")
+    value = deepcopy(dict(manifest))
+    required = {
+        "schema_version",
+        "artifact_type",
+        "cohort_id",
+        "cohort_hash",
+        "policy_id",
+        "policy_hash",
+        "record_count",
+        "records",
+        "manifest_hash",
+    }
+    if set(value) != required:
+        raise ForwardPolicyError("live-forward record manifest fields are incomplete")
+    if value.get("schema_version") != RECORD_MANIFEST_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "unsupported live-forward record manifest schema_version"
+        )
+    supplied_hash = value.pop("manifest_hash", None)
+    if supplied_hash != _hash_json(value):
+        raise ForwardPolicyError("live-forward record manifest hash is invalid")
+    if value.get("artifact_type") != "soccer_untouched_live_forward_record_manifest":
+        raise ForwardPolicyError(
+            "live-forward record manifest artifact_type is invalid"
+        )
+    cohort_id = str(value.get("cohort_id") or "")
+    if not cohort_id or any(character.isspace() for character in cohort_id):
+        raise ForwardPolicyError("live-forward record manifest cohort_id is invalid")
+    _require_sha256(
+        value.get("cohort_hash"), "live-forward record manifest cohort_hash"
+    )
+    if not str(value.get("policy_id") or "").startswith(POLICY_ID_PREFIX + "-"):
+        raise ForwardPolicyError("live-forward record manifest policy_id is invalid")
+    _require_sha256(
+        value.get("policy_hash"), "live-forward record manifest policy_hash"
+    )
+
+    raw_records = value.get("records")
+    if not isinstance(raw_records, list):
+        raise ForwardPolicyError("live-forward record manifest records must be a list")
+    normalized_records: list[dict[str, str]] = []
+    fixture_ids: list[str] = []
+    entry_fields = {
+        "fixture_id",
+        "archive_version_hash",
+        "record_commitment_hash",
+        "record_binding_hash",
+        "prematch_ledger_hash",
+    }
+    for index, raw_entry in enumerate(raw_records):
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != entry_fields:
+            raise ForwardPolicyError(
+                f"live-forward record manifest records[{index}] fields are incomplete"
+            )
+        entry = {field: str(raw_entry.get(field) or "") for field in entry_fields}
+        fixture_id = entry["fixture_id"]
+        if not fixture_id:
+            raise ForwardPolicyError(
+                f"live-forward record manifest records[{index}].fixture_id is missing"
+            )
+        for field in entry_fields - {"fixture_id"}:
+            _require_sha256(
+                entry[field], f"live-forward record manifest records[{index}].{field}"
+            )
+        fixture_ids.append(fixture_id)
+        normalized_records.append(entry)
+    if fixture_ids != sorted(fixture_ids) or len(set(fixture_ids)) != len(fixture_ids):
+        raise ForwardPolicyError(
+            "live-forward record manifest records must be unique and canonically ordered "
+            "by fixture_id"
+        )
+    record_count = value.get("record_count")
+    if (
+        isinstance(record_count, bool)
+        or not isinstance(record_count, int)
+        or record_count != len(normalized_records)
+    ):
+        raise ForwardPolicyError("live-forward record manifest record_count is invalid")
+    value["records"] = normalized_records
+
+    if cohort is not None:
+        frozen = validate_cohort(cohort)
+        if any(
+            value.get(field) != frozen.get(field)
+            for field in ("cohort_id", "cohort_hash", "policy_id", "policy_hash")
+        ):
+            raise ForwardPolicyError(
+                "live-forward record manifest does not bind the immutable cohort"
+            )
+    value["manifest_hash"] = supplied_hash
+    return value
+
+
 def close_cohort(
-    *, base_dir: str | Path, closed_at: str | datetime | None = None
+    *,
+    base_dir: str | Path,
+    record_manifest: Mapping[str, Any],
+    closed_at: str | datetime | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     active_path = active_cohort_path(base_dir)
     cohort = validate_cohort(_read_json(active_path, "active cohort"))
@@ -824,6 +929,7 @@ def close_cohort(
     started = _aware_datetime(str(cohort["starts_at"]), "cohort.starts_at")
     if closed < started:
         raise ForwardPolicyError("live-forward cohort cannot close before it started")
+    manifest = validate_record_manifest(record_manifest, cohort=cohort)
     closure: dict[str, Any] = {
         "schema_version": CLOSURE_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort_closure",
@@ -834,6 +940,8 @@ def close_cohort(
         "starts_at": cohort["starts_at"],
         "closed_at": closed.replace(microsecond=0).isoformat(),
         "reason": "explicit_policy_boundary",
+        "record_manifest_hash": manifest["manifest_hash"],
+        "record_manifest": manifest,
     }
     closure["closure_hash"] = _hash_json(closure)
     closure_path = cohort_directory(base_dir) / f"{cohort['cohort_id']}-closure.json"
@@ -883,16 +991,42 @@ def validate_cohort(cohort: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_closure(
-    closure: Mapping[str, Any], *, cohort: Mapping[str, Any] | None = None
+    closure: Mapping[str, Any],
+    *,
+    cohort: Mapping[str, Any] | None = None,
+    require_record_manifest: bool = False,
 ) -> dict[str, Any]:
     value = deepcopy(dict(closure))
-    if value.get("schema_version") != CLOSURE_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        LEGACY_CLOSURE_SCHEMA_VERSION,
+        CLOSURE_SCHEMA_VERSION,
+    }:
         raise ForwardPolicyError(
             "unsupported live-forward cohort closure schema_version"
+        )
+    if require_record_manifest and schema_version != CLOSURE_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "formal forward evaluation requires a record-manifest-bound cohort closure"
         )
     supplied_hash = value.pop("closure_hash", None)
     if supplied_hash != _hash_json(value):
         raise ForwardPolicyError("live-forward cohort closure hash is invalid")
+    required = {
+        "schema_version",
+        "artifact_type",
+        "cohort_id",
+        "cohort_hash",
+        "policy_id",
+        "policy_hash",
+        "starts_at",
+        "closed_at",
+        "reason",
+    }
+    if schema_version == CLOSURE_SCHEMA_VERSION:
+        required.update({"record_manifest_hash", "record_manifest"})
+    if set(value) != required:
+        raise ForwardPolicyError("live-forward cohort closure fields are incomplete")
     value["closure_hash"] = supplied_hash
     if value.get("artifact_type") != "soccer_untouched_live_forward_cohort_closure":
         raise ForwardPolicyError("live-forward cohort closure artifact_type is invalid")
@@ -908,6 +1042,22 @@ def validate_closure(
         raise ForwardPolicyError("live-forward cohort closure predates its start")
     if value.get("reason") != "explicit_policy_boundary":
         raise ForwardPolicyError("live-forward cohort closure reason is invalid")
+    if schema_version == CLOSURE_SCHEMA_VERSION:
+        manifest = validate_record_manifest(
+            value.get("record_manifest") or {}, cohort=cohort
+        )
+        if value.get("record_manifest_hash") != manifest["manifest_hash"]:
+            raise ForwardPolicyError(
+                "live-forward cohort closure record manifest hash is invalid"
+            )
+        if any(
+            value.get(field) != manifest.get(field)
+            for field in ("cohort_id", "cohort_hash", "policy_id", "policy_hash")
+        ):
+            raise ForwardPolicyError(
+                "live-forward cohort closure does not bind its record manifest"
+            )
+        value["record_manifest"] = manifest
     if cohort is not None:
         frozen = validate_cohort(cohort)
         if any(
@@ -1141,6 +1291,11 @@ def build_parser() -> argparse.ArgumentParser:
         "close", help="close the active cohort at an explicit policy boundary"
     )
     close.add_argument("--closed-at")
+    close.add_argument(
+        "--record-manifest-file",
+        required=True,
+        help="canonical complete record manifest exported from memory-store history",
+    )
     subparsers.add_parser("status", help="validate and print the active cohort")
     return parser
 
@@ -1167,6 +1322,9 @@ def main() -> int:
         elif arguments.command == "close":
             path, artifact = close_cohort(
                 base_dir=arguments.base_dir,
+                record_manifest=_read_json(
+                    Path(arguments.record_manifest_file).resolve(), "record manifest"
+                ),
                 closed_at=arguments.closed_at,
             )
         else:

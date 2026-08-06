@@ -22,6 +22,7 @@ Released-version entries below describe historical behavior and are superseded b
 ### Security
 - Pinned GitHub Actions to immutable commit SHAs and kept all new release, validation, and display changes fail-closed; no market was promoted and no historical artifact was rewritten.
 - Replaced caller-supplied history SHA wrappers with canonical per-record memory-store receipts and a replayed cohort export; formal v2 evaluation rejects naked payloads, forged timestamps, and deleted, duplicated, reordered, or replaced receipts.
+- Bound formal cohort exports to a history-locked `live-forward-cohort-closure/2.0.0` containing the complete canonical record manifest, so selected fixture subsets and receipt-list shrinkage remain invalid even after outer aggregate hashes are recomputed.
 - Split historical policy verification from active-runtime enforcement so future package upgrades can replay an internally consistent older cohort without allowing that older policy to create or continue an active cohort.
 
 ## [3.3.0] - 2026-08-06

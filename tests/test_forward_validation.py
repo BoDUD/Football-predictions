@@ -102,7 +102,24 @@ def cohort_manifest(policy: dict, *, status: str = "active") -> dict:
     return value
 
 
-def cohort_closure(cohort: dict) -> dict:
+def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> dict:
+    entries = deepcopy(records or [])
+    value = {
+        "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "soccer_untouched_live_forward_record_manifest",
+        "cohort_id": cohort["cohort_id"],
+        "cohort_hash": cohort["cohort_hash"],
+        "policy_id": cohort["policy_id"],
+        "policy_hash": cohort["policy_hash"],
+        "record_count": len(entries),
+        "records": entries,
+    }
+    value["manifest_hash"] = forward_policy._hash_json(value)
+    return value
+
+
+def cohort_closure(cohort: dict, record_manifest: dict | None = None) -> dict:
+    manifest = deepcopy(record_manifest or cohort_record_manifest(cohort))
     value = {
         "schema_version": forward_policy.CLOSURE_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort_closure",
@@ -113,6 +130,8 @@ def cohort_closure(cohort: dict) -> dict:
         "starts_at": cohort["starts_at"],
         "closed_at": "2027-01-01T00:00:00+00:00",
         "reason": "explicit_policy_boundary",
+        "record_manifest_hash": manifest["manifest_hash"],
+        "record_manifest": manifest,
     }
     value["closure_hash"] = forward_policy._hash_json(value)
     return value
@@ -481,6 +500,26 @@ def aggregate_from_micro_ledgers(payloads: list[dict]) -> dict:
     if not payloads:
         raise AssertionError("aggregate test fixture requires payloads")
     first = payloads[0]
+    preliminary_receipts = sorted(
+        [history_receipt_from_micro_ledger(item) for item in payloads],
+        key=lambda item: item["fixture_id"],
+    )
+    manifest = cohort_record_manifest(
+        first["cohort_manifest"],
+        [
+            {
+                "fixture_id": receipt["fixture_id"],
+                "archive_version_hash": receipt["archive_version_hash"],
+                "record_commitment_hash": receipt["record_commitment_hash"],
+                "record_binding_hash": receipt["record_binding_hash"],
+                "prematch_ledger_hash": receipt["prematch_ledger_hash"],
+            }
+            for receipt in preliminary_receipts
+        ],
+    )
+    closure = cohort_closure(first["cohort_manifest"], manifest)
+    for payload in payloads:
+        payload["cohort_closure"] = deepcopy(closure)
     receipts = sorted(
         [history_receipt_from_micro_ledger(item) for item in payloads],
         key=lambda item: item["fixture_id"],
@@ -503,7 +542,7 @@ def aggregate_from_micro_ledgers(payloads: list[dict]) -> dict:
         "policy_hash": first["policy_hash"],
         "policy_manifest": deepcopy(first["policy_manifest"]),
         "cohort_manifest": deepcopy(first["cohort_manifest"]),
-        "cohort_closure": deepcopy(first["cohort_closure"]),
+        "cohort_closure": deepcopy(closure),
         "history_ledger_binding": binding,
     }
 
@@ -645,6 +684,17 @@ def record_and_review_forward_fixture(base: Path, index: int) -> dict:
         return memory_store.cmd_review(review_args)["record"]
 
 
+def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
+    from test_memory_store import memory_store
+
+    ledger = records[0]["forward_validation_ledger"]["ledger_payload"]
+    cohort = deepcopy(ledger["cohort_manifest"])
+    manifest = memory_store.forward_record_manifest_for_records(
+        records, cohort_manifest=cohort
+    )
+    return cohort, cohort_closure(cohort, manifest)
+
+
 class ForwardValidationTests(unittest.TestCase):
     def test_two_real_memory_records_export_and_evaluate_as_one_cohort(self) -> None:
         from test_memory_store import memory_store
@@ -654,22 +704,40 @@ class ForwardValidationTests(unittest.TestCase):
             records = [
                 record_and_review_forward_fixture(base, index) for index in range(2)
             ]
-            exported = memory_store.forward_validation_input_for_records(records)
+            cohort, closure = closed_cohort_for_memory_records(records)
+            exported = memory_store.forward_validation_input_for_records(
+                records, cohort_closure=closure
+            )
             normalized = forward_validation.validate_input(exported)
             report = forward_validation.evaluate(exported)
+            cohort_path = forward_policy.cohort_manifest_path(base, cohort["cohort_id"])
+            cohort_path.parent.mkdir(parents=True, exist_ok=True)
+            cohort_path.write_text(
+                json.dumps(cohort, ensure_ascii=False), encoding="utf-8"
+            )
+            closure_file = base / "cohort-closure.json"
+            closure_file.write_text(
+                json.dumps(closure, ensure_ascii=False), encoding="utf-8"
+            )
             output = base / "cohort-forward-observations.json"
             cli_result = memory_store.cmd_export_forward_validation(
                 SimpleNamespace(
                     base_dir=str(base),
                     output=str(output),
                     cohort_id=exported["cohort_id"],
-                    match_id=None,
-                    cohort_closure_file=None,
+                    cohort_closure_file=str(closure_file),
                 )
             )
             cli_exported = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(
             exported["history_ledger_binding"]["fixture_ids"], ["1000", "1001"]
+        )
+        self.assertEqual(
+            [
+                entry["fixture_id"]
+                for entry in exported["cohort_closure"]["record_manifest"]["records"]
+            ],
+            ["1000", "1001"],
         )
         self.assertEqual(len(normalized["records"]), 2)
         self.assertEqual(cli_result["receipt_count"], 2)
@@ -678,6 +746,53 @@ class ForwardValidationTests(unittest.TestCase):
             report["overall"]["comparisons"]["bookmaker_no_vig"]["sample_count"],
             2,
         )
+
+    def test_atomic_memory_store_close_seals_all_history_records(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            records = [
+                record_and_review_forward_fixture(base, index) for index in range(2)
+            ]
+            cohort = deepcopy(
+                records[0]["forward_validation_ledger"]["ledger_payload"][
+                    "cohort_manifest"
+                ]
+            )
+            immutable_path = forward_policy.cohort_manifest_path(
+                base, cohort["cohort_id"]
+            )
+            immutable_path.parent.mkdir(parents=True, exist_ok=True)
+            immutable_path.write_text(
+                json.dumps(cohort, ensure_ascii=False), encoding="utf-8"
+            )
+            active_path = forward_policy.active_cohort_path(base)
+            active_path.parent.mkdir(parents=True, exist_ok=True)
+            active_path.write_text(
+                json.dumps(cohort, ensure_ascii=False), encoding="utf-8"
+            )
+            manifest_output = base / "record-manifest.json"
+            closed = memory_store.cmd_close_forward_cohort(
+                SimpleNamespace(
+                    base_dir=str(base),
+                    cohort_id=cohort["cohort_id"],
+                    closed_at="2027-01-01T00:00:00+00:00",
+                    record_manifest_output=str(manifest_output),
+                )
+            )
+            closure = json.loads(
+                Path(closed["closure_path"]).read_text(encoding="utf-8")
+            )
+            exported = memory_store.forward_validation_input_for_records(
+                records, cohort_closure=closure
+            )
+            normalized = forward_validation.validate_input(exported)
+            manifest_exists = manifest_output.is_file()
+        self.assertEqual(closed["record_count"], 2)
+        self.assertTrue(manifest_exists)
+        self.assertEqual(closure["record_manifest_hash"], closed["manifest_hash"])
+        self.assertEqual(len(normalized["records"]), 2)
 
     def test_memory_record_review_evaluate_replays_archived_micro_ledger(self) -> None:
         from test_memory_store import memory_store, record_args
@@ -787,7 +902,10 @@ class ForwardValidationTests(unittest.TestCase):
                 return_value=result_collected + timedelta(minutes=1),
             ):
                 reviewed = memory_store.cmd_review(review_args)["record"]
-            replay = memory_store.forward_validation_input_for_record(reviewed)
+            _cohort, closure = closed_cohort_for_memory_records([reviewed])
+            replay = memory_store.forward_validation_input_for_record(
+                reviewed, cohort_closure=closure
+            )
             report = forward_validation.evaluate(replay)
             self.assertEqual(
                 report["overall"]["comparisons"]["bookmaker_no_vig"]["sample_count"],
@@ -848,6 +966,15 @@ class ForwardValidationTests(unittest.TestCase):
             "external_timestamp_anchor_not_configured", report["promotion_blockers"]
         )
         self.assertFalse(report["promotion_eligible"])
+
+    def test_formal_v2_rejects_an_open_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            value = build_aggregate_payload(Path(temporary), 1)
+        value["cohort_closure"] = None
+        with self.assertRaisesRegex(
+            forward_validation.ForwardValidationError, "requires a closed cohort"
+        ):
+            forward_validation.evaluate(value)
 
     def test_v2_evaluation_rejects_freely_constructed_unarchived_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -954,6 +1081,59 @@ class ForwardValidationTests(unittest.TestCase):
                         "receipt|canonically ordered|archive snapshot",
                     ):
                         forward_validation.validate_input(attacked)
+
+    def test_resealed_receipt_subset_cannot_shrink_closed_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            value = build_aggregate_payload(Path(temporary), 2)
+        binding = value["history_ledger_binding"]
+        binding["receipts"] = binding["receipts"][:1]
+        binding["fixture_ids"] = [binding["receipts"][0]["fixture_id"]]
+        binding.pop("binding_hash")
+        binding["binding_hash"] = forward_validation._hash(binding)
+        with self.assertRaisesRegex(
+            forward_validation.ForwardValidationError,
+            "exactly cover the closed cohort record manifest",
+        ):
+            forward_validation.evaluate(value)
+
+    def test_formal_export_rejects_records_added_after_manifest_snapshot(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            records = [
+                record_and_review_forward_fixture(base, index) for index in range(2)
+            ]
+            ledger = records[0]["forward_validation_ledger"]["ledger_payload"]
+            cohort = deepcopy(ledger["cohort_manifest"])
+            stale_manifest = memory_store.forward_record_manifest_for_records(
+                records[:1], cohort_manifest=cohort
+            )
+            stale_closure = cohort_closure(cohort, stale_manifest)
+            with self.assertRaisesRegex(
+                ValueError, "do not exactly cover the closed record manifest"
+            ):
+                memory_store.forward_validation_input_for_records(
+                    records, cohort_closure=stale_closure
+                )
+
+    def test_formal_export_parser_has_no_fixture_subset_escape(self) -> None:
+        from test_memory_store import memory_store
+
+        with self.assertRaises(SystemExit):
+            memory_store.build_parser().parse_args(
+                [
+                    "export-forward-validation",
+                    "--cohort-id",
+                    "confirmation-a",
+                    "--cohort-closure-file",
+                    "closure.json",
+                    "--output",
+                    "observations.json",
+                    "--match-id",
+                    "1000",
+                ]
+            )
 
     def test_same_cohort_id_replacement_and_late_queue_addition_are_rejected(
         self,

@@ -11,6 +11,21 @@ from unittest import mock
 from scripts import forward_policy
 
 
+def empty_record_manifest(cohort: dict) -> dict:
+    value = {
+        "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "soccer_untouched_live_forward_record_manifest",
+        "cohort_id": cohort["cohort_id"],
+        "cohort_hash": cohort["cohort_hash"],
+        "policy_id": cohort["policy_id"],
+        "policy_hash": cohort["policy_hash"],
+        "record_count": 0,
+        "records": [],
+    }
+    value["manifest_hash"] = forward_policy._hash_json(value)
+    return value
+
+
 class ForwardPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
@@ -269,12 +284,15 @@ class ForwardPolicyTests(unittest.TestCase):
 
             closure_path, closure = forward_policy.close_cohort(
                 base_dir=base,
+                record_manifest=empty_record_manifest(cohort),
                 closed_at=start + timedelta(hours=1),
             )
             self.assertTrue(closure_path.is_file())
             self.assertEqual(closure["cohort_hash"], cohort["cohort_hash"])
             self.assertEqual(
-                forward_policy.validate_closure(closure, cohort=cohort)["closure_hash"],
+                forward_policy.validate_closure(
+                    closure, cohort=cohort, require_record_manifest=True
+                )["closure_hash"],
                 closure["closure_hash"],
             )
             with mock.patch.object(
@@ -490,6 +508,8 @@ class ForwardPolicyTests(unittest.TestCase):
                     "registry.json",
                 ]
             )
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["close", "--closed-at", "2026-08-07T00:00:00Z"])
 
 
 if __name__ == "__main__":
