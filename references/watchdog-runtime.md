@@ -4,7 +4,7 @@ Use exact per-match Codex automations by default. They run only at the verified 
 
 ## Runtime layers
 
-1. After an initial archive, create one T-30 automation and one kickoff-plus-three-hour review automation. Both must end in `COUNT=1`.
+1. After an initial archive, create one T-30 automation and one kickoff-plus-three-hour review automation. Both must end in `COUNT=1`, carry the scheduler's versioned exact-UTC one-time schedule spec, and bind `dtstart_utc`, `until_utc`, and `run_at_utc` to the same instant. If the platform reports a next-run timestamp, attachment succeeds only when it exactly equals `run_at_utc`.
 2. Each automation opens one visible Codex task for its named match. The child task must claim the scheduler lease before doing work.
 3. The T-30 task must not run early or after kickoff. The review time only makes a check due and is not proof of full-time.
 4. A later user-initiated invocation or explicit one-time cleanup task verifies the completed result before marking delivery and removing exact automation references.

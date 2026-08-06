@@ -4,16 +4,15 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import re
 import sys
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
 
 DEFAULT_USER_TIMEZONE = "Asia/Tokyo"
 INITIAL_DELAY_HOURS = 3
@@ -23,6 +22,7 @@ FINAL_STATUSES = {"completed", "terminal"}
 RESULT_DELIVERY_STATUSES = {"not_ready", "pending", "delivered"}
 RESULT_METADATA_GRACE = timedelta(minutes=10)
 MIN_RESULT_ARTIFACT_NONSPACE_CHARS = 32
+EXACT_SCHEDULE_SPEC_VERSION = "soccer-exact-utc-once/1.0.0"
 ADMIN_TERMINAL_STATUSES = {
     "cancelled": "cancelled",
     "canceled": "cancelled",
@@ -79,6 +79,27 @@ def codex_rrule_utc(run_at: datetime) -> str:
     )
 
 
+def exact_utc_schedule_spec(
+    run_at: datetime, *, automation_rrule: str | None = None
+) -> dict[str, Any]:
+    """Return a date-bound, machine-verifiable one-time UTC schedule contract."""
+
+    run_at_utc = run_at.astimezone(timezone.utc).replace(microsecond=0)
+    rrule = automation_rrule or codex_rrule_utc(run_at_utc)
+    timestamp = iso_seconds(run_at_utc)
+    return {
+        "schema_version": EXACT_SCHEDULE_SPEC_VERSION,
+        "kind": "one_time",
+        "timezone": "UTC",
+        "run_at_utc": timestamp,
+        "dtstart_utc": timestamp,
+        "until_utc": timestamp,
+        "count": 1,
+        "automation_rrule": rrule,
+        "platform_next_run_must_equal_run_at_utc": True,
+    }
+
+
 def empty_state() -> dict[str, Any]:
     return {"version": 1, "tasks": {}}
 
@@ -92,7 +113,9 @@ def load_json(path: Path, default: Any) -> Any:
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     temp.replace(path)
 
 
@@ -132,7 +155,9 @@ def history_record(base_dir: str | None, match_id: str) -> dict[str, Any] | None
     history = load_json(history_path(base_dir), [])
     if not isinstance(history, list):
         raise ValueError("history.json must contain an array")
-    return next((item for item in history if str(item.get("match_id")) == str(match_id)), None)
+    return next(
+        (item for item in history if str(item.get("match_id")) == str(match_id)), None
+    )
 
 
 def make_attempt(
@@ -144,6 +169,7 @@ def make_attempt(
     reason: str | None = None,
 ) -> dict[str, Any]:
     run_at_utc = run_at.astimezone(timezone.utc)
+    automation_rrule = codex_rrule_utc(run_at_utc)
     return {
         "number": number,
         "attempt_id": f"review-{number}",
@@ -152,7 +178,10 @@ def make_attempt(
         "run_at": iso_seconds(run_at.astimezone(local_zone)),
         "run_at_utc": iso_seconds(run_at_utc),
         "automation_timezone": "UTC",
-        "automation_rrule": codex_rrule_utc(run_at_utc),
+        "automation_rrule": automation_rrule,
+        "automation_schedule_spec": exact_utc_schedule_spec(
+            run_at_utc, automation_rrule=automation_rrule
+        ),
         "outcome": "planned",
         "claims": [],
         "automation_ref": None,
@@ -171,6 +200,26 @@ def current_attempt(task: dict[str, Any]) -> dict[str, Any]:
     )
     if not attempt:
         raise ValueError(f"Review task {task.get('match_id')} has no current attempt")
+    raw_run_at = attempt.get("run_at_utc") or attempt.get("run_at")
+    if not raw_run_at:
+        raise ValueError(f"Review attempt {attempt.get('attempt_id')} has no run time")
+    run_at_utc = parse_datetime(str(raw_run_at))
+    attempt["run_at_utc"] = iso_seconds(run_at_utc)
+    if not attempt.get("automation_rrule"):
+        attempt["automation_rrule"] = codex_rrule_utc(run_at_utc)
+    attempt["automation_schedule_spec"] = exact_utc_schedule_spec(
+        run_at_utc, automation_rrule=str(attempt["automation_rrule"])
+    )
+    refs: list[Any] = [attempt.get("automation_ref")]
+    refs.extend(task.get("automation_refs", []))
+    for ref in refs:
+        if not isinstance(ref, dict) or ref.get("attempt_id") != attempt.get(
+            "attempt_id"
+        ):
+            continue
+        ref["automation_schedule_spec"] = dict(attempt["automation_schedule_spec"])
+        ref.setdefault("platform_next_run_utc", None)
+        ref.setdefault("platform_next_run_verified", False)
     return attempt
 
 
@@ -199,11 +248,7 @@ def ensure_result_delivery(task: dict[str, Any]) -> dict[str, Any]:
         }
         task["result_delivery"] = delivery
 
-    status = str(
-        delivery.get("delivery_status")
-        or task.get("delivery_status")
-        or ""
-    )
+    status = str(delivery.get("delivery_status") or task.get("delivery_status") or "")
     if status not in RESULT_DELIVERY_STATUSES:
         status = (
             "delivered"
@@ -322,7 +367,9 @@ def resolve_result_artifact(base_dir: str | None, value: Any) -> str:
         raise ValueError("Cannot complete review task without --result-artifact")
     artifact = Path(raw).expanduser()
     if not artifact.is_absolute():
-        base = Path(base_dir).expanduser().resolve() if base_dir else Path.cwd().resolve()
+        base = (
+            Path(base_dir).expanduser().resolve() if base_dir else Path.cwd().resolve()
+        )
         artifact = base / artifact
     artifact = artifact.resolve()
     if not artifact.is_file():
@@ -343,7 +390,9 @@ def validate_result_artifact_content(
     try:
         text = artifact.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise ValueError(f"Result artifact must be valid UTF-8 text: {artifact}") from exc
+        raise ValueError(
+            f"Result artifact must be valid UTF-8 text: {artifact}"
+        ) from exc
 
     if "\x00" in text or "\ufffd" in text:
         raise ValueError(f"Result artifact contains invalid text data: {artifact}")
@@ -445,7 +494,9 @@ def sync_history_terminal(
     if record_status == "reviewed":
         task["status"] = "completed"
         task["terminal_reason"] = "history_reviewed"
-        task["completed_at"] = normalized_history_time(record.get("reviewed_at"), current)
+        task["completed_at"] = normalized_history_time(
+            record.get("reviewed_at"), current
+        )
         task["lease_until"] = None
         task["resume_status"] = None
         attempt["outcome"] = "reviewed"
@@ -470,7 +521,9 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
     if not record:
         raise ValueError(f"No archived pre-match prediction for match {args.match_id}")
     if record.get("mode") != "prematch":
-        raise ValueError(f"Match {args.match_id} is not an archived pre-match prediction")
+        raise ValueError(
+            f"Match {args.match_id} is not an archived pre-match prediction"
+        )
     record_status = str(record.get("status") or "").lower()
     if record_status == "reviewed" or record_status in ADMIN_TERMINAL_STATUSES:
         raise ValueError(f"Match {args.match_id} is already terminal: {record_status}")
@@ -497,7 +550,9 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
             )
             if same:
                 return task_result(path, existing, duplicate_ignored=True)
-            raise ValueError(f"Review task for match {args.match_id} is already registered")
+            raise ValueError(
+                f"Review task for match {args.match_id} is already registered"
+            )
 
         task = {
             "match_id": str(args.match_id),
@@ -609,6 +664,18 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
                 "Automation RRULE does not match the expected UTC rule: "
                 f"{attempt['automation_rrule']}"
             )
+        expected_run_at = parse_datetime(str(attempt["run_at_utc"]))
+        platform_next_run = str(getattr(args, "platform_next_run", "") or "").strip()
+        if platform_next_run:
+            parsed_platform_next_run = parse_datetime(platform_next_run)
+            if parsed_platform_next_run != expected_run_at:
+                raise ValueError(
+                    "Platform next-run does not exactly match run_at_utc: "
+                    f"expected {iso_seconds(expected_run_at)}"
+                )
+            platform_next_run_utc = iso_seconds(parsed_platform_next_run)
+        else:
+            platform_next_run_utc = None
         existing = attempt.get("automation_ref")
         if existing:
             same = (
@@ -616,8 +683,16 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
                 and existing.get("automation_rrule") == args.automation_rrule
             )
             if same:
+                if platform_next_run_utc is not None:
+                    existing["platform_next_run_utc"] = platform_next_run_utc
+                    existing["platform_next_run_verified"] = True
+                    existing["automation_schedule_spec"] = exact_utc_schedule_spec(
+                        expected_run_at, automation_rrule=args.automation_rrule
+                    )
                 return task_result(path, task, duplicate_ignored=True)
-            raise ValueError(f"Attempt {attempt['attempt_id']} already has an automation")
+            raise ValueError(
+                f"Attempt {attempt['attempt_id']} already has an automation"
+            )
         ref = {
             "id": args.automation_id,
             "name": args.automation_name,
@@ -626,6 +701,11 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
             "run_at_utc": attempt["run_at_utc"],
             "automation_rrule": args.automation_rrule,
             "schedule_verified": True,
+            "automation_schedule_spec": exact_utc_schedule_spec(
+                expected_run_at, automation_rrule=args.automation_rrule
+            ),
+            "platform_next_run_utc": platform_next_run_utc,
+            "platform_next_run_verified": platform_next_run_utc is not None,
         }
         attempt["automation_ref"] = ref
         task.setdefault("automation_refs", []).append(ref)
@@ -652,7 +732,9 @@ def cmd_claim(args: argparse.Namespace) -> dict[str, Any]:
         if current < run_at:
             return task_result(path, task, claimed=False, reason="too_early")
         lease_until = (
-            parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+            parse_datetime(str(task["lease_until"]))
+            if task.get("lease_until")
+            else None
         )
         if task.get("status") == "claimed" and lease_until and lease_until > current:
             return task_result(path, task, claimed=False, reason="active_lease")
@@ -726,7 +808,9 @@ def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
         if task.get("status") in FINAL_STATUSES:
-            return task_result(path, task, follow_up_created=False, reason=task["status"])
+            return task_result(
+                path, task, follow_up_created=False, reason=task["status"]
+            )
         if task.get("status") == "waiting":
             return task_result(
                 path,
@@ -736,7 +820,9 @@ def cmd_wait(args: argparse.Namespace) -> dict[str, Any]:
                 follow_up=current_attempt(task),
             )
         if task.get("status") != "claimed":
-            raise ValueError("A review attempt must be claimed before scheduling a follow-up")
+            raise ValueError(
+                "A review attempt must be claimed before scheduling a follow-up"
+            )
         require_claim_ownership(task, thread_id, action="Waiting")
 
         previous = current_attempt(task)
@@ -778,7 +864,9 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
     )
     record = history_record(args.base_dir, args.match_id)
     if not record or str(record.get("status") or "").lower() != "reviewed":
-        raise ValueError("Cannot complete a review task before history.json is reviewed")
+        raise ValueError(
+            "Cannot complete a review task before history.json is reviewed"
+        )
     validate_result_artifact_content(
         result_artifact,
         match_id=str(args.match_id),
@@ -809,7 +897,9 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
             )
         attempt = current_attempt(task)
         attempt["outcome"] = "reviewed"
-        attempt["finished_at"] = normalized_history_time(record.get("reviewed_at"), current)
+        attempt["finished_at"] = normalized_history_time(
+            record.get("reviewed_at"), current
+        )
         task["status"] = "completed"
         task["terminal_reason"] = "history_reviewed"
         task["completed_at"] = attempt["finished_at"]
@@ -893,11 +983,15 @@ def cmd_mark_delivered(args: argparse.Namespace) -> dict[str, Any]:
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
         if task.get("status") not in FINAL_STATUSES:
-            raise ValueError("Cannot mark review result delivered before the task is terminal")
+            raise ValueError(
+                "Cannot mark review result delivered before the task is terminal"
+            )
         delivery = ensure_result_delivery(task)
         expected_thread_id = str(delivery.get("thread_id") or "").strip()
         if not expected_thread_id or supplied_thread_id != expected_thread_id:
-            raise ValueError("Delivered thread id does not match the archived review task")
+            raise ValueError(
+                "Delivered thread id does not match the archived review task"
+            )
         if delivery.get("result_artifact"):
             resolved_artifact = resolve_result_artifact(
                 args.base_dir, delivery.get("result_artifact")
@@ -943,7 +1037,9 @@ def cmd_mark_cleaned(args: argparse.Namespace) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"Unknown automation id(s): {', '.join(unknown)}")
         if missing:
-            raise ValueError(f"Automation id(s) still require cleanup: {', '.join(missing)}")
+            raise ValueError(
+                f"Automation id(s) still require cleanup: {', '.join(missing)}"
+            )
         if task.get("cleaned"):
             return task_result(path, task, duplicate_ignored=True)
         task["cleaned"] = True
@@ -967,7 +1063,9 @@ def cmd_cleanup_due(args: argparse.Namespace) -> dict[str, Any]:
                 history_record(args.base_dir, str(task["match_id"])),
                 current,
             )
-            if task.get("status") not in FINAL_STATUSES or task.get("cleanup_completed_at"):
+            if task.get("status") not in FINAL_STATUSES or task.get(
+                "cleanup_completed_at"
+            ):
                 continue
             delivery = ensure_result_delivery(task)
             delivery_status = str(delivery.get("delivery_status") or "")
@@ -977,7 +1075,9 @@ def cmd_cleanup_due(args: argparse.Namespace) -> dict[str, Any]:
                 metadata_complete = has_thread and (
                     has_artifact or delivery.get("legacy_inferred")
                 )
-                if not metadata_complete and result_metadata_grace_active(task, current):
+                if not metadata_complete and result_metadata_grace_active(
+                    task, current
+                ):
                     continue
                 next_action = (
                     "verify_delivery"
@@ -1023,7 +1123,9 @@ def cmd_due(args: argparse.Namespace) -> dict[str, Any]:
             attempt = current_attempt(task)
             run_at = parse_datetime(str(attempt["run_at_utc"]))
             lease_until = (
-                parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+                parse_datetime(str(task["lease_until"]))
+                if task.get("lease_until")
+                else None
             )
             if current >= run_at and (not lease_until or lease_until <= current):
                 item = dict(task)
@@ -1055,9 +1157,15 @@ def cmd_automation_plan(args: argparse.Namespace) -> dict[str, Any]:
             attempt = current_attempt(task)
             run_at = parse_datetime(str(attempt["run_at_utc"]))
             lease_until = (
-                parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+                parse_datetime(str(task["lease_until"]))
+                if task.get("lease_until")
+                else None
             )
-            active_lease = task.get("status") == "claimed" and lease_until and lease_until > current
+            active_lease = (
+                task.get("status") == "claimed"
+                and lease_until
+                and lease_until > current
+            )
             if not active_lease:
                 if current < run_at:
                     if not attempt.get("automation_ref"):
@@ -1100,7 +1208,9 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-dir", help="Workspace root; defaults to current directory")
+    parser.add_argument(
+        "--base-dir", help="Workspace root; defaults to current directory"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     register = sub.add_parser(
@@ -1108,7 +1218,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Register one idempotent post-match review check at kickoff plus three hours",
     )
     register.add_argument("--match-id", required=True)
-    register.add_argument("--kickoff", help="Kickoff with explicit offset; defaults to history.json")
+    register.add_argument(
+        "--kickoff", help="Kickoff with explicit offset; defaults to history.json"
+    )
     register.add_argument("--user-timezone", default=DEFAULT_USER_TIMEZONE)
     register.add_argument("--home-team")
     register.add_argument("--away-team")
@@ -1133,11 +1245,19 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("--automation-id", required=True)
     attach.add_argument("--automation-name", required=True)
     attach.add_argument("--automation-rrule", required=True)
+    attach.add_argument(
+        "--platform-next-run",
+        "--platform-next-run-utc",
+        dest="platform_next_run",
+        help="Platform-reported next run; when supplied it must exactly equal run_at_utc",
+    )
 
     claim = sub.add_parser("claim", help="Atomically claim a due review status check")
     claim.add_argument("--match-id", required=True)
     claim.add_argument("--thread-id", required=True)
-    claim.add_argument("--now", help="ISO datetime with offset, for deterministic checks")
+    claim.add_argument(
+        "--now", help="ISO datetime with offset, for deterministic checks"
+    )
     claim.add_argument("--lease-minutes", type=float, default=10.0)
 
     release = sub.add_parser(
@@ -1210,7 +1330,9 @@ def build_parser() -> argparse.ArgumentParser:
     cleaned.add_argument("--automation-id", action="append")
     cleaned.add_argument("--now")
 
-    due = sub.add_parser("due", help="List due checks, including executor catch-up work")
+    due = sub.add_parser(
+        "due", help="List due checks, including executor catch-up work"
+    )
     due.add_argument("--now")
 
     cleanup_due = sub.add_parser(
@@ -1260,7 +1382,10 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
         return 2
 
 

@@ -12,22 +12,21 @@ does not consume or analyze an event.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import csv
 import hashlib
 import hmac
 import io
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterator
-
 
 SCHEMA_VERSION = 1
 DISPATCH_COOLDOWN = timedelta(minutes=10)
@@ -176,9 +175,7 @@ def run_scheduler(
         result["error"] = f"scheduler script is missing: {script}"
         return result
 
-    command = scheduler_command(
-        python_executable, script, workspace, now, spec.command
-    )
+    command = scheduler_command(python_executable, script, workspace, now, spec.command)
     result["command"] = command
     try:
         completed = subprocess.run(
@@ -418,10 +415,7 @@ def acknowledge_event(
         if not source.is_file():
             raise ValueError(f"Pending event does not exist: {source}")
         event = json.loads(source.read_text(encoding="utf-8"))
-        if (
-            event.get("event_id") != event_id
-            or event.get("scheduler") != scheduler
-        ):
+        if event.get("event_id") != event_id or event.get("scheduler") != scheduler:
             raise ValueError("Pending event identity does not match its file name")
         dispatched_at = now or iso_utc_now()
         parse_aware_datetime(dispatched_at, "dispatch time")
@@ -518,9 +512,7 @@ def discover_codex_package() -> tuple[dict[str, str] | None, str | None]:
     if os.name != "nt":
         return None, "Codex package discovery is supported only on Windows"
     try:
-        powershell = windows_system_executable(
-            r"WindowsPowerShell\v1.0\powershell.exe"
-        )
+        powershell = windows_system_executable(r"WindowsPowerShell\v1.0\powershell.exe")
         command = (
             "$pkg = Get-AppxPackage -Name 'OpenAI.Codex' | "
             "Sort-Object Version -Descending | Select-Object -First 1; "
@@ -626,9 +618,8 @@ def launch_codex_aumid(aumid: str) -> None:
 
 
 def launch_pinned_codex_executable(executable: Path) -> None:
-    creation_flags = (
-        getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    creation_flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+        subprocess, "CREATE_NEW_PROCESS_GROUP", 0
     )
     subprocess.Popen(
         [str(executable)],
@@ -782,9 +773,7 @@ def run_watchdog(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     }
                 )
 
-    due_count = sum(
-        len(result["due"]) for result in scheduler_results if result["ok"]
-    )
+    due_count = sum(len(result["due"]) for result in scheduler_results if result["ok"])
     activation = activate_codex(codex_executable, due_count > 0)
     schedulers_ok = all(
         result["ok"] for result in preparation_results + scheduler_results
@@ -879,9 +868,7 @@ def main() -> int:
             return 0
         if args.ack_event:
             if not args.scheduler or not args.thread_id:
-                raise ValueError(
-                    "--ack-event requires --scheduler and --thread-id"
-                )
+                raise ValueError("--ack-event requires --scheduler and --thread-id")
             result = acknowledge_event(
                 workspace,
                 scheduler=args.scheduler,
