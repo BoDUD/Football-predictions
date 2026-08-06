@@ -10,17 +10,16 @@ font is reduced when necessary.  Content is never replaced by an ellipsis.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from html import escape
 import json
 import math
 import os
-from pathlib import Path
 import re
 import tempfile
-from typing import Any, Mapping, Sequence
 import unicodedata
-
+from dataclasses import dataclass
+from html import escape
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in os.sys.path:
@@ -29,7 +28,6 @@ if str(SCRIPT_DIR) not in os.sys.path:
 import memory_store
 import plain_text_formatter
 import public_market_outlook
-
 
 WIDTH = 1520
 SIDE_MARGIN = 40
@@ -48,7 +46,7 @@ COLUMNS = (
     ("赛事", "league", 110),
     ("主队 vs 客队", "match", 320),
     ("主推", "primary", 250),
-    ("总进球", "total_goals", 170),
+    ("联合首选情景总球", "total_goals", 170),
     ("半全场", "htft", 220),
     ("波胆", "scores", 180),
 )
@@ -81,6 +79,9 @@ ARCHIVE_DERIVED_ROW_FIELDS = frozenset(
         "scores",
         "joint_scenarios",
         "joint_top_two",
+        "top2_cumulative_probability",
+        "other_scenarios_probability",
+        "joint_uncertainty",
         "derived",
     }
 )
@@ -104,9 +105,7 @@ COLORS = {
     "warning": "#a52b47",
 }
 
-FOOTER_SOURCE_NOTE = (
-    "总进球取冻结联合第1名比分映射；半全场与波胆按联合 Top 2 配对，不展示独立榜单或第三项。"
-)
+FOOTER_SOURCE_NOTE = "联合首选情景总球取冻结联合第1名比分映射；Top2累计与不确定度由完整归档联合分布重算；边际第一仅在文字审计。"
 
 
 @dataclass(frozen=True)
@@ -132,7 +131,9 @@ class Card:
 
     @property
     def height(self) -> int:
-        return TITLE_HEIGHT + HEADER_HEIGHT + len(self.rows) * ROW_HEIGHT + FOOTER_HEIGHT
+        return (
+            TITLE_HEIGHT + HEADER_HEIGHT + len(self.rows) * ROW_HEIGHT + FOOTER_HEIGHT
+        )
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -155,9 +156,9 @@ def _safe_metadata_text(
         raise ValueError(f"{field} is too long for the fixed card layout")
     if max_visual_units is not None and _visual_width(result) > max_visual_units:
         raise ValueError(f"{field} is too wide for the fixed card layout")
-    if FORBIDDEN_METADATA.search(result) or plain_text_formatter.MARKET_DIRECTION_TEXT.search(
+    if FORBIDDEN_METADATA.search(
         result
-    ):
+    ) or plain_text_formatter.MARKET_DIRECTION_TEXT.search(result):
         raise ValueError(f"{field} must not contain recommendation markers")
     if any(token in result for token in FORBIDDEN_ELLIPSES):
         raise ValueError(f"{field} must not contain an ellipsis")
@@ -184,7 +185,9 @@ def load_history_records(path: Path) -> dict[str, Mapping[str, Any]]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read valid UTF-8 prediction history from {path}: {error}") from error
+        raise ValueError(
+            f"cannot read valid UTF-8 prediction history from {path}: {error}"
+        ) from error
     if not isinstance(raw, list):
         raise ValueError("prediction history must be a JSON array")
     records: dict[str, Mapping[str, Any]] = {}
@@ -195,7 +198,9 @@ def load_history_records(path: Path) -> dict[str, Mapping[str, Any]]:
         if not isinstance(match_id, str) or not match_id.strip():
             raise ValueError(f"prediction history item {index} has no valid match_id")
         if match_id in records:
-            raise ValueError(f"prediction history contains duplicate match_id {match_id}")
+            raise ValueError(
+                f"prediction history contains duplicate match_id {match_id}"
+            )
         records[match_id] = record
     return records
 
@@ -205,8 +210,14 @@ def _archived_primary(record: Mapping[str, Any], prefix: str) -> str | None:
     market = record.get("primary_market")
     if primary is None and market in {None, "", "none"}:
         return None
-    if not isinstance(primary, dict) or not isinstance(market, str) or market in {"", "none"}:
-        raise ValueError(f"{prefix} archive has inconsistent primary_market/primary_pick")
+    if (
+        not isinstance(primary, dict)
+        or not isinstance(market, str)
+        or market in {"", "none"}
+    ):
+        raise ValueError(
+            f"{prefix} archive has inconsistent primary_market/primary_pick"
+        )
     label = plain_text_formatter.format_pick(market, primary, dict(record))
     if not label or label == "无正式推荐":
         raise ValueError(f"{prefix} archive primary cannot be rendered")
@@ -224,7 +235,9 @@ def _archived_observation_labels(
 def archive_version_hash(version: Mapping[str, Any]) -> str:
     """Return the deterministic public binding for one archived version."""
     snapshot = memory_store.revision_snapshot(dict(version))
-    return memory_store.canonical_prediction_hash(memory_store.snapshot_payload(snapshot))
+    return memory_store.canonical_prediction_hash(
+        memory_store.snapshot_payload(snapshot)
+    )
 
 
 def _select_archived_version(
@@ -294,11 +307,14 @@ def _joint_artifact_display(
         seen_events: set[tuple[str, str]] = set()
         score_lines: list[str] = []
         previous_probability: float | None = None
+        displayed_probabilities: list[float] = []
         for rank, item in enumerate(scenario_items, start=1):
             if item.get("slot") != rank:
                 raise ValueError("invalid joint display slot")
             htft_code = str(item["htft"])
-            if len(htft_code) != 2 or any(code not in HTFT_RESULT_LABELS for code in htft_code):
+            if len(htft_code) != 2 or any(
+                code not in HTFT_RESULT_LABELS for code in htft_code
+            ):
                 raise ValueError("invalid HT/FT display code")
             score = str(item["score"])
             score_match = re.fullmatch(r"(\d+)-(\d+)", score)
@@ -308,10 +324,13 @@ def _joint_artifact_display(
             away_goals = int(score_match.group(2))
             scenario_total_goals = home_goals + away_goals
             expected_goal_range = (
-                "0-1" if scenario_total_goals <= 1 else
-                "2-3" if scenario_total_goals <= 3 else
-                "4-6" if scenario_total_goals <= 6 else
-                "7+"
+                "0-1"
+                if scenario_total_goals <= 1
+                else "2-3"
+                if scenario_total_goals <= 3
+                else "4-6"
+                if scenario_total_goals <= 6
+                else "7+"
             )
             if item.get("total_goals") != scenario_total_goals:
                 raise ValueError("joint display total-goals field conflicts with score")
@@ -320,20 +339,33 @@ def _joint_artifact_display(
             goal_range_label = str(item.get("goal_range_label") or "")
             if goal_range_label != f"{expected_goal_range}球":
                 raise ValueError("joint display goal-range label is invalid")
-            full_result = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            full_result = (
+                "H"
+                if home_goals > away_goals
+                else "A"
+                if home_goals < away_goals
+                else "D"
+            )
             if htft_code[1] != full_result:
                 raise ValueError("joint display score conflicts with HT/FT result")
             event_identity = (htft_code, score)
             if event_identity in seen_events:
                 raise ValueError("joint Top 2 events must be distinct")
             seen_events.add(event_identity)
+            probability = float(item["probability"])
             percentage = float(item["percentage"])
-            if not math.isfinite(percentage) or percentage <= 0.0:
+            if (
+                not math.isfinite(probability)
+                or probability <= 0.0
+                or not math.isfinite(percentage)
+                or percentage <= 0.0
+                or abs(percentage - probability * 100.0) > 1e-9
+            ):
                 raise ValueError("invalid joint display probability")
-            probability = percentage / 100.0
             if previous_probability is not None and probability > previous_probability:
                 raise ValueError("joint Top 2 must be probability-ranked")
             previous_probability = probability
+            displayed_probabilities.append(probability)
             label = "".join(HTFT_RESULT_LABELS[code] for code in htft_code)
             if rank == 1:
                 rank_one_goal_range = goal_range_label
@@ -341,7 +373,39 @@ def _joint_artifact_display(
             score_lines.append(f"{score} {percentage:.1f}%")
         if rank_one_goal_range is None:
             raise ValueError("joint rank-1 goal range is unavailable")
-        return rank_one_goal_range, "\n".join(htft_lines), "\n".join(score_lines)
+        top_two_probability = float(scenario_block["top2_cumulative_probability"])
+        other_probability = float(scenario_block["other_scenarios_probability"])
+        uncertainty = scenario_block["uncertainty"]
+        if (
+            not math.isfinite(top_two_probability)
+            or not math.isfinite(other_probability)
+            or abs(top_two_probability - math.fsum(displayed_probabilities)) > 1e-9
+            or abs(top_two_probability + other_probability - 1.0) > 1e-9
+            or not isinstance(uncertainty, Mapping)
+            or uncertainty.get("schema_version")
+            != public_market_outlook.JOINT_UNCERTAINTY_SCHEMA_VERSION
+            or uncertainty.get("policy")
+            != public_market_outlook.JOINT_UNCERTAINTY_POLICY
+        ):
+            raise ValueError("invalid joint concentration summary")
+        normalized_entropy = float(uncertainty["normalized_entropy"])
+        uncertainty_label = str(uncertainty.get("label_zh") or "")
+        if (
+            not math.isfinite(normalized_entropy)
+            or not 0.0 <= normalized_entropy <= 1.0
+            or uncertainty_label not in {"低", "中", "高"}
+        ):
+            raise ValueError("invalid joint uncertainty classification")
+        uncertainty_version = str(uncertainty["schema_version"]).split(".", 1)[0]
+        joint_summary = "\n".join(
+            (
+                rank_one_goal_range,
+                f"Top2累计 {top_two_probability * 100.0:.1f}%",
+                f"其他情景 {other_probability * 100.0:.1f}%",
+                f"不确定度 {uncertainty_label}(v{uncertainty_version})",
+            )
+        )
+        return joint_summary, "\n".join(htft_lines), "\n".join(score_lines)
     except (
         KeyError,
         TypeError,
@@ -392,17 +456,26 @@ def validate_payload(
         status = raw["status"]
         if not isinstance(status, str) or status not in ALLOWED_STATUSES:
             raise ValueError(
-                f"{prefix}.status must be one of: " + ", ".join(sorted(ALLOWED_STATUSES))
+                f"{prefix}.status must be one of: "
+                + ", ".join(sorted(ALLOWED_STATUSES))
             )
         if "star" in raw:
-            raise ValueError(f"{prefix}.star must not be supplied; it is archive-derived")
+            raise ValueError(
+                f"{prefix}.star must not be supplied; it is archive-derived"
+            )
         if archived_records is None:
-            raise ValueError("prediction history is required to render recommendation status")
+            raise ValueError(
+                "prediction history is required to render recommendation status"
+            )
 
-        archive_match_id = _required_text(raw["archive_match_id"], f"{prefix}.archive_match_id")
+        archive_match_id = _required_text(
+            raw["archive_match_id"], f"{prefix}.archive_match_id"
+        )
         archived = archived_records.get(archive_match_id)
         if archived is None:
-            raise ValueError(f"{prefix} archive_match_id {archive_match_id} was not found")
+            raise ValueError(
+                f"{prefix} archive_match_id {archive_match_id} was not found"
+            )
         if archived.get("mode") != "prematch" or archived.get("status") not in {
             "pending",
             "reviewed",
@@ -423,7 +496,9 @@ def validate_payload(
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", supplied_hash):
             raise ValueError(f"{prefix}.archive_version_hash must be a sha256: hash")
         if supplied_hash != archive_version_hash(archived_version):
-            raise ValueError(f"{prefix}.archive_version_hash does not match the selected archived version")
+            raise ValueError(
+                f"{prefix}.archive_version_hash does not match the selected archived version"
+            )
 
         home = _safe_metadata_text(
             raw["home_team"],
@@ -437,13 +512,20 @@ def validate_payload(
             max_length=48,
             max_visual_units=60,
         )
-        if archived_version.get("home_team") != home or archived_version.get("away_team") != away:
-            raise ValueError(f"{prefix} teams do not match the selected archived fixture")
+        if (
+            archived_version.get("home_team") != home
+            or archived_version.get("away_team") != away
+        ):
+            raise ValueError(
+                f"{prefix} teams do not match the selected archived fixture"
+            )
 
         supplied_time = _required_text(raw["time"], f"{prefix}.time")
         expected_time = _expected_kickoff_time(archived_version)
         if supplied_time != expected_time:
-            raise ValueError(f"{prefix}.time does not match the selected archived fixture ({expected_time})")
+            raise ValueError(
+                f"{prefix}.time does not match the selected archived fixture ({expected_time})"
+            )
         supplied_league = _required_text(raw["league"], f"{prefix}.league")
         expected_league = _safe_metadata_text(
             plain_text_formatter.league_display_name(archived_version),
@@ -472,11 +554,11 @@ def validate_payload(
             if isinstance(archived_value, str) and archived_value.strip():
                 accepted_league_values.add(archived_value.strip())
         if supplied_league not in accepted_league_values:
-            raise ValueError(f"{prefix}.league does not match the selected archived fixture ({expected_league})")
+            raise ValueError(
+                f"{prefix}.league does not match the selected archived fixture ({expected_league})"
+            )
 
-        total_goals, htft, scores = _joint_artifact_display(
-            archived_version
-        )
+        total_goals, htft, scores = _joint_artifact_display(archived_version)
 
         archived_primary = _archived_primary(archived_version, prefix)
         authorized_labels = _archived_observation_labels(archived_version, prefix)
@@ -505,10 +587,14 @@ def validate_payload(
             )
         if derived_status == "formal_primary":
             supplied_primary = raw.get("primary")
-            if supplied_primary is not None and _display_value(
-                supplied_primary, f"{prefix}.primary"
-            ) != archived_primary:
-                raise ValueError(f"{prefix}.primary does not match the archived active primary")
+            if (
+                supplied_primary is not None
+                and _display_value(supplied_primary, f"{prefix}.primary")
+                != archived_primary
+            ):
+                raise ValueError(
+                    f"{prefix}.primary does not match the archived active primary"
+                )
             primary = archived_primary
             star = True
         else:
@@ -678,11 +764,21 @@ def render_svg(card: Card) -> str:
     ]
 
     x = SIDE_MARGIN
-    for label, _key, width in COLUMNS:
+    for column_index, (label, _key, width) in enumerate(COLUMNS):
+        header_lines = _cell_lines(label, CELL_WRAP_UNITS[column_index])
+        header_font_size = _svg_font_size(
+            header_lines, width, HEADER_HEIGHT, 21, minimum=13
+        )
         parts.append(
-            f'<text x="{x + width / 2:g}" y="{table_top + 45}" text-anchor="middle" '
-            'font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" '
-            f'font-size="21" font-weight="700" fill="#ffffff">{escape(label)}</text>'
+            _svg_text(
+                center_x=x + width / 2,
+                top=table_top,
+                height=HEADER_HEIGHT,
+                lines=header_lines,
+                font_size=header_font_size,
+                fill="#ffffff",
+                weight="700",
+            )
         )
         x += width
 
@@ -693,7 +789,9 @@ def render_svg(card: Card) -> str:
                 f'<rect x="{SIDE_MARGIN}" y="{y}" width="{TABLE_WIDTH}" height="{ROW_HEIGHT}" fill="{COLORS["row_alt"]}"/>'
             )
         x = SIDE_MARGIN
-        for column_index, ((_, key, width), value) in enumerate(zip(COLUMNS, _row_values(row))):
+        for column_index, ((_, key, width), value) in enumerate(
+            zip(COLUMNS, _row_values(row))
+        ):
             rendered_value = value + (" ★" if key == "primary" and row.star else "")
             lines = _cell_lines(rendered_value, CELL_WRAP_UNITS[column_index])
             base = 18 if key in {"total_goals", "htft", "scores"} else 21
@@ -726,11 +824,17 @@ def render_svg(card: Card) -> str:
     x = SIDE_MARGIN
     for _label, _key, width in COLUMNS[:-1]:
         x += width
-        parts.append(f'<line x1="{x}" y1="{table_top}" x2="{x}" y2="{table_bottom}" stroke="{COLORS["grid"]}"/>')
+        parts.append(
+            f'<line x1="{x}" y1="{table_top}" x2="{x}" y2="{table_bottom}" stroke="{COLORS["grid"]}"/>'
+        )
     for index in range(len(card.rows) + 1):
         y = rows_top + index * ROW_HEIGHT
-        parts.append(f'<line x1="{SIDE_MARGIN}" y1="{y}" x2="{SIDE_MARGIN + TABLE_WIDTH}" y2="{y}" stroke="{COLORS["grid"]}"/>')
-    parts.append(f'<rect x="{SIDE_MARGIN}" y="{table_top}" width="{TABLE_WIDTH}" height="{table_bottom - table_top}" fill="none" stroke="{COLORS["grid"]}"/>')
+        parts.append(
+            f'<line x1="{SIDE_MARGIN}" y1="{y}" x2="{SIDE_MARGIN + TABLE_WIDTH}" y2="{y}" stroke="{COLORS["grid"]}"/>'
+        )
+    parts.append(
+        f'<rect x="{SIDE_MARGIN}" y="{table_top}" width="{TABLE_WIDTH}" height="{table_bottom - table_top}" fill="none" stroke="{COLORS["grid"]}"/>'
+    )
 
     footer_y = table_bottom + 36
     parts.extend(
@@ -741,7 +845,7 @@ def render_svg(card: Card) -> str:
             f'<line x1="72" y1="{footer_y + 22}" x2="{WIDTH - 72}" y2="{footer_y + 22}" stroke="{COLORS["grid"]}"/>',
             f'<text x="72" y="{footer_y + 61}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["warning"]}">提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。</text>',
             f'<text x="72" y="{footer_y + 90}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="16" fill="{COLORS["muted"]}">{escape(FOOTER_SOURCE_NOTE)}</text>',
-            '</svg>',
+            "</svg>",
         ]
     )
     return "\n".join(parts) + "\n"
@@ -786,18 +890,30 @@ def _fit_pil_font(
     text = "\n".join(lines)
     for size in range(base, 10, -1):
         font = _load_font(size, bold=bold)
-        bounds = draw.multiline_textbbox((0, 0), text, font=font, spacing=5, align="center")
-        if bounds[2] - bounds[0] <= right - left - 14 and bounds[3] - bounds[1] <= bottom - top - 14:
+        bounds = draw.multiline_textbbox(
+            (0, 0), text, font=font, spacing=5, align="center"
+        )
+        if (
+            bounds[2] - bounds[0] <= right - left - 14
+            and bounds[3] - bounds[1] <= bottom - top - 14
+        ):
             return font
     return _load_font(11, bold=bold)
 
 
-def _pil_center(draw: Any, box: tuple[int, int, int, int], text: str, font: Any, fill: str) -> None:
+def _pil_center(
+    draw: Any, box: tuple[int, int, int, int], text: str, font: Any, fill: str
+) -> None:
     left, top, right, bottom = box
     bounds = draw.textbbox((0, 0), text, font=font)
     width = bounds[2] - bounds[0]
     height = bounds[3] - bounds[1]
-    draw.text(((left + right - width) / 2, (top + bottom - height) / 2 - bounds[1]), text, font=font, fill=fill)
+    draw.text(
+        ((left + right - width) / 2, (top + bottom - height) / 2 - bounds[1]),
+        text,
+        font=font,
+        fill=fill,
+    )
 
 
 def _pil_center_multiline(
@@ -822,7 +938,9 @@ def _pil_center_multiline(
     )
 
 
-def _fit_single_line_font(draw: Any, text: str, max_width: int, base: int, minimum: int):
+def _fit_single_line_font(
+    draw: Any, text: str, max_width: int, base: int, minimum: int
+):
     for size in range(base, minimum - 1, -1):
         font = _load_font(size, bold=base >= 40)
         bounds = draw.textbbox((0, 0), text, font=font)
@@ -849,31 +967,55 @@ def render_raster(card: Card, output_format: str) -> bytes:
     small_font = _load_font(16)
 
     draw.rounded_rectangle(
-        (SIDE_MARGIN, PANEL_VERTICAL_MARGIN, SIDE_MARGIN + TABLE_WIDTH, card.height - PANEL_VERTICAL_MARGIN),
+        (
+            SIDE_MARGIN,
+            PANEL_VERTICAL_MARGIN,
+            SIDE_MARGIN + TABLE_WIDTH,
+            card.height - PANEL_VERTICAL_MARGIN,
+        ),
         radius=20,
         fill=COLORS["panel"],
         outline=COLORS["grid"],
     )
     draw.text((72, 48), card.title, font=title_font, fill=COLORS["text"])
     draw.text((74, 112), subtitle, font=subtitle_font, fill=COLORS["header_dark"])
-    draw.rounded_rectangle((WIDTH - 202, 60, WIDTH - 76, 114), radius=14, fill=COLORS["header"])
-    _pil_center(draw, (WIDTH - 202, 60, WIDTH - 76, 114), f"{len(card.rows)} 场", header_font, "#ffffff")
+    draw.rounded_rectangle(
+        (WIDTH - 202, 60, WIDTH - 76, 114), radius=14, fill=COLORS["header"]
+    )
+    _pil_center(
+        draw,
+        (WIDTH - 202, 60, WIDTH - 76, 114),
+        f"{len(card.rows)} 场",
+        header_font,
+        "#ffffff",
+    )
 
     table_top = TITLE_HEIGHT
     rows_top = table_top + HEADER_HEIGHT
     table_bottom = rows_top + len(card.rows) * ROW_HEIGHT
-    draw.rectangle((SIDE_MARGIN, table_top, SIDE_MARGIN + TABLE_WIDTH, rows_top), fill=COLORS["header"])
+    draw.rectangle(
+        (SIDE_MARGIN, table_top, SIDE_MARGIN + TABLE_WIDTH, rows_top),
+        fill=COLORS["header"],
+    )
     x = SIDE_MARGIN
-    for label, _key, width in COLUMNS:
-        _pil_center(draw, (x, table_top, x + width, rows_top), label, header_font, "#ffffff")
+    for column_index, (label, _key, width) in enumerate(COLUMNS):
+        box = (x, table_top, x + width, rows_top)
+        header_lines = _cell_lines(label, CELL_WRAP_UNITS[column_index])
+        fitted_header = _fit_pil_font(draw, header_lines, box, 20, bold=True)
+        _pil_center_multiline(draw, box, header_lines, fitted_header, "#ffffff")
         x += width
 
     for row_index, row in enumerate(card.rows):
         y = rows_top + row_index * ROW_HEIGHT
         if row_index % 2:
-            draw.rectangle((SIDE_MARGIN, y, SIDE_MARGIN + TABLE_WIDTH, y + ROW_HEIGHT), fill=COLORS["row_alt"])
+            draw.rectangle(
+                (SIDE_MARGIN, y, SIDE_MARGIN + TABLE_WIDTH, y + ROW_HEIGHT),
+                fill=COLORS["row_alt"],
+            )
         x = SIDE_MARGIN
-        for column_index, ((_, key, width), value) in enumerate(zip(COLUMNS, _row_values(row))):
+        for column_index, ((_, key, width), value) in enumerate(
+            zip(COLUMNS, _row_values(row))
+        ):
             rendered_value = value + (" ★" if key == "primary" and row.star else "")
             lines = _cell_lines(rendered_value, CELL_WRAP_UNITS[column_index])
             base = 18 if key in {"total_goals", "htft", "scores"} else 21
@@ -901,22 +1043,44 @@ def render_raster(card: Card, output_format: str) -> bytes:
     for index in range(len(card.rows) + 1):
         y = rows_top + index * ROW_HEIGHT
         draw.line((SIDE_MARGIN, y, SIDE_MARGIN + TABLE_WIDTH, y), fill=COLORS["grid"])
-    draw.rectangle((SIDE_MARGIN, table_top, SIDE_MARGIN + TABLE_WIDTH, table_bottom), outline=COLORS["grid"])
+    draw.rectangle(
+        (SIDE_MARGIN, table_top, SIDE_MARGIN + TABLE_WIDTH, table_bottom),
+        outline=COLORS["grid"],
+    )
 
     footer_y = table_bottom + 22
-    draw.text((72, footer_y), "★ 正式主推中的最高信心方向", font=footer_font, fill=COLORS["star"])
+    draw.text(
+        (72, footer_y),
+        "★ 正式主推中的最高信心方向",
+        font=footer_font,
+        fill=COLORS["star"],
+    )
     draw.text(
         (455, footer_y),
         "无正式主推＝不下注、不结算、不计战绩",
         font=footer_font,
         fill=COLORS["observation"],
     )
-    count_text = f"正式主推 {sum(row.status == 'formal_primary' for row in card.rows)} 场"
+    count_text = (
+        f"正式主推 {sum(row.status == 'formal_primary' for row in card.rows)} 场"
+    )
     count_width = draw.textbbox((0, 0), count_text, font=footer_font)[2]
-    draw.text((WIDTH - 76 - count_width, footer_y), count_text, font=footer_font, fill=COLORS["muted"])
+    draw.text(
+        (WIDTH - 76 - count_width, footer_y),
+        count_text,
+        font=footer_font,
+        fill=COLORS["muted"],
+    )
     draw.line((72, footer_y + 42, WIDTH - 72, footer_y + 42), fill=COLORS["grid"])
-    draw.text((72, footer_y + 61), "提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。", font=footer_font, fill=COLORS["warning"])
-    draw.text((72, footer_y + 92), FOOTER_SOURCE_NOTE, font=small_font, fill=COLORS["muted"])
+    draw.text(
+        (72, footer_y + 61),
+        "提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。",
+        font=footer_font,
+        fill=COLORS["warning"],
+    )
+    draw.text(
+        (72, footer_y + 92), FOOTER_SOURCE_NOTE, font=small_font, fill=COLORS["muted"]
+    )
 
     buffer = BytesIO()
     normalized = output_format.upper()
@@ -926,7 +1090,12 @@ def render_raster(card: Card, output_format: str) -> bytes:
     if normalized == "PNG":
         save_options = {"compress_level": 9, "optimize": False}
     elif normalized == "JPEG":
-        save_options = {"quality": 92, "subsampling": 0, "optimize": False, "progressive": False}
+        save_options = {
+            "quality": 92,
+            "subsampling": 0,
+            "optimize": False,
+            "progressive": False,
+        }
     image.save(buffer, format=normalized, **save_options)
     return buffer.getvalue()
 
@@ -952,7 +1121,9 @@ def render_file(input_path: Path, output_path: Path, history_path: Path) -> Path
     try:
         payload = json.loads(input_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read valid UTF-8 JSON from {input_path}: {error}") from error
+        raise ValueError(
+            f"cannot read valid UTF-8 JSON from {input_path}: {error}"
+        ) from error
     card = validate_payload(payload, load_history_records(history_path))
     suffix = output_path.suffix.lower()
     if suffix == ".svg":
@@ -966,10 +1137,16 @@ def render_file(input_path: Path, output_path: Path, history_path: Path) -> Path
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Render a concise football prediction card")
+    parser = argparse.ArgumentParser(
+        description="Render a concise football prediction card"
+    )
     parser.add_argument("--input", required=True, type=Path, help="UTF-8 JSON input")
-    parser.add_argument("--history", required=True, type=Path, help="immutable prediction history")
-    parser.add_argument("--output", required=True, type=Path, help=".svg, .png, .jpg, or .jpeg output")
+    parser.add_argument(
+        "--history", required=True, type=Path, help="immutable prediction history"
+    )
+    parser.add_argument(
+        "--output", required=True, type=Path, help=".svg, .png, .jpg, or .jpeg output"
+    )
     return parser
 
 
@@ -977,7 +1154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         destination = render_file(
-            arguments.input.resolve(), arguments.output.resolve(), arguments.history.resolve()
+            arguments.input.resolve(),
+            arguments.output.resolve(),
+            arguments.history.resolve(),
         )
     except (ValueError, RuntimeError) as error:
         raise SystemExit(f"error: {error}") from error

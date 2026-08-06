@@ -3,11 +3,10 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plain_text_formatter.py"
 SPEC = importlib.util.spec_from_file_location("soccer_plain_text_formatter", SCRIPT)
@@ -111,7 +110,13 @@ def joint_artifact() -> dict:
     fillers: list[tuple[str, str]] = []
     for home_goals in range(7):
         for away_goals in range(7):
-            full = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            full = (
+                "H"
+                if home_goals > away_goals
+                else "A"
+                if home_goals < away_goals
+                else "D"
+            )
             score = f"{home_goals}-{away_goals}"
             for half in ("H", "D", "A"):
                 key = (half + full, score)
@@ -330,9 +335,7 @@ class PlainTextFormatterTests(unittest.TestCase):
 
     def test_brazil_cup_stage_label_renders_as_chinese_competition(self):
         self.assertEqual(
-            formatter.league_display_name(
-                {"league": "2026巴西杯16强次回合"}
-            ),
+            formatter.league_display_name({"league": "2026巴西杯16强次回合"}),
             "巴西杯",
         )
 
@@ -457,17 +460,17 @@ class PlainTextFormatterTests(unittest.TestCase):
                 text = formatter.render(base, "42", "initial")
 
             self.assertIn(
-                "半场倾向：平44.0% / 主胜31.0%"
-                "（较明确，前二差13.0个百分点）",
+                "半场倾向：平44.0% / 主胜31.0%（较明确，前二差13.0个百分点）",
                 text,
             )
             self.assertIn(
-                "胜平负：客胜46.0% / 主胜29.0%"
-                "（较明确，前二差17.0个百分点）",
+                "胜平负：客胜46.0% / 主胜29.0%（较明确，前二差17.0个百分点）",
                 text,
             )
             self.assertIn(
-                "总进球：2-3球（联合第1名比分映射）",
+                "联合首选情景总球：2-3球（冻结联合第1名比分映射）｜"
+                "总进球边际第一：2-3球 41.0%"
+                "（边际分布第一，仅审计，不替代联合首选情景）",
                 text,
             )
             self.assertIn(
@@ -478,6 +481,10 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "联合情景：联合事件 Top 2（半全场＋波胆逐行同源，"
                 "按联合概率排序，高方差，不作推荐）："
                 "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
+                text,
+            )
+            self.assertIn(
+                "Top2累计10.3%｜其他情景89.7%｜不确定度高（归一化熵98.6%，政策v1）",
                 text,
             )
             self.assertIn("纯模型（未混入过期盘口）", text)
@@ -592,26 +599,28 @@ class PlainTextFormatterTests(unittest.TestCase):
             "ev": 0.155,
             "role": "primary",
         }
-        record.update({
-            "goal_range_pick": dict(goal_range),
-            "btts_pick": {
-                "side": "yes",
-                "odds": 1.80,
-                "probability": 0.61,
-                "ev": 0.098,
-                "role": "secondary",
-            },
-            "corner_total_pick": {
-                "side": "over",
-                "line": 10.5,
-                "odds": 0.90,
-                "probability": 0.58,
-                "ev": 0.102,
-                "role": "secondary",
-            },
-            "primary_market": "goal_range",
-            "primary_pick": dict(goal_range),
-        })
+        record.update(
+            {
+                "goal_range_pick": dict(goal_range),
+                "btts_pick": {
+                    "side": "yes",
+                    "odds": 1.80,
+                    "probability": 0.61,
+                    "ev": 0.098,
+                    "role": "secondary",
+                },
+                "corner_total_pick": {
+                    "side": "over",
+                    "line": 10.5,
+                    "odds": 0.90,
+                    "probability": 0.58,
+                    "ev": 0.102,
+                    "role": "secondary",
+                },
+                "primary_market": "goal_range",
+                "primary_pick": dict(goal_range),
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             initial_text = formatter.render(base, "42", "initial")
@@ -623,15 +632,30 @@ class PlainTextFormatterTests(unittest.TestCase):
             )
             self.assert_plain(initial_text)
 
-            record["revisions"] = [{
-                key: record.get(key)
-                for key in (
-                    "analysis_stage", "recommendation", "notes", "predicted_score",
-                    "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
-                    "htft_picks", "goal_range_pick", "btts_pick", "corner_total_pick",
-                    "corner_handicap_pick", "primary_market", "primary_pick", "primary_change",
-                )
-            }]
+            record["revisions"] = [
+                {
+                    key: record.get(key)
+                    for key in (
+                        "analysis_stage",
+                        "recommendation",
+                        "notes",
+                        "predicted_score",
+                        "exact_score_picks",
+                        "zero_zero_audit",
+                        "asian_pick",
+                        "total_pick",
+                        "half_time_pick",
+                        "htft_picks",
+                        "goal_range_pick",
+                        "btts_pick",
+                        "corner_total_pick",
+                        "corner_handicap_pick",
+                        "primary_market",
+                        "primary_pick",
+                        "primary_change",
+                    )
+                }
+            ]
             corner_handicap = {
                 "side": "home",
                 "line": -1.5,
@@ -640,14 +664,16 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "ev": 0.209,
                 "role": "primary",
             }
-            record.update({
-                "analysis_stage": "lineup-check",
-                "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
-                "corner_handicap_pick": dict(corner_handicap),
-                "primary_market": "corner_handicap",
-                "primary_pick": dict(corner_handicap),
-                "primary_change": {"status": "changed"},
-            })
+            record.update(
+                {
+                    "analysis_stage": "lineup-check",
+                    "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+                    "corner_handicap_pick": dict(corner_handicap),
+                    "primary_market": "corner_handicap",
+                    "primary_pick": dict(corner_handicap),
+                    "primary_change": {"status": "changed"},
+                }
+            )
             write_history(base, [record])
             lineup_text = formatter.render(base, "42", "lineup-check")
             self.assertIn(
@@ -733,8 +759,12 @@ class PlainTextFormatterTests(unittest.TestCase):
 
     def test_hidden_zero_zero_audit_does_not_leak_through_user_facing_prose(self):
         record = base_record()
-        record["recommendation"] = "小球方向更稳；0-0核验未进前二。赔率12，EV44%。低节奏判断保留。"
-        record["notes"] = "阵容仍有不确定性；概率12.0%，全分布第4。对应比分0-0。赔率12，EV44%。其他风险保留。"
+        record["recommendation"] = (
+            "小球方向更稳；0-0核验未进前二。赔率12，EV44%。低节奏判断保留。"
+        )
+        record["notes"] = (
+            "阵容仍有不确定性；概率12.0%，全分布第4。对应比分0-0。赔率12，EV44%。其他风险保留。"
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "initial")
@@ -756,21 +786,37 @@ class PlainTextFormatterTests(unittest.TestCase):
 
     def test_lineup_plain_text_states_change_and_active_primary(self):
         record = base_record()
-        record["revisions"] = [{
-            key: record.get(key)
-            for key in (
-                "analysis_stage", "recommendation", "notes", "predicted_score",
-                "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
-                "htft_picks", "primary_market", "primary_pick", "primary_change",
-            )
-        }]
-        record.update({
-            "analysis_stage": "lineup-check",
-            "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
-            "primary_market": "asian",
-            "primary_pick": dict(record["asian_pick"], market="asian", role="primary"),
-            "primary_change": {"status": "changed"},
-        })
+        record["revisions"] = [
+            {
+                key: record.get(key)
+                for key in (
+                    "analysis_stage",
+                    "recommendation",
+                    "notes",
+                    "predicted_score",
+                    "exact_score_picks",
+                    "zero_zero_audit",
+                    "asian_pick",
+                    "total_pick",
+                    "half_time_pick",
+                    "htft_picks",
+                    "primary_market",
+                    "primary_pick",
+                    "primary_change",
+                )
+            }
+        ]
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+                "primary_market": "asian",
+                "primary_pick": dict(
+                    record["asian_pick"], market="asian", role="primary"
+                ),
+                "primary_change": {"status": "changed"},
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "lineup-check")
@@ -783,70 +829,84 @@ class PlainTextFormatterTests(unittest.TestCase):
 
     def test_no_primary_lineup_and_review_are_explicitly_not_settled(self):
         record = base_record()
-        record["revisions"] = [{
-            key: record.get(key)
-            for key in (
-                "analysis_stage", "recommendation", "notes", "predicted_score",
-                "exact_score_picks", "zero_zero_audit", "asian_pick", "total_pick", "half_time_pick",
-                "htft_picks", "primary_market", "primary_pick", "primary_change",
-            )
-        }]
-        record.update({
-            "analysis_stage": "lineup-check",
-            "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
-            "asian_pick": None,
-            "total_pick": None,
-            "half_time_pick": None,
-            "htft_picks": [],
-            "primary_market": None,
-            "primary_pick": None,
-            "primary_change": {
-                "status": "changed",
-                "decision": "cancelled_to_none",
-            },
-            "candidate_audits": [
-                {
-                    "market": "htft",
-                    "pair_probability_mass": 0.50,
-                    "top_two": [
-                        {
-                            "selection": "HH",
-                            "probability": 0.30,
-                            "odds": None,
-                            "gates": [
-                                {
-                                    "gate": "market_policy_enabled",
-                                    "passed": False,
-                                    "reasons": ["paused"],
-                                },
-                                {
-                                    "gate": "complete_current_market",
-                                    "passed": False,
-                                    "reasons": ["missing odds"],
-                                },
-                            ],
-                        },
-                        {
-                            "selection": "DH",
-                            "probability": 0.20,
-                            "odds": None,
-                            "gates": [
-                                {
-                                    "gate": "market_policy_enabled",
-                                    "passed": False,
-                                    "reasons": ["paused"],
-                                },
-                                {
-                                    "gate": "complete_current_market",
-                                    "passed": False,
-                                    "reasons": ["missing odds"],
-                                },
-                            ],
-                        },
-                    ],
-                }
-            ],
-        })
+        record["revisions"] = [
+            {
+                key: record.get(key)
+                for key in (
+                    "analysis_stage",
+                    "recommendation",
+                    "notes",
+                    "predicted_score",
+                    "exact_score_picks",
+                    "zero_zero_audit",
+                    "asian_pick",
+                    "total_pick",
+                    "half_time_pick",
+                    "htft_picks",
+                    "primary_market",
+                    "primary_pick",
+                    "primary_change",
+                )
+            }
+        ]
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+                "asian_pick": None,
+                "total_pick": None,
+                "half_time_pick": None,
+                "htft_picks": [],
+                "primary_market": None,
+                "primary_pick": None,
+                "primary_change": {
+                    "status": "changed",
+                    "decision": "cancelled_to_none",
+                },
+                "candidate_audits": [
+                    {
+                        "market": "htft",
+                        "pair_probability_mass": 0.50,
+                        "top_two": [
+                            {
+                                "selection": "HH",
+                                "probability": 0.30,
+                                "odds": None,
+                                "gates": [
+                                    {
+                                        "gate": "market_policy_enabled",
+                                        "passed": False,
+                                        "reasons": ["paused"],
+                                    },
+                                    {
+                                        "gate": "complete_current_market",
+                                        "passed": False,
+                                        "reasons": ["missing odds"],
+                                    },
+                                ],
+                            },
+                            {
+                                "selection": "DH",
+                                "probability": 0.20,
+                                "odds": None,
+                                "gates": [
+                                    {
+                                        "gate": "market_policy_enabled",
+                                        "passed": False,
+                                        "reasons": ["paused"],
+                                    },
+                                    {
+                                        "gate": "complete_current_market",
+                                        "passed": False,
+                                        "reasons": ["missing odds"],
+                                    },
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             lineup_text = formatter.render(base, "42", "lineup-check")
@@ -856,35 +916,37 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertNotIn("半全场：观察", lineup_text)
             self.assert_plain(lineup_text)
 
-            record.update({
-                "status": "reviewed",
-                "half_time_score": "0-0",
-                "final_score": "1-0",
-                "primary_result": None,
-                "key_learning": "旧方向失效后没有强行寻找替代主推",
-                "reviewed_at": "2026-07-23T13:00:00+00:00",
-                "observation_diagnostics": [
-                    {
-                        "market": "htft",
-                        "status": "graded_observation",
-                        "actual_selection": "DH",
-                        "top1_hit": False,
-                        "top2_hit": True,
-                    }
-                ],
-                "settlement_basis": {
-                    "policy": "latest_active_prematch_version",
-                    "analysis_stage": "lineup-check",
-                    "primary_market": None,
-                    "primary_pick": None,
-                    "formal_picks": {
-                        "asian": None,
-                        "total": None,
-                        "half_time": None,
-                        "htft": [],
+            record.update(
+                {
+                    "status": "reviewed",
+                    "half_time_score": "0-0",
+                    "final_score": "1-0",
+                    "primary_result": None,
+                    "key_learning": "旧方向失效后没有强行寻找替代主推",
+                    "reviewed_at": "2026-07-23T13:00:00+00:00",
+                    "observation_diagnostics": [
+                        {
+                            "market": "htft",
+                            "status": "graded_observation",
+                            "actual_selection": "DH",
+                            "top1_hit": False,
+                            "top2_hit": True,
+                        }
+                    ],
+                    "settlement_basis": {
+                        "policy": "latest_active_prematch_version",
+                        "analysis_stage": "lineup-check",
+                        "primary_market": None,
+                        "primary_pick": None,
+                        "formal_picks": {
+                            "asian": None,
+                            "total": None,
+                            "half_time": None,
+                            "htft": [],
+                        },
                     },
-                },
-            })
+                }
+            )
             write_history(base, [record])
             with patch.object(
                 formatter.memory_store,
@@ -903,6 +965,8 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "平平 + 1-1 5.8% / 负负 + 1-2 4.5%",
                 review_text,
             )
+            self.assertIn("总进球边际第一：2-3球 41.0%", review_text)
+            self.assertIn("Top2累计10.3%｜其他情景89.7%", review_text)
             self.assertNotIn("半全场观察诊断", review_text)
             self.assertNotIn("比分参考：", review_text)
             self.assertNotIn("命中排名：", review_text)
@@ -911,51 +975,55 @@ class PlainTextFormatterTests(unittest.TestCase):
 
     def test_review_plain_text_uses_settlement_basis_and_statistics(self):
         record = base_record()
-        record.update({
-            "status": "reviewed",
-            "evaluation_eligibility": {
-                "policy_version": "strict-oos-market-policy-v1",
-                "strict_forward_oos": True,
-                "reason": "validated_score_model_provenance",
-            },
-            "analysis_stage": "lineup-check",
-            "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
-            "half_time_score": "0-0",
-            "final_score": "1-0",
-            "total_result": "win",
-            "primary_result": "win",
-            "exact_score_hit_rank": 1,
-            "key_learning": "临场低节奏判断得到验证；0-0全分布第4。赔率12，EV44%。保留小样本观察。",
-            "reviewed_at": "2026-07-23T13:00:00+00:00",
-            "settlement_basis": {
-                "policy": "latest_active_prematch_version",
-                "analysis_stage": "lineup-check",
-                "source_url": record.get("source_url"),
-                "league": record["league"],
-                "league_key": record["league_key"],
-                "competition_evidence": None,
+        record.update(
+            {
+                "status": "reviewed",
                 "evaluation_eligibility": {
                     "policy_version": "strict-oos-market-policy-v1",
                     "strict_forward_oos": True,
                     "reason": "validated_score_model_provenance",
                 },
-                "primary_market": "total",
-                "primary_pick": dict(record["primary_pick"]),
-                "formal_picks": {
-                    "asian": record["asian_pick"],
-                    "total": record["total_pick"],
-                    "half_time": None,
-                    "htft": [],
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T10:02:00+00:00",
+                "half_time_score": "0-0",
+                "final_score": "1-0",
+                "total_result": "win",
+                "primary_result": "win",
+                "exact_score_hit_rank": 1,
+                "key_learning": "临场低节奏判断得到验证；0-0全分布第4。赔率12，EV44%。保留小样本观察。",
+                "reviewed_at": "2026-07-23T13:00:00+00:00",
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "analysis_stage": "lineup-check",
+                    "source_url": record.get("source_url"),
+                    "league": record["league"],
+                    "league_key": record["league_key"],
+                    "competition_evidence": None,
+                    "evaluation_eligibility": {
+                        "policy_version": "strict-oos-market-policy-v1",
+                        "strict_forward_oos": True,
+                        "reason": "validated_score_model_provenance",
+                    },
+                    "primary_market": "total",
+                    "primary_pick": dict(record["primary_pick"]),
+                    "formal_picks": {
+                        "asian": record["asian_pick"],
+                        "total": record["total_pick"],
+                        "half_time": None,
+                        "htft": [],
+                    },
                 },
-            },
-        })
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "review")
             self.assertTrue(text.startswith("【赛后复盘｜芬超｜42】\n"))
             self.assertIn("结算依据：临场版最终有效推荐", text)
             self.assertIn("主推：小2.5 @0.92＝红", text)
-            self.assertIn("次选参考：客队 +0.25 @0.86（不结算、不计战绩、不计金额）", text)
+            self.assertIn(
+                "次选参考：客队 +0.25 @0.86（不结算、不计战绩、不计金额）", text
+            )
             self.assertNotIn("客队 +0.25 @0.86＝", text)
             self.assertIn("芬超主推：1场1胜0负0走", text)
             self.assertIn("累计主推：1场1胜0负0走", text)
@@ -964,37 +1032,41 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
 
-    def test_review_plain_text_lists_all_expanded_secondary_markets_without_results(self):
+    def test_review_plain_text_lists_all_expanded_secondary_markets_without_results(
+        self,
+    ):
         record = base_record()
-        record.update({
-            "status": "reviewed",
-            "half_time_score": "1-0",
-            "final_score": "2-1",
-            "primary_result": "win",
-            "key_learning": "多市场候选池按统一门槛筛选",
-            "reviewed_at": "2026-07-23T13:00:00+00:00",
-            "settlement_basis": {
-                "policy": "latest_active_prematch_version",
-                "analysis_stage": "initial",
-                "primary_market": "total",
-                "primary_pick": dict(record["primary_pick"]),
-                "formal_picks": {
-                    "asian": record["asian_pick"],
-                    "total": record["total_pick"],
-                    "half_time": None,
-                    "htft": [],
-                    "goal_range": {
-                        "selection": "2-3",
-                        "minimum_goals": 2,
-                        "maximum_goals": 3,
-                        "odds": 2.10,
+        record.update(
+            {
+                "status": "reviewed",
+                "half_time_score": "1-0",
+                "final_score": "2-1",
+                "primary_result": "win",
+                "key_learning": "多市场候选池按统一门槛筛选",
+                "reviewed_at": "2026-07-23T13:00:00+00:00",
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "analysis_stage": "initial",
+                    "primary_market": "total",
+                    "primary_pick": dict(record["primary_pick"]),
+                    "formal_picks": {
+                        "asian": record["asian_pick"],
+                        "total": record["total_pick"],
+                        "half_time": None,
+                        "htft": [],
+                        "goal_range": {
+                            "selection": "2-3",
+                            "minimum_goals": 2,
+                            "maximum_goals": 3,
+                            "odds": 2.10,
+                        },
+                        "btts": {"side": "yes", "odds": 1.80},
+                        "corner_total": {"side": "over", "line": 10.5, "odds": 0.90},
+                        "corner_handicap": {"side": "home", "line": -1.5, "odds": 0.95},
                     },
-                    "btts": {"side": "yes", "odds": 1.80},
-                    "corner_total": {"side": "over", "line": 10.5, "odds": 0.90},
-                    "corner_handicap": {"side": "home", "line": -1.5, "odds": 0.95},
                 },
-            },
-        })
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             text = formatter.render(base, "42", "review")
@@ -1003,7 +1075,12 @@ class PlainTextFormatterTests(unittest.TestCase):
             self.assertIn("角球大10.5 @0.90", text)
             self.assertIn("主队角球-1.5 @0.95", text)
             self.assertIn("（不结算、不计战绩、不计金额）", text)
-            for market_text in ("总进球2-3球 @2.10", "双方进球-是 @1.80", "角球大10.5 @0.90", "主队角球-1.5 @0.95"):
+            for market_text in (
+                "总进球2-3球 @2.10",
+                "双方进球-是 @1.80",
+                "角球大10.5 @0.90",
+                "主队角球-1.5 @0.95",
+            ):
                 self.assertNotIn(f"{market_text}＝", text)
             self.assert_plain(text)
 

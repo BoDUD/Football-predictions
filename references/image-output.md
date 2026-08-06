@@ -31,7 +31,7 @@ Initial and lineup-check results use the same compact eight-column table, in thi
 3. `赛事`
 4. `主队 vs 客队`
 5. `主推`
-6. `总进球`
+6. `联合首选情景总球`
 7. `半全场`
 8. `波胆`
 
@@ -64,9 +64,13 @@ The compact cells follow these display rules:
   `无正式主推`. Never fill this cell from a marginal 1X2 or goal-range leader. A separately
   qualified observation may appear once as `◇` in the accompanying text or audit, explicitly
   outside the card primary and joint-event rows; it never receives a stake or settlement.
-- `总进球` shows exactly one range, deterministically mapped from the frozen global joint-event
-  Rank 1 score total. Do not show Rank 2's range and do not substitute the independent
-  goal-range marginal Top-1.
+- `联合首选情景总球` shows exactly one range, deterministically mapped from the frozen global
+  joint-event Rank 1 score total. The same cell also shows the Top-2 cumulative probability,
+  remaining-scenario mass, and a versioned normalized-entropy uncertainty level recomputed
+  from the complete archived joint distribution. Do not show Rank 2's range and do not
+  substitute the independent goal-range marginal Top-1. Accompanying text exposes that
+  marginal leader as `总进球边际第一`, with its probability and an explicit audit-only warning
+  that it does not replace the joint scenario.
 - `半全场` and `波胆` are compact projections of exactly the frozen, validated global
   joint-event Top 2. Display the two events in descending genuine joint-probability order and
   keep each HT/FT label, score, and joint probability inseparably aligned across those two
@@ -99,7 +103,7 @@ cutoff, normalization, tail quality, and agreement between its score, HT/FT, 1X2
 goal-range, and BTTS marginals. Market prices may condition the posterior only under a
 versioned method supported by strict forward calibration. A price used for conditioning
 cannot also be claimed as independent EV evidence against that posterior. If the artifact or
-any required validation fails, render `数据不足` as one fail-closed state across `总进球`,
+any required validation fails, render `数据不足` as one fail-closed state across `联合首选情景总球`,
 `半全场`, and `波胆`, with no fabricated fallback value or rows. `数据不足` describes missing or invalid
 joint analysis; it does not replace the primary state. A record with no formal primary still
 shows `无正式主推` whether its joint projections are valid or unavailable.
@@ -212,7 +216,14 @@ of truncation markers and the final bounding boxes.
 Every completed review also generates a deterministic image in the same visual family. It
 must bind the final active pre-match settlement basis, show the verified final score and the
 verified half-time score when available, the official primary settlement state, and the
-archived paired joint-event references. When half-time evidence was not required for
+archived paired joint-event references. Its final projection column uses the explicit
+`联合首选情景总球/波胆` label and shows the frozen Rank-1 score-derived range, the audit-only
+`总进球边际第一` with its probability and `不替代联合` warning, Top-2 cumulative probability,
+remaining-scenario mass, and the versioned entropy uncertainty level. These values must be
+recomputed from the complete validated joint artifact frozen inside `settlement_basis`; caller
+summaries, mutable top-level fields, independent rank lists, and the final score cannot supply
+or override them. If any member, mass, marginal-audit, or uncertainty contract fails, the
+review card fails closed as `数据不足` for the joint references. When half-time evidence was not required for
 settlement and could not be verified, show `未取得`; do not infer it from the final score. A
 half-time or HT/FT primary still requires a verified half-time score and must remain pending
 without one.
@@ -250,7 +261,7 @@ python scripts/review_card_renderer.py \
 - `无正式主推` means no executable direction qualified for the card. It never receives a star
   and must not be replaced by a marginal 1X2 or goal-range leader.
 - `数据不足` means the required joint artifact is absent or invalid. It is not a synonym for
-  no formal recommendation and applies to the three public projection cells (`总进球`,
+  no formal recommendation and applies to the three public projection cells (`联合首选情景总球`,
   `半全场`, and `波胆`) as one fail-closed unit.
 - Reject caller-supplied markers, formal rows without an archived primary, and observations
   that failed their diagnostic qualification.
