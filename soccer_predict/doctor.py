@@ -14,6 +14,7 @@ import math
 import os
 import platform
 import socket
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -311,23 +312,127 @@ def _check_codex_state(workspace: Path) -> CheckResult:
     )
 
 
+def _registry_manager_script(workspace: Path, registry_kind: str) -> Path:
+    filenames = {
+        "htft": "league_model_manager.py",
+        "corner": "corner_model_manager.py",
+    }
+    try:
+        filename = filenames[registry_kind]
+    except KeyError as exc:  # Defensive: registry kinds are defined locally below.
+        raise ValueError(f"unsupported registry kind: {registry_kind}") from exc
+    return workspace / "scripts" / filename
+
+
+def _semantic_registry_validation(
+    workspace: Path, registry_path: Path, registry_kind: str
+) -> dict[str, Any]:
+    """Run the matching manager's bounded, read-only semantic validation."""
+
+    manager = _registry_manager_script(workspace, registry_kind)
+    manager_command = "verify-integrity"
+    result: dict[str, Any] = {
+        "path": str(registry_path),
+        "kind": registry_kind,
+        "validator": str(manager),
+        "manager_command": manager_command,
+    }
+    if not manager.is_file():
+        result.update(
+            {
+                "status": "fail",
+                "error": (
+                    "semantic registry validator is unavailable; run doctor with "
+                    "--workspace pointing to a repository checkout that contains "
+                    f"scripts/{manager.name}"
+                ),
+            }
+        )
+        return result
+
+    command = [
+        sys.executable,
+        "-B",
+        "-X",
+        "utf8",
+        str(manager),
+        manager_command,
+        "--model-dir",
+        str(registry_path.parent),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        result.update(
+            {
+                "status": "fail",
+                "error": "semantic registry validation timed out after 60 seconds",
+            }
+        )
+        return result
+    except OSError as exc:
+        result.update(
+            {
+                "status": "fail",
+                "error": f"semantic registry validator could not start: {exc}",
+            }
+        )
+        return result
+
+    if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout).strip()
+        if len(diagnostic) > 2000:
+            diagnostic = diagnostic[-2000:]
+        result.update(
+            {
+                "status": "fail",
+                "returncode": completed.returncode,
+                "error": diagnostic or "semantic registry validation failed",
+            }
+        )
+        return result
+    result["status"] = "pass"
+    return result
+
+
 def _check_registry(workspace: Path) -> CheckResult:
     model_root = workspace / ".codex" / "soccer-predict" / "models"
-    registries = (
-        sorted(model_root.glob("*/registry.json")) if model_root.is_dir() else []
+    active_specs = (
+        ("htft", model_root / "league-history-expanded" / "registry.json"),
+        (
+            "corner",
+            model_root / "corner-history-expanded" / "corner-registry.json",
+        ),
     )
-    if not registries:
+    # Historical experiments and backups can retain registry-shaped files, but
+    # they are not runtime authority. Only the two documented canonical model
+    # trees are semantic doctor targets.
+    registry_specs = [(kind, path) for kind, path in active_specs if path.is_file()]
+    if not registry_specs:
         return _result(
             "model_registry",
             "warn",
             "No model registry is installed in this workspace",
             path=str(model_root),
         )
+    missing_active_registries = [
+        str(path) for _kind, path in active_specs if not path.is_file()
+    ]
     invalid: list[dict[str, str]] = []
     missing_models: list[str] = []
     hash_mismatches: list[str] = []
+    semantic_validations: list[dict[str, Any]] = []
     model_count = 0
-    for path in registries:
+    for registry_kind, path in registry_specs:
         try:
             payload: object = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -368,22 +473,42 @@ def _check_registry(workspace: Path) -> CheckResult:
                 )
                 if actual_hash != expected_hash:
                     hash_mismatches.append(str(model_path))
-    if invalid or missing_models or hash_mismatches:
+        semantic_validations.append(
+            _semantic_registry_validation(workspace, path, registry_kind)
+        )
+    semantic_failures = [
+        validation
+        for validation in semantic_validations
+        if validation["status"] != "pass"
+    ]
+    registry_paths = [str(path) for _kind, path in registry_specs]
+    if (
+        invalid
+        or missing_models
+        or hash_mismatches
+        or semantic_failures
+        or missing_active_registries
+    ):
         return _result(
             "model_registry",
             "fail",
             "One or more model registries or model files failed validation",
-            registries=[str(path) for path in registries],
+            registries=registry_paths,
             invalid=invalid,
             missing_models=missing_models,
             hash_mismatches=hash_mismatches,
+            semantic_validations=semantic_validations,
+            semantic_failures=semantic_failures,
+            missing_active_registries=missing_active_registries,
         )
     return _result(
         "model_registry",
         "pass",
-        f"Validated {len(registries)} registry file(s) and {model_count} model artifact(s)",
-        registries=[str(path) for path in registries],
+        f"Validated {len(registry_specs)} registry file(s) and {model_count} model artifact(s)",
+        registries=registry_paths,
         model_count=model_count,
+        semantic_validations=semantic_validations,
+        missing_active_registries=[],
     )
 
 

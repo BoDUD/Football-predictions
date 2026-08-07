@@ -33,8 +33,8 @@ from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DATASET_ARTIFACT_TYPE = "soccer_history_dataset_bundle"
-DATASET_SCHEMA_VERSION = "1.4.0"
-IMPORTER_VERSION = "league-workbook-importer/1.7.0"
+DATASET_SCHEMA_VERSION = "1.5.0"
+IMPORTER_VERSION = "league-workbook-importer/1.8.0"
 
 REGULAR_COMPETITION_REGIME = "regular"
 JAPAN_J1_VISION_REGIME = "2026_vision_regional"
@@ -45,12 +45,53 @@ NORWAY_RELEGATION_PLAYOFF_REGIME = "relegation_playoff"
 # complete regional and placement tournament in the audited 2026 snapshot.
 JAPAN_J1_VISION_SOURCE_DATE_START = date(2026, 2, 6)
 JAPAN_J1_VISION_SOURCE_DATE_END = date(2026, 6, 6)
-ADMINISTRATIVE_RESULT_EXCLUSIONS: dict[str, dict[str, dict[str, str]]] = {
+IMMUTABLE_RESULT_EXCLUSIONS: dict[str, dict[str, dict[str, str]]] = {
+    "england_league_cup": {
+        # Neither tie was played. The EFL advanced the opponent under the
+        # competition's forfeiture rule, so a displayed walkover must not be
+        # treated as observed regulation-time goals or an HT/FT target.
+        "1927696": {
+            "exclusion_type": "administrative_unplayed",
+            "reason": (
+                "Leyton Orient-Tottenham was not played; Leyton Orient "
+                "forfeited the tie and Tottenham received a bye"
+            ),
+            "source": (
+                "https://www.tottenhamhotspur.com/news/2020/september/"
+                "efl-update-leyton-orient-v-tottenham-hotspur/"
+            ),
+        },
+        "2044807": {
+            "exclusion_type": "administrative_unplayed",
+            "reason": (
+                "Harrogate Town-Rochdale was not played; the tie could not "
+                "be rearranged and Rochdale received a bye"
+            ),
+            "source": (
+                "https://www.harrogatetownafc.com/news-media/"
+                "rochdale-carabao-cup-fixture-unable-to-be-rearrang/"
+            ),
+        },
+    },
+    "netherlands_eerste_divisie": {
+        # The match stopped permanently in the 88th minute. KNVB decided that
+        # the remaining minutes would not be played and set the result to 2-1,
+        # so it is not an observed FT90 score/corner target.
+        "2871575": {
+            "exclusion_type": "non_regulation_termination",
+            "reason": (
+                "Cambuur-Vitesse was permanently abandoned in the 88th minute; "
+                "KNVB did not play the remaining minutes and set the result to 2-1"
+            ),
+            "source": "https://www.knvb.nl/node/71755",
+        },
+    },
     "uefa_nations_league": {
         # Neither fixture was played. UEFA awarded each match 3-0, so treating
         # the displayed result as observed goals would corrupt every score and
         # HT/FT target derived from it.
         "1858422": {
+            "exclusion_type": "administrative_unplayed",
             "reason": "Romania-Norway was not played; UEFA awarded a 3-0 result",
             "source": (
                 "https://editorial.uefa.com/resources/0264-11087084fb9c-"
@@ -58,21 +99,22 @@ ADMINISTRATIVE_RESULT_EXCLUSIONS: dict[str, dict[str, dict[str, str]]] = {
             ),
         },
         "1858413": {
+            "exclusion_type": "administrative_unplayed",
             "reason": "Switzerland-Ukraine was not played; UEFA awarded a 3-0 result",
             "source": (
                 "https://www.uefa.com/news-media/news/0263-10f07669c421-"
                 "a1b7e2cc6859-1000--ab-switzerland-v-ukraine/"
             ),
         },
-    }
+    },
 }
-MATCH_ID_REQUIRED_LEAGUES = frozenset(ADMINISTRATIVE_RESULT_EXCLUSIONS)
-ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION = "administrative-result-exclusion/1.0.0"
+MATCH_ID_REQUIRED_LEAGUES = frozenset(IMMUTABLE_RESULT_EXCLUSIONS)
+IMMUTABLE_RESULT_EXCLUSION_POLICY_VERSION = "immutable-result-exclusion/1.0.0"
 
 
-def _administrative_result_exclusion_policy() -> dict[str, Any]:
+def _immutable_result_exclusion_policy() -> dict[str, Any]:
     return {
-        "version": ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION,
+        "version": IMMUTABLE_RESULT_EXCLUSION_POLICY_VERSION,
         "match_id_source_column": "Titan比赛ID",
         "required_leagues": sorted(MATCH_ID_REQUIRED_LEAGUES),
         "excluded_matches": {
@@ -80,11 +122,12 @@ def _administrative_result_exclusion_policy() -> dict[str, Any]:
                 match_id: dict(evidence)
                 for match_id, evidence in sorted(exclusions.items())
             }
-            for league_key, exclusions in sorted(
-                ADMINISTRATIVE_RESULT_EXCLUSIONS.items()
-            )
+            for league_key, exclusions in sorted(IMMUTABLE_RESULT_EXCLUSIONS.items())
         },
-        "rule": "administrative or awarded unplayed results cannot enter training",
+        "rule": (
+            "administrative, awarded-unplayed, or non-regulation terminated "
+            "results cannot enter strict FT90 training"
+        ),
     }
 
 
@@ -124,6 +167,20 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2026: 155,
     },
     "england_premier_league": {season: 380 for season in range(2020, 2027)},
+    # The 2020 edition used single-leg semi-finals and had one unplayed
+    # forfeited tie. The 2021 edition retained two-leg semi-finals but also had
+    # one unplayed forfeited tie. Later editions contain 91 decided ties plus
+    # the two additional semi-final legs; the preliminary-round format keeps
+    # the same total number of decided fixtures.
+    "england_league_cup": {
+        2020: 90,
+        2021: 92,
+        2022: 93,
+        2023: 93,
+        2024: 93,
+        2025: 93,
+        2026: 93,
+    },
     "france_ligue_1": {
         2020: 380,
         2021: 380,
@@ -184,6 +241,19 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2025: 242,
         2026: 242,
     },
+    # The source lists 380 fixtures in 2025, but Titan match 2871575 ended in
+    # the 88th minute and its KNVB-set 2-1 result is excluded from strict FT90
+    # training. The 2026 edition has no finished rows at the frozen cutoff.
+    "netherlands_eerste_divisie": {
+        2020: 380,
+        2021: 380,
+        2022: 380,
+        2023: 380,
+        2024: 380,
+        2025: 379,
+        2026: 380,
+    },
+    "portugal_primeira_liga": {season: 306 for season in range(2020, 2027)},
     "spain_la_liga": {season: 380 for season in range(2020, 2027)},
     "sweden_allsvenskan": {season: 240 for season in range(2020, 2027)},
     "uefa_champions_league": {
@@ -267,6 +337,33 @@ LEAGUE_SPECS = {
         "filename": "england-premier-league",
         "calendar_policy": "autumn_to_spring",
     },
+    "英联杯": {
+        "league_key": "england_league_cup",
+        "filename": "england-league-cup",
+        "calendar_policy": "autumn_to_spring",
+        "aliases": (
+            "england_league_cup",
+            "英联杯",
+            "英格兰联赛杯",
+            "EFL Cup",
+            "League Cup",
+            "Carabao Cup",
+        ),
+    },
+    "荷乙": {
+        "league_key": "netherlands_eerste_divisie",
+        "filename": "netherlands-eerste-divisie",
+        "calendar_policy": "autumn_to_spring",
+        "titan_competition_id": 17,
+        "titan_source_kind": "SubLeague",
+        "aliases": (
+            "netherlands_eerste_divisie",
+            "荷乙",
+            "Eerste Divisie",
+            "Keuken Kampioen Divisie",
+            "Netherlands Eerste Divisie",
+        ),
+    },
     "法甲": {
         "league_key": "france_ligue_1",
         "filename": "france-ligue-1",
@@ -286,6 +383,18 @@ LEAGUE_SPECS = {
         "league_key": "italy_serie_a",
         "filename": "italy-serie-a",
         "calendar_policy": "autumn_to_spring",
+    },
+    "葡超": {
+        "league_key": "portugal_primeira_liga",
+        "filename": "portugal-primeira-liga",
+        "calendar_policy": "autumn_to_spring",
+        "aliases": (
+            "portugal_primeira_liga",
+            "葡超",
+            "葡萄牙超级联赛",
+            "Primeira Liga",
+            "Liga Portugal",
+        ),
     },
     "韩K联": {
         "league_key": "korea_k_league_1",
@@ -929,6 +1038,8 @@ def _competition_regime(
         return JAPAN_J1_VISION_REGIME
     if league_key == "brazil_cup":
         return "national_knockout_cup"
+    if league_key == "england_league_cup":
+        return "national_knockout_cup"
     if league_key == "uefa_nations_league":
         return "national_team_league_and_knockout"
     if league_key == "norway_eliteserien" and _is_norway_relegation_playoff_round(
@@ -967,6 +1078,12 @@ def _format_version(league_key: str, season: int) -> str:
         if season <= 2025:
             return "copa_do_brasil_2021_2025"
         return "copa_do_brasil_2026_expanded"
+    if league_key == "england_league_cup":
+        if season == 2020:
+            return "efl_cup_2020_single_leg_semifinal"
+        if season <= 2024:
+            return "efl_cup_2021_2024_two_leg_semifinal"
+        return "efl_cup_2025_onward_preliminary_round"
     if league_key == "uefa_nations_league":
         end_year = NATIONS_LEAGUE_EDITION_END_YEARS.get(season, season + 1)
         return f"uefa_nations_league_{season}_{end_year}_edition"
@@ -1023,6 +1140,8 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
             return "group_or_league_stage"
         return "knockout"
     if league_key == "brazil_cup":
+        return "knockout"
+    if league_key == "england_league_cup":
         return "knockout"
     if league_key == "uefa_nations_league":
         if "联赛" in value and "附加" not in value:
@@ -1170,7 +1289,7 @@ def import_workbook(
         if spec["league_key"] in MATCH_ID_REQUIRED_LEAGUES and not match_id_text:
             raise HistoryImportError(
                 f"row {row_number}: Titan比赛ID is required for "
-                f"{spec['league_key']} administrative-result exclusion"
+                f"{spec['league_key']} immutable result exclusion"
             )
         if match_id_text:
             match_id = str(_integer(raw_match_id, "Titan比赛ID", row_number, minimum=1))
@@ -1180,13 +1299,14 @@ def import_workbook(
                     f"{match_ids[match_id]}"
                 )
             match_ids[match_id] = row_number
-            exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(
-                spec["league_key"], {}
-            ).get(match_id)
+            exclusion = IMMUTABLE_RESULT_EXCLUSIONS.get(spec["league_key"], {}).get(
+                match_id
+            )
             if exclusion is not None:
                 raise HistoryImportError(
-                    f"row {row_number}: Titan match {match_id} is an administrative "
-                    f"result and cannot enter training ({exclusion['reason']}; "
+                    f"row {row_number}: Titan match {match_id} is an immutable "
+                    f"result exclusion and cannot enter strict FT90 training "
+                    f"({exclusion['exclusion_type']}; {exclusion['reason']}; "
                     f"{exclusion['source']})"
                 )
         else:
@@ -1468,6 +1588,11 @@ def import_workbook(
             for bookmaker, markets in bookmaker_completeness.items()
         },
     }
+    if "titan_competition_id" in spec or "titan_source_kind" in spec:
+        summary["titan_source"] = {
+            "competition_id": spec.get("titan_competition_id"),
+            "source_kind": spec.get("titan_source_kind"),
+        }
     return summary, score_rows, market_rows
 
 
@@ -1640,11 +1765,11 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
     if manifest.get("season_completeness_policy") != SEASON_COMPLETENESS_POLICY:
         raise HistoryImportError("manifest season_completeness_policy is invalid")
     if (
-        manifest.get("administrative_result_exclusion_policy")
-        != _administrative_result_exclusion_policy()
+        manifest.get("immutable_result_exclusion_policy")
+        != _immutable_result_exclusion_policy()
     ):
         raise HistoryImportError(
-            "manifest administrative_result_exclusion_policy is invalid"
+            "manifest immutable_result_exclusion_policy is invalid"
         )
     source_timezone = _text(manifest.get("source_timezone"))
     if not source_timezone:
@@ -1680,6 +1805,17 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         )
         if summary.get("aliases") != expected_aliases:
             raise HistoryImportError(f"{label}.aliases do not match league_key")
+        expected_titan_source = None
+        if (
+            "titan_competition_id" in specification
+            or "titan_source_kind" in specification
+        ):
+            expected_titan_source = {
+                "competition_id": specification.get("titan_competition_id"),
+                "source_kind": specification.get("titan_source_kind"),
+            }
+        if summary.get("titan_source") != expected_titan_source:
+            raise HistoryImportError(f"{label}.titan_source does not match league_key")
 
         score_meta = summary.get("score_dataset")
         market_meta = summary.get("opening_market_research")
@@ -1774,8 +1910,7 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             match_id = _text(row.get("match_id"))
             if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
                 raise HistoryImportError(
-                    f"{row_label} match_id is required for administrative-result "
-                    "exclusion"
+                    f"{row_label} match_id is required for immutable result exclusion"
                 )
             if match_id:
                 parsed_match_id = _bundle_integer(
@@ -1786,13 +1921,14 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 if match_id in score_match_ids:
                     raise HistoryImportError(f"{row_label} duplicate match_id")
                 score_match_ids.add(match_id)
-                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                exclusion = IMMUTABLE_RESULT_EXCLUSIONS.get(league_key, {}).get(
                     match_id
                 )
                 if exclusion is not None:
                     raise HistoryImportError(
-                        f"{row_label} administrative result {match_id} cannot enter "
-                        f"training ({exclusion['reason']})"
+                        f"{row_label} immutable result exclusion {match_id} cannot "
+                        f"enter strict FT90 training ({exclusion['exclusion_type']}; "
+                        f"{exclusion['reason']})"
                     )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
@@ -1981,8 +2117,7 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             match_id = _text(row.get("match_id"))
             if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
                 raise HistoryImportError(
-                    f"{row_label} match_id is required for administrative-result "
-                    "exclusion"
+                    f"{row_label} match_id is required for immutable result exclusion"
                 )
             if match_id:
                 parsed_match_id = _bundle_integer(
@@ -1990,13 +2125,14 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 )
                 if str(parsed_match_id) != match_id:
                     raise HistoryImportError(f"{row_label} match_id is not canonical")
-                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                exclusion = IMMUTABLE_RESULT_EXCLUSIONS.get(league_key, {}).get(
                     match_id
                 )
                 if exclusion is not None:
                     raise HistoryImportError(
-                        f"{row_label} administrative result {match_id} cannot enter "
-                        f"training ({exclusion['reason']})"
+                        f"{row_label} immutable result exclusion {match_id} cannot "
+                        f"enter strict FT90 training ({exclusion['exclusion_type']}; "
+                        f"{exclusion['reason']})"
                     )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
@@ -2265,9 +2401,7 @@ def import_bundle(
         "importer_version": IMPORTER_VERSION,
         "as_of_date": audit_date.isoformat(),
         "season_completeness_policy": dict(SEASON_COMPLETENESS_POLICY),
-        "administrative_result_exclusion_policy": (
-            _administrative_result_exclusion_policy()
-        ),
+        "immutable_result_exclusion_policy": _immutable_result_exclusion_policy(),
         "source_timezone": source_timezone,
         "kickoff_year_policy": (
             "explicit per-competition calendar policy; ordinary cross-year seasons "
@@ -2303,7 +2437,7 @@ def import_bundle(
             "Source kickoff timezone is supplied explicitly by the importer operator.",
             "Rows labelled partial_as_of_* are right-censored snapshots and cannot support model promotion.",
             "Competition format_version and phase_group labels must be evaluated as separate cohorts when material.",
-            "UEFA administrative 3-0 awards are excluded by immutable Titan match ID, not inferred from the displayed score.",
+            "Administrative unplayed results and non-regulation terminations are excluded by immutable Titan match ID, not inferred from the displayed score.",
         ],
         "leagues": sorted(league_summaries, key=lambda item: item["league_key"]),
     }

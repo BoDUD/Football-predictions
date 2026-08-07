@@ -4,6 +4,18 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-08-07
+
+### Added
+- Expanded the auditable 2020–2026 football/HTFT and regulation-time corner history contract to nineteen competitions by adding Portugal Primeira Liga, the England League Cup, and Netherlands Eerste Divisie.
+- Added immutable England League Cup walkover exclusions and a distinct non-regulation exclusion for the 88th-minute Cambuur–Vitesse termination, plus season-specific format labels, competition-regime boundaries, Chinese display mappings, Titan source identity, and fixed schedule-completeness expectations.
+
+### Changed
+- Advanced the history dataset schema to 1.5.0, the workbook importer, HT/FT evaluator regime policy, corner dataset selection policy, and corner manager provenance so prior competition-set artifacts fail closed and must be rebuilt before use. History schema 1.4.0 remains an explicitly rejected historical boundary because its required exclusion-policy field has a different structure.
+- Advanced the corner collector contract to v1.1 by hash-binding replayable schedule `raw_tail`, independently replaying England League Cup extra-time classification in the dataset builder, and rejecting every immutable administrative or non-regulation result exclusion in collection and construction. Legacy v1.0 source artifacts remain readable for their original competitions, but cannot claim the three newly added competitions.
+- Made non-empty deterministic Titan fallback disagreements terminal `conflicting` QA rows with both header and fallback URL/hash/error evidence; only transport failures and empty responses remain retryable `fetch_error` rows, and neither status can enter corner training.
+- Any HT/FT or corner model later trained from the expanded contract remains formally ineligible pending clean live-forward evidence; this release note does not claim that local registries have already been rebuilt, or that betting accuracy or ROI improved.
+
 ## [3.4.0] - 2026-08-07
 
 ### Added

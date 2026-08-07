@@ -407,6 +407,11 @@ def _build_bundle(
                 },
             }
         )
+        if "titan_competition_id" in spec:
+            leagues[-1]["titan_source"] = {
+                "competition_id": spec["titan_competition_id"],
+                "source_kind": spec["titan_source_kind"],
+            }
     manifest: dict[str, object] = {
         "artifact_type": "soccer_history_dataset_bundle",
         "schema_version": evaluator.history_importer.DATASET_SCHEMA_VERSION,
@@ -415,8 +420,8 @@ def _build_bundle(
         "season_completeness_policy": dict(
             evaluator.history_importer.SEASON_COMPLETENESS_POLICY
         ),
-        "administrative_result_exclusion_policy": (
-            evaluator.history_importer._administrative_result_exclusion_policy()
+        "immutable_result_exclusion_policy": (
+            evaluator.history_importer._immutable_result_exclusion_policy()
         ),
         "source_timezone": "UTC",
         "kickoff_year_policy": (
@@ -637,6 +642,16 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
         self.assertEqual(included, brazil_rows[:1])
         self.assertEqual(excluded, brazil_rows[1:])
 
+        efl_rows = [
+            {"competition_regime": "national_knockout_cup"},
+            {"competition_regime": "regular"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            efl_rows, league_key="england_league_cup"
+        )
+        self.assertEqual(included, efl_rows[:1])
+        self.assertEqual(excluded, efl_rows[1:])
+
         nations_rows = [
             {"competition_regime": "national_team_league_and_knockout"},
             {"competition_regime": "regular"},
@@ -653,6 +668,12 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
         ]
         included, excluded = evaluator._partition_formal_regimes(
             ordinary_rows, league_key="brazil_serie_a"
+        )
+        self.assertEqual(included, ordinary_rows[:1])
+        self.assertEqual(excluded, ordinary_rows[1:])
+
+        included, excluded = evaluator._partition_formal_regimes(
+            ordinary_rows, league_key="netherlands_eerste_divisie"
         )
         self.assertEqual(included, ordinary_rows[:1])
         self.assertEqual(excluded, ordinary_rows[1:])

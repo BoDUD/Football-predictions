@@ -38,7 +38,7 @@ except ImportError:  # Invoked directly as scripts/corner_model_manager.py.
 REGISTRY_ARTIFACT_TYPE = "soccer_corner_model_registry"
 REGISTRY_SCHEMA_VERSION = "2.1.0"
 REGISTRY_FILENAME = "corner-registry.json"
-MANAGER_VERSION = "corner-model-manager/2.1.1"
+MANAGER_VERSION = "corner-model-manager/2.2.0"
 DEPLOYMENT_POLICY_VERSION = "corner-historical-deployment-gate/2.1.0"
 
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -2394,6 +2394,216 @@ def inspect_registry(
     }
 
 
+def verify_registry_integrity(model_dir: str | Path) -> dict[str, Any]:
+    """Verify registry semantics and all registered bytes without model refits.
+
+    This is the bounded integrity check used by ``soccer-predict doctor``.  It
+    deliberately does not replace :func:`inspect_registry`, whose publication
+    audit replays the source selection, final fit and walk-forward backtest.
+    """
+
+    directory = Path(model_dir).resolve()
+    if not directory.is_dir():
+        raise CornerModelManagerError(f"model directory does not exist: {directory}")
+    registry = _read_json(directory / REGISTRY_FILENAME, "corner model registry")
+    validate_registry(registry)
+    file_hash_cache: dict[Path, str] = {}
+    source_context_cache: dict[
+        tuple[Path, Path], tuple[dict[str, Any], dict[str, Any]]
+    ] = {}
+
+    def checked_file_hash(path: Path) -> str:
+        resolved = path.resolve()
+        if resolved not in file_hash_cache:
+            file_hash_cache[resolved] = _file_hash(resolved)
+        return file_hash_cache[resolved]
+
+    for index, entry in enumerate(registry["leagues"]):
+        name = f"registry.leagues[{index}]"
+        files = (
+            ("dataset_file", ".csv", "dataset_hash"),
+            ("dataset_manifest_file", ".json", "dataset_manifest_file_sha256"),
+            ("source_bundle_file", ".json", "source_file_sha256"),
+            ("model_file", ".json", "model_file_sha256"),
+            ("evaluation_file", ".json", "evaluation_file_sha256"),
+        )
+        resolved_files: dict[str, Path] = {}
+        for filename_field, suffix, hash_field in files:
+            filename = _safe_filename(
+                entry.get(filename_field), f"{name}.{filename_field}", suffix=suffix
+            )
+            path = directory / filename
+            expected_hash = _required_hash(
+                entry.get(hash_field), f"{name}.{hash_field}"
+            )
+            if checked_file_hash(path) != expected_hash:
+                raise CornerModelManagerError(
+                    f"{name} registered {filename_field} hash does not match"
+                )
+            resolved_files[filename_field] = path
+
+        manifest_path = resolved_files["dataset_manifest_file"].resolve()
+        source_path = resolved_files["source_bundle_file"].resolve()
+        context_key = (manifest_path, source_path)
+        source_context = source_context_cache.get(context_key)
+        if source_context is None:
+            manifest = _read_json(manifest_path, "corner dataset manifest")
+            if (
+                manifest.get("artifact_type")
+                != corner_history_dataset_builder.ARTIFACT_TYPE
+                or manifest.get("schema_version")
+                != corner_history_dataset_builder.SCHEMA_VERSION
+                or manifest.get("builder_version")
+                != corner_history_dataset_builder.BUILDER_VERSION
+                or manifest.get("selection_policy")
+                != corner_history_dataset_builder.SELECTION_POLICY
+            ):
+                raise CornerModelManagerError(
+                    "registered dataset manifest contract is unsupported"
+                )
+            manifest_hash = _required_hash(
+                manifest.get("bundle_hash"), "dataset manifest bundle_hash"
+            )
+            if manifest_hash != _manifest_bundle_hash(manifest):
+                raise CornerModelManagerError(
+                    "dataset manifest bundle_hash does not match contents"
+                )
+            if manifest.get("source_file_sha256") != checked_file_hash(source_path):
+                raise CornerModelManagerError(
+                    "dataset manifest source_file_sha256 does not match registered source"
+                )
+            try:
+                source_bundle = corner_history_dataset_builder.load_source(source_path)
+            except corner_history_dataset_builder.CornerDatasetError as exc:
+                raise CornerModelManagerError(
+                    f"registered source bundle is invalid: {exc}"
+                ) from exc
+            if source_bundle.get("bundle_hash") != manifest.get("source_bundle_hash"):
+                raise CornerModelManagerError(
+                    "dataset source bundle lineage does not match manifest"
+                )
+            source_context = (manifest, source_bundle)
+            source_context_cache[context_key] = source_context
+        manifest, _source_bundle = source_context
+        league_key = str(entry.get("league_key") or "")
+        league_manifest_entry = _league_manifest_entry(manifest, league_key)
+        expected_lineage = _dataset_lineage(
+            manifest=manifest,
+            manifest_file_sha256=checked_file_hash(manifest_path),
+            league_entry=league_manifest_entry,
+            dataset_hash=str(entry.get("dataset_hash") or ""),
+            profile=entry.get("dataset_profile")
+            if isinstance(entry.get("dataset_profile"), Mapping)
+            else {},
+        )
+        if entry.get("source_lineage") != expected_lineage:
+            raise CornerModelManagerError(
+                f"{name}.source_lineage does not match manifest/source integrity"
+            )
+
+        try:
+            model = corner_model.load_model(resolved_files["model_file"])
+        except corner_model.CornerModelError as exc:
+            raise CornerModelManagerError(
+                f"{name} model integrity validation failed: {exc}"
+            ) from exc
+        if (
+            model.get("model_hash") != entry.get("model_hash")
+            or model.get("model_version") != entry.get("model_version")
+            or model.get("config") != entry.get("model_config")
+        ):
+            raise CornerModelManagerError(
+                f"{name} model identity does not match registry"
+            )
+        training = model.get("training")
+        if not isinstance(training, Mapping) or any(
+            training.get(model_field) != entry.get(entry_field)
+            for model_field, entry_field in (
+                ("source_data_hash", "dataset_hash"),
+                ("source_file", "dataset_file"),
+                ("matches", "dataset_rows"),
+                ("source_lineage", "source_lineage"),
+                ("dataset_profile", "dataset_profile"),
+                ("start_date", "training_start"),
+                ("end_date", "training_cutoff"),
+                ("cutoff_date", "training_cutoff"),
+                ("start_kickoff_utc", "training_start_kickoff_utc"),
+                ("end_kickoff_utc", "training_cutoff_kickoff_utc"),
+                ("cutoff_kickoff_utc", "training_cutoff_kickoff_utc"),
+            )
+        ):
+            raise CornerModelManagerError(
+                f"{name} model training lineage does not match registry"
+            )
+
+        backtest = _read_json(
+            resolved_files["evaluation_file"], f"{name} corner backtest"
+        )
+        if backtest.get("artifact_type") != corner_model.BACKTEST_ARTIFACT_TYPE:
+            raise CornerModelManagerError(
+                f"{name} evaluation artifact_type is unsupported"
+            )
+        if backtest.get("schema_version") != corner_model.BACKTEST_SCHEMA_VERSION:
+            raise CornerModelManagerError(
+                f"{name} evaluation schema_version is unsupported"
+            )
+        if backtest.get("model_version") != corner_model.MODEL_VERSION:
+            raise CornerModelManagerError(
+                f"{name} evaluation model_version is unsupported"
+            )
+        stored_backtest_hash = _required_hash(
+            backtest.get("backtest_hash"), f"{name}.backtest_hash"
+        )
+        if stored_backtest_hash != corner_model.calculate_backtest_hash(backtest):
+            raise CornerModelManagerError(
+                f"{name} backtest_hash does not match evaluation contents"
+            )
+        sample = backtest.get("sample")
+        policy = backtest.get("evaluation_policy")
+        if (
+            backtest.get("source_data_hash") != entry.get("dataset_hash")
+            or backtest.get("source_lineage") != entry.get("source_lineage")
+            or backtest.get("dataset_profile") != entry.get("dataset_profile")
+            or backtest.get("fit_config") != entry.get("evaluation_config")
+            or not isinstance(sample, Mapping)
+            or sample.get("input_matches") != entry.get("dataset_rows")
+            or not isinstance(policy, Mapping)
+            or policy.get("research_cohort_opt_in") is not False
+            or stored_backtest_hash != entry.get("evaluation_hash")
+            or stored_backtest_hash != entry.get("backtest_hash")
+        ):
+            raise CornerModelManagerError(
+                f"{name} evaluation lineage does not match registry"
+            )
+        for evaluation_field, model_field in MODEL_CONFIG_BINDINGS.items():
+            if backtest["fit_config"].get(evaluation_field) != model["config"].get(
+                model_field
+            ):
+                raise CornerModelManagerError(
+                    f"{name} model and evaluation configurations are not the same"
+                )
+        try:
+            _validate_deployment(entry, backtest, name)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CornerModelManagerError(
+                f"{name} evaluation deployment evidence is malformed"
+            ) from exc
+
+    return {
+        "artifact_type": "soccer_corner_model_registry_integrity_verification",
+        "schema_version": "1.0.0",
+        "generated_at": _utc_now(),
+        "registry_hash": registry["registry_hash"],
+        "manager_version": MANAGER_VERSION,
+        "validation_scope": (
+            "registry_semantics_and_registered_file_integrity_without_"
+            "deterministic_refit_or_walk_forward_replay"
+        ),
+        "league_count": len(registry["leagues"]),
+        "verified_file_count": len(file_hash_cache),
+    }
+
+
 def _load_registered_model(
     model_dir: str | Path, entry: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -2690,6 +2900,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_command.add_argument("--league")
     inspect_command.add_argument("--output")
 
+    verify_command = subparsers.add_parser(
+        "verify-integrity",
+        help="verify registry semantics and registered file hashes without refitting",
+    )
+    verify_command.add_argument("--model-dir", required=True)
+    verify_command.add_argument("--output")
+
     predict = subparsers.add_parser(
         "predict", help="predict with one verified registered corner model"
     )
@@ -2744,6 +2961,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "inspect":
             inspection = inspect_registry(args.model_dir, args.league)
             corner_model.save_json(inspection, args.output)
+            return 0
+        if args.command == "verify-integrity":
+            verification = verify_registry_integrity(args.model_dir)
+            corner_model.save_json(verification, args.output)
             return 0
         totals = [
             _parse_market(value, "corner total", {"over", "under"})

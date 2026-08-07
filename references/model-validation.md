@@ -171,8 +171,9 @@ artifact, call `validate_evaluation(..., dataset_dir=...)` or provide its exact 
 the validator reopens the manifest-bound score and market files, verifies their hashes and
 fixture identities, and then recomputes the reported metrics from prediction-level evidence.
 
-The expanded source bundle targets sixteen competitions, including Finland Veikkausliiga,
-Brazil Cup, and UEFA Nations League.
+The expanded source bundle targets nineteen competitions, including Finland Veikkausliiga,
+Brazil Cup, Portugal Primeira Liga, Netherlands Eerste Divisie, the England League Cup, and
+UEFA Nations League.
 Do not quote a match count or model score from an older export. Read total and cohort row
 counts from the validated dataset manifest, and read log loss, Brier, Top-1/Top-2,
 calibration, uncertainty, fallback, and baseline deltas from the source-bound evaluation
@@ -215,8 +216,9 @@ per-league metrics. Never retune a threshold from the match currently being revi
 
 The importer preserves every collected Titan stage through `format_version`, `phase_group`,
 `season_status`, and `competition_regime` so those cohorts remain auditable. The registered
-manager follows `competition-specific-production-v2`: ordinary leagues accept only
-`competition_regime=regular`, Brazil Cup accepts `national_knockout_cup`, and UEFA Nations
+manager follows `competition-specific-production-v3`: ordinary leagues accept only
+`competition_regime=regular`, Brazil Cup and the England League Cup accept
+`national_knockout_cup`, and UEFA Nations
 League accepts `national_team_league_and_knockout`. Each competition is fitted separately;
 other regimes are not silently merged, and only their excluded-row counts and drift warnings flow into the registry.
 This is not an independent production model for every phase. Deployment status is derived
@@ -500,7 +502,7 @@ bookmaker proper scores are evaluated only when the bookmaker and model share th
 outcome space. For split-line five-state markets, bookmaker prices are limited to price-space EV
 and CLV and are never treated as five-state proper-score probabilities.
 
-When rebuilding all sixteen competitions, train them sequentially into one registry and run one
+When rebuilding all nineteen competitions, train them sequentially into one registry and run one
 final `inspect`; concurrent `train` commands must not write the same `registry.json`. The
 source-normalization, collection, dataset, and handoff commands are in
 [expanded-history-runbook.md](expanded-history-runbook.md).

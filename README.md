@@ -2,7 +2,7 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
-当前发布版本：**3.4.0**（2026-08-07）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+当前发布版本：**3.5.0**（2026-08-07）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
 
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
@@ -84,7 +84,7 @@ python scripts/score_model.py backtest --input history.csv --output backtest.jso
 
 ### 历史工作簿与半全场模型
 
-供应的 16 项赛事工作簿先经过严格转换，范围为巴甲、巴西杯、挪超、日职、美职联、五大联赛、韩 K1、瑞典超、芬超、欧冠、欧国联和亚冠；原始 XLSX、逐场 CSV 和最终模型默认保存在被 Git 忽略的本地运行目录：
+目标 19 项赛事工作簿先经过严格转换，范围为巴甲、巴西杯、挪超、日职、美职联、五大联赛、葡超、荷乙、英联杯、韩 K1、瑞典超、芬超、欧冠、欧国联和亚冠；只有当前 manifest 和 registry 实际列出 19 项时才能称为完成重建。原始 XLSX、逐场 CSV 和最终模型默认保存在被 Git 忽略的本地运行目录：
 
 ```bash
 python scripts/history_importer.py "C:\path\to\workbooks" \
@@ -94,7 +94,7 @@ python scripts/history_importer.py "C:\path\to\workbooks" \
 
 python scripts/htft_model.py fit \
   --input .codex/soccer-predict/datasets/league-history-expanded/brazil-serie-a-scores.csv \
-  --output .codex/soccer-predict/models/league-history-expanded/brazil-serie-a.json \
+  --output .codex/soccer-predict/experiments/htft/brazil-serie-a.json \
   --competition-key brazil_serie_a \
   --dataset-manifest-hash sha256:MANIFEST_HASH
 
@@ -105,15 +105,15 @@ python scripts/htft_holdout_evaluator.py \
 
 python scripts/league_model_manager.py train \
   --dataset-dir .codex/soccer-predict/datasets/league-history-expanded \
-  --model-dir .codex/soccer-predict/models/league-history-expanded \
+  --model-dir .codex/soccer-predict/models/league-history-expanded-3.5.0-staging \
   --evaluation-artifact .codex/soccer-predict/evaluations/htft-fixed-seasons.json
 
 python scripts/league_model_manager.py inspect \
-  --model-dir .codex/soccer-predict/models/league-history-expanded \
-  --output .codex/soccer-predict/models/league-history-expanded/inspection.json
+  --model-dir .codex/soccer-predict/models/league-history-expanded-3.5.0-staging \
+  --output .codex/soccer-predict/models/league-history-expanded-3.5.0-staging/inspection.json
 ```
 
-半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。正式 evaluator 与 manager 将九格关联的指数时间半衰期冻结为 365 天，与全场边际的时间尺度一致，并把该值写入评估、模型与注册表后重放校验；缺失、非正或不同半衰期的制品会失败关闭。扩展导入覆盖 16 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。注册 manager 使用按赛事冻结的赛制白名单：常规联赛仍只用 `regular`，巴西杯只用自己的 `national_knockout_cup`，欧国联只用自己的 `national_team_league_and_knockout`；不同赛事始终分别拟合，不能把球队强度混在同一尺度。挪超赛程文本明确标记的保级/降级附加赛使用 `relegation_playoff` phase/regime，留在完整历史中审计，但不进入常规赛生产训练或晋级 cohort。其他未放行赛制保留排除计数与漂移证据。
+半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。正式 evaluator 与 manager 将九格关联的指数时间半衰期冻结为 365 天，与全场边际的时间尺度一致，并把该值写入评估、模型与注册表后重放校验；缺失、非正或不同半衰期的制品会失败关闭。扩展导入覆盖 19 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。注册 manager 使用按赛事冻结的赛制白名单：常规联赛（含葡超、荷乙）只用 `regular`，巴西杯与英联杯分别只用自己的 `national_knockout_cup`，欧国联只用自己的 `national_team_league_and_knockout`；不同赛事始终分别拟合，不能把球队强度混在同一尺度。挪超赛程文本明确标记的保级/降级附加赛使用 `relegation_playoff` phase/regime，留在完整历史中审计，但不进入常规赛生产训练或晋级 cohort。荷乙比赛 `2871575` 只踢到第 88 分钟，KNVB 确定的 2-1 不是严格 FT90 训练目标，因此在足球与角球链路按不可变比赛 ID 隔离。其他未放行赛制保留排除计数与漂移证据。
 
 面向用户的比赛情景不是 HT/FT 九格与全场比分两个边际榜单的拼接。联合路径 artifact 必须在同一状态空间中表示半场进球和下半场进球，使全场比分由路径相加得到，并验证其全场比分、半场边际和 HT/FT 九格边际全部与绑定的 canonical artifacts 一致。新 artifact 使用紧凑四维路径 kernel，并在 IPF 前执行全部 Hall 支持可行性审计；验证器会从 kernel 重建 HT、下半场、FT、HT/FT、所有派生市场及排序事件，任一篡改都关闭输出。归档中冻结且通过重建校验的全局联合事件 Top 2 是半全场与波胆栏唯一允许展示的两项，按联合概率降序，并保留每项自身不可拆分的 HT/FT、全场比分与联合概率；即使两项拥有相同 HT/FT，也不得去重。验证器为两个事件都从比分确定性映射总进球区间，但公共卡片只展示 Rank 1 对应的一个区间，并从完整归档联合分布重算 Top-2 累计概率、其余质量和版本化熵不确定度；普通文字另列审计用的总进球边际第一，明确不能替代联合区间。联合概率必须从路径单元求和，不能用两个边际概率相乘，也不能为满足终场方向而替换任一结果。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。历史冻结的有效 artifact 继续只读兼容；新版渲染器可从其 Rank 1 冻结比分投影区间并从完整冻结分布重算集中度，但不会修改档案、artifact 或 archive hash。
 
@@ -136,7 +136,7 @@ python scripts/joint_scenario_model.py validate --prediction joint-scenarios.jso
 
 角球采用独立的角球数模型和注册表。现阶段角球 manager 只绑定历史数据、模型和 walk-forward 回测，`formal_corner_total_eligible` 与 `formal_corner_handicap_eligible` 必须为 `false`；赛前可展示 `◇` 观察，但不能使用 `★` 或写入正式主推。除非未来另有通过严格样本外验证的进球—角球联合模型，否则角球只能放在独立面板，不能与某条比分/半全场路径相乘、配对或写成同一证据链。只有未来 manager 绑定独立 strict live-forward 评估并显式放行相应 formal flag，同时当前盘口、证据与结算审计全部通过，才允许进入正式候选池。
 
-同一份用户 Excel 可以保留角球审计数据并继续用于足球/HTFT 导入：赛事主表前 87 列仍是严格兼容区，后面只允许登记的 12 个角球审计列；`角球盘口` 与 `数据质量` 是只读辅助 sheet。`history_importer.py` 用前 87 列生成足球/HTFT 数据，并且只把追加列中的 `Titan比赛ID` 用作不可变比赛身份、重复和行政赛果排除；赛后角球、角球盘口和辅助 sheet 不会偷渡成同场特征。角球训练从采集器的 source-bound JSON 独立生成 CSV。Excel 中必须保留它实际使用的采集 bundle lineage；若后续合并训练 bundle 重新抓取了相同比赛，即使逐场比赛、阶段、90 分钟角球和排除状态完全一致，也不得把不同的采集时间或原始响应哈希宣称为同一 source lineage，必须单独记录语义对账结果：
+同一份用户 Excel 可以保留角球审计数据并继续用于足球/HTFT 导入：赛事主表前 87 列仍是严格兼容区，后面只允许登记的 12 个角球审计列；`角球盘口` 与 `数据质量` 是只读辅助 sheet。`history_importer.py` 用前 87 列生成足球/HTFT 数据，并且只把追加列中的 `Titan比赛ID` 用作不可变比赛身份、重复和不可训练赛果排除；赛后角球、角球盘口和辅助 sheet 不会偷渡成同场特征。角球训练从采集器的 source-bound JSON 独立生成 CSV。Excel 中必须保留它实际使用的采集 bundle lineage；若后续合并训练 bundle 重新抓取了相同比赛，即使逐场比赛、阶段、90 分钟角球和排除状态完全一致，也不得把不同的采集时间或原始响应哈希宣称为同一 source lineage，必须单独记录语义对账结果：
 
 ```bash
 python scripts/corner_history_dataset_builder.py \
@@ -146,17 +146,22 @@ python scripts/corner_history_dataset_builder.py \
 
 python scripts/corner_model_manager.py train \
   --input .codex/soccer-predict/datasets/corner-history-expanded/finland_veikkausliiga-corners.csv \
-  --model-dir .codex/soccer-predict/models/corner-history-expanded \
+  --model-dir .codex/soccer-predict/models/corner-history-expanded-3.5.0-staging \
   --league-key finland_veikkausliiga \
   --league 芬超
 ```
 
 完整扩展流程必须固定同一组 schedule 与 `as-of-date`，依次执行离线 schedule
 `--check`/`--in-place`、可迁移断点的角球赛果采集、company 8 单公司研究价格采集、
-source-bound dataset build、16 赛事顺序训练和统一 `inspect`，最后才导出工作簿并重跑
+source-bound dataset build、19 赛事顺序训练和统一 `inspect`，最后才导出工作簿并重跑
 football/HTFT import、evaluation 与 registry。company 8 不能满足三公司门槛；
-`2026-08-07` 冻结快照的七条 `fetch_error` 保持缺失并从训练排除，绝不能补零。训练命令不得并发写同一
-`corner-registry.json`。命令、迁移规则和最终工作簿衔接见
+冻结 artifact 中的每条 `fetch_error` 都保持缺失并从训练排除，确定性的 header/fallback 身份或终态冲突则冻结为
+带双来源 URL/hash/error 证据且不再重试的 `conflicting`；两类都绝不能补零。3.5 全量重训必须使用一个
+事先不存在的 staging model 目录；旧 live registry 会被新 manager 有意拒绝，不能把第一条训练命令
+指向旧目录。所有 19 项均通过 `inspect` 后，按 runbook 先把不可覆盖的备份移到同卷但不属于现役扫描范围的
+`.codex/soccer-predict/model-archives/<timestamp>/`，再以目录重命名切换；失败时回滚，绝不自动删除旧制品。
+训练命令不得并发写同一 `corner-registry.json`。命令、迁移规则、
+安全切换和最终工作簿衔接见
 [`references/expanded-history-runbook.md`](references/expanded-history-runbook.md)。
 
 半全场价格诊断还必须同时取得同一当前可执行快照的完整 9 路赔率、来源和赛前采集时间，并由 ranker 自行去水；完整 9 路赔率和 `league_key` 缺一不可，部分赔率加外部概率不能通过资格检查。工作簿开盘价格没有精确采集时间且只有全场市场，只能作为研究代理，不能验证半全场真实 EV 或 ROI。

@@ -258,6 +258,18 @@ LEAGUE_ALIASES = {
     "韩国K联赛": "韩K联",
     "K联赛": "韩K联",
     "巴西杯": "brazil_cup",
+    "英联杯": "england_league_cup",
+    "英格兰联赛杯": "england_league_cup",
+    "EFLCup": "england_league_cup",
+    "LeagueCup": "england_league_cup",
+    "CarabaoCup": "england_league_cup",
+    "荷乙": "荷乙",
+    "EersteDivisie": "荷乙",
+    "KeukenKampioenDivisie": "荷乙",
+    "NetherlandsEersteDivisie": "荷乙",
+    "葡萄牙超级联赛": "葡超",
+    "PrimeiraLiga": "葡超",
+    "LigaPortugal": "葡超",
 }
 LEAGUE_STAGE_SUFFIX = re.compile(
     r"(?:"

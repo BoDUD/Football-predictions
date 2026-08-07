@@ -80,6 +80,111 @@ def header(*, home_corners="5", away_corners="5", match_id="2929679") -> bytes:
 
 
 class TitanCornerHistoryCollectorTests(unittest.TestCase):
+    def test_efl_direct_penalty_shootout_is_not_misclassified_as_extra_time(
+        self,
+    ) -> None:
+        fixture = {
+            "competition_key": "england-league-cup",
+            "raw_tail": [";|;|;|90,1-1;;;4-3;1"],
+        }
+        self.assertFalse(collector._fixture_extra_time(fixture))
+
+    def test_efl_explicit_extra_time_segment_is_quarantined(self) -> None:
+        fixture = {
+            "competition_key": "england-league-cup",
+            "raw_tail": [";|;|;|90,0-0;;1,0-1;;2"],
+        }
+        self.assertTrue(collector._fixture_extra_time(fixture))
+
+    def test_raw_tail_is_bound_to_fixture_identity(self) -> None:
+        direct = fixture(
+            competition_key="england-league-cup",
+            competition_regime="national-knockout-cup",
+            raw_tail=[";|;|;|90,1-1;;;4-3;1"],
+        )
+        extra_time = dict(direct)
+        extra_time["raw_tail"] = [";|;|;|90,0-0;;1,0-1;;2"]
+        self.assertNotEqual(
+            collector.schedule_fixture_sha256(direct),
+            collector.schedule_fixture_sha256(extra_time),
+        )
+        self.assertFalse(
+            collector.checkpoint_matches_fixture(checkpoint_record(direct), extra_time)
+        )
+
+    def test_v1_checkpoint_raw_tail_migration_is_safe_and_selective(self) -> None:
+        actual_extra_time = fixture(
+            competition_key="england-league-cup",
+            competition_regime="national-knockout-cup",
+            raw_tail=[";|;|;|90,0-0;;1,0-1;;2"],
+        )
+        saved = collector.parse_analysis_header(
+            actual_extra_time, header(), "2026-08-03T00:00:00Z"
+        )
+        saved["collector_version"] = collector.LEGACY_COLLECTOR_VERSION
+        saved.pop("raw_tail")
+        saved["schedule_fixture_sha256"] = collector.legacy_schedule_fixture_sha256(
+            actual_extra_time
+        )
+        migrated = collector.upgrade_legacy_checkpoint_record(saved, actual_extra_time)
+        self.assertIsNotNone(migrated)
+        assert migrated is not None
+        self.assertEqual(migrated["raw_tail"], actual_extra_time["raw_tail"])
+        self.assertEqual(migrated["collector_version"], collector.COLLECTOR_VERSION)
+        self.assertTrue(
+            collector.checkpoint_matches_fixture(migrated, actual_extra_time)
+        )
+
+        direct_penalty = dict(actual_extra_time)
+        direct_penalty["raw_tail"] = [";|;|;|90,1-1;;;4-3;1"]
+        stale = dict(saved)
+        stale["schedule_fixture_sha256"] = collector.legacy_schedule_fixture_sha256(
+            direct_penalty
+        )
+        self.assertIsNone(
+            collector.upgrade_legacy_checkpoint_record(stale, direct_penalty)
+        )
+
+    def test_efl_administrative_walkovers_fail_corner_collection(self) -> None:
+        for match_id in (1927696, 2044807):
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                self.subTest(match_id=match_id),
+            ):
+                path = Path(directory) / "schedule.json"
+                value = fixture(
+                    match_id=match_id,
+                    competition_key="england-league-cup",
+                    competition_regime="national-knockout-cup",
+                )
+                path.write_text(
+                    json.dumps({"matches": [value]}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    collector.CornerCollectionError,
+                    rf"match {match_id} is an immutable result exclusion",
+                ):
+                    collector.load_schedule_files([path])
+
+    def test_eerste_divisie_non_regulation_result_fails_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "schedule.json"
+            value = fixture(
+                match_id=2871575,
+                competition_key="netherlands-eerste-divisie",
+                competition_regime="regular",
+            )
+            path.write_text(
+                json.dumps({"matches": [value]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                collector.CornerCollectionError,
+                r"match 2871575 is an immutable result exclusion",
+            ):
+                collector.load_schedule_files([path])
+
     def test_offline_schedule_normalizer_is_atomic_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "schedules.json"
@@ -249,11 +354,17 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
                 collector.load_schedule_files([first, second])
 
     def test_checkpoint_retries_fetch_errors_but_not_terminal_qa_outcomes(self):
-        fixtures = [fixture(match_id=1), fixture(match_id=2), fixture(match_id=3)]
+        fixtures = [
+            fixture(match_id=1),
+            fixture(match_id=2),
+            fixture(match_id=3),
+            fixture(match_id=4),
+        ]
         checkpoint = {
             "1": checkpoint_record(fixtures[0]),
             "2": checkpoint_record(fixtures[1], "fetch_error"),
             "3": checkpoint_record(fixtures[2], "extra_time_ambiguous"),
+            "4": checkpoint_record(fixtures[3], "conflicting"),
         }
         pending = collector.pending_fixtures(fixtures, checkpoint)
         self.assertEqual([row["match_id"] for row in pending], [2])
@@ -326,19 +437,36 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
         scheduled = fixture(competition_regime="regular")
         legacy = checkpoint_record(scheduled)
         for field in (
+            "raw_tail",
             "kickoff_utc",
             "kickoff_epoch",
             "source_timezone",
             "schedule_fixture_sha256",
         ):
             legacy.pop(field)
+        legacy["collector_version"] = collector.LEGACY_COLLECTOR_VERSION
         legacy["competition_regime"] = "standard"
         legacy["source_url"] = collector.header_url(str(scheduled["match_id"]))
         legacy["source_response_sha256"] = "sha256:" + "a" * 64
+        legacy["source_collected_at"] = "2026-08-03T00:00:00Z"
         migrated = collector.upgrade_legacy_checkpoint_record(legacy, scheduled)
         self.assertIsNotNone(migrated)
         assert migrated is not None
         self.assertTrue(collector.checkpoint_matches_fixture(migrated, scheduled))
+        self.assertEqual(migrated["collector_version"], collector.COLLECTOR_VERSION)
+        self.assertEqual(migrated["raw_tail"], scheduled["raw_tail"])
+        self.assertEqual(migrated["kickoff_utc"], scheduled["kickoff_utc"])
+        self.assertEqual(migrated["kickoff_epoch"], scheduled["kickoff_epoch"])
+        self.assertEqual(migrated["source_timezone"], scheduled["source_timezone"])
+        self.assertEqual(
+            migrated["schedule_fixture_sha256"],
+            collector.schedule_fixture_sha256(scheduled),
+        )
+        self.assertEqual(
+            migrated["source_response_sha256"], legacy["source_response_sha256"]
+        )
+        self.assertEqual(migrated["source_url"], legacy["source_url"])
+        self.assertEqual(migrated["source_collected_at"], legacy["source_collected_at"])
 
         j1 = fixture(
             competition_key="japan-j1",
@@ -353,6 +481,68 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
             }
         )
         self.assertIsNone(collector.upgrade_legacy_checkpoint_record(legacy_j1, j1))
+
+    def test_v1_checkpoint_without_binding_fields_refetches_changed_efl_classification(
+        self,
+    ) -> None:
+        direct_penalty = fixture(
+            competition_key="england-league-cup",
+            competition_regime="national-knockout-cup",
+            phase="knockout",
+            raw_tail=[";|;|;|90,1-1;;;4-3;1"],
+        )
+        legacy = checkpoint_record(direct_penalty, status="extra_time_ambiguous")
+        for field in (
+            "raw_tail",
+            "kickoff_utc",
+            "kickoff_epoch",
+            "source_timezone",
+            "schedule_fixture_sha256",
+        ):
+            legacy.pop(field)
+        legacy.update(
+            {
+                "collector_version": collector.LEGACY_COLLECTOR_VERSION,
+                "corner_exclusion_reasons": [
+                    "schedule_indicates_extra_time_or_penalties"
+                ],
+                "source_url": collector.header_url(str(direct_penalty["match_id"])),
+                "source_response_sha256": "sha256:" + "b" * 64,
+            }
+        )
+
+        self.assertIsNone(
+            collector.upgrade_legacy_checkpoint_record(legacy, direct_penalty)
+        )
+
+    def test_legacy_migration_rejects_non_v1_or_partially_new_rows(self) -> None:
+        scheduled = fixture(competition_regime="regular")
+        legacy = checkpoint_record(scheduled)
+        for field in (
+            "raw_tail",
+            "kickoff_utc",
+            "kickoff_epoch",
+            "source_timezone",
+            "schedule_fixture_sha256",
+        ):
+            legacy.pop(field)
+        legacy.update(
+            {
+                "collector_version": collector.LEGACY_COLLECTOR_VERSION,
+                "competition_regime": "standard",
+                "source_url": collector.header_url(str(scheduled["match_id"])),
+                "source_response_sha256": "sha256:" + "c" * 64,
+            }
+        )
+
+        wrong_version = dict(legacy, collector_version=collector.COLLECTOR_VERSION)
+        self.assertIsNone(
+            collector.upgrade_legacy_checkpoint_record(wrong_version, scheduled)
+        )
+        partially_new = dict(legacy, kickoff_utc=scheduled["kickoff_utc"])
+        self.assertIsNone(
+            collector.upgrade_legacy_checkpoint_record(partially_new, scheduled)
+        )
 
     def test_one_sided_header_corner_uses_identity_bound_fallback(self):
         fallback_payload = {
@@ -393,6 +583,97 @@ class TitanCornerHistoryCollectorTests(unittest.TestCase):
         self.assertEqual(record["source_fallback"], "HandicapDataInterface.Sche")
         self.assertIn("only one corner count", record["analysis_header_parse_error"])
         self.assertEqual(limiter.wait.call_count, 2)
+
+    def test_deterministic_fallback_conflicts_are_terminal_and_preserve_evidence(
+        self,
+    ) -> None:
+        class Response:
+            def __init__(self, payload: bytes):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        for conflict_field, conflict_value, expected_error in (
+            ("HomeTeamID", 999, "HomeTeamID"),
+            ("MatchState", 1, "finished state"),
+        ):
+            with self.subTest(conflict_field=conflict_field):
+                fallback_payload = {
+                    "Sche": {
+                        "ScheduleID": 2929679,
+                        "MatchState": -1,
+                        "HomeTeamID": 4075,
+                        "AwayTeamID": 497,
+                        "HomeTeam": "home",
+                        "AwayTeam": "away",
+                        "HomeCorner": 7,
+                        "AwayCorner": 2,
+                    }
+                }
+                fallback_payload["Sche"][conflict_field] = conflict_value
+                analysis_raw = header(home_corners="7", away_corners="")
+                fallback_raw = json.dumps(fallback_payload).encode("utf-8")
+                responses = [Response(analysis_raw), Response(fallback_raw)]
+                limiter = mock.Mock()
+                with (
+                    mock.patch.object(collector, "urlopen", side_effect=responses),
+                    mock.patch.object(collector.time, "sleep") as sleep,
+                ):
+                    record = collector.fetch_fixture(fixture(), limiter, attempts=6)
+
+                self.assertEqual(record["corner_data_status"], "conflicting")
+                self.assertEqual(record["corner_period"], "unverified")
+                self.assertIn(expected_error, record["fallback_parse_error"])
+                self.assertEqual(
+                    record["analysis_header_response_sha256"],
+                    collector._hash_bytes(analysis_raw),
+                )
+                self.assertEqual(
+                    record["fallback_response_sha256"],
+                    collector._hash_bytes(fallback_raw),
+                )
+                self.assertEqual(
+                    record["source_response_sha256"],
+                    record["fallback_response_sha256"],
+                )
+                self.assertEqual(
+                    record["fallback_source_url"],
+                    collector.HANDICAP_ENDPOINT.format(match_id="2929679"),
+                )
+                self.assertTrue(collector.checkpoint_matches_fixture(record, fixture()))
+                self.assertEqual(limiter.wait.call_count, 2)
+                sleep.assert_not_called()
+
+    def test_empty_fallback_response_remains_retryable_fetch_error(self) -> None:
+        class Response:
+            def __init__(self, payload: bytes):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        responses = [
+            Response(header(home_corners="7", away_corners="")),
+            Response(b""),
+        ]
+        limiter = mock.Mock()
+        with mock.patch.object(collector, "urlopen", side_effect=responses):
+            record = collector.fetch_fixture(fixture(), limiter, attempts=1)
+        self.assertEqual(record["corner_data_status"], "fetch_error")
+        self.assertIn("empty handicap-fallback", record["corner_exclusion_reasons"][0])
 
 
 if __name__ == "__main__":
