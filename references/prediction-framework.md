@@ -387,10 +387,12 @@ archive command from the probability distribution, complete current market, and 
 format. A caller-supplied value is only an assertion to audit; it is never authoritative.
 
 ### Final Output
-1. Card headline: the best threshold-qualified formal primary; otherwise exactly `无正式主推`. A separately qualified observation may appear once as `◇ 观察/不下注` only in accompanying text/audit. Never promote an independent 1X2 or goal-range marginal leader into the primary cell.
+
+Version 3.6.0 keeps the eight-column table and formal-primary definition unchanged. A single replay-validated v3 `◇ 观察首选` may appear in a distinct table-external publication panel and accompanying text, but never authorizes a formal pick, stake, settlement, accuracy, profit, or ROI.
+1. Card headline: the best threshold-qualified formal primary; otherwise exactly `无正式主推`. A separately qualified replay-validated v3 observation may appear once as `◇ 观察首选/不下注` in the table-external panel, accompanying text, or audit. Never promote an independent 1X2 or goal-range marginal leader into the primary cell.
 2. One goal range mapped deterministically from the frozen joint Rank 1 score in the compact image; retain the complete independent goal-range marginal distribution only as text/audit context
 3. Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each HT/FT label, full-time score, and joint probability inseparably paired; internally validate both score-derived ranges but do not repeat two range labels in the image or normal text. If the artifact is unavailable, show `数据不足` across the public projections and no fallback scenarios
-4. Confidence level for each recommendation and the best qualified first-half direction, or `无正EV建议`
+4. Confidence, probability, EV, edge, and blocker evidence for the single formal or observation-primary direction. Keep the complete first-half distribution in analysis, but do not publish a second first-half observation-primary direction.
 5. Complete half-time, 1X2 and BTTS distributions in text/audit, plus a 3x3 HT/FT marginal matrix when audit detail is useful. The legacy `probability_top2_v3_post_selection` HT/FT Top 2 may remain archived for component evaluation but is not a user-facing scenario list. Pass `league_key`, current model hash, and registry-issued evidence; historical evidence remains descriptive, and every league stays `production_confidence_eligible=false` without clean live-forward confirmation and complete executable nine-way price history. A half-time-market-anchored matrix has no promoted pair-mass gate; label it `anchor_gate_unvalidated`. Under `strict-oos-market-policy-v1`, HT/FT remains observation-only regardless of diagnostic gates.
 
 Treat joint events and standalone exact-score diagnostics only as high-variance references. Never include their Top-1 or Top-2 hits in primary-pick or all-formal accuracy/ROI.

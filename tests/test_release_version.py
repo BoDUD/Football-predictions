@@ -10,7 +10,7 @@ from pathlib import Path
 from soccer_predict import __version__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_RELEASE_VERSION = "3.5.0"
+EXPECTED_RELEASE_VERSION = "3.6.0"
 
 
 class ReleaseVersionContractTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class ReleaseVersionContractTests(unittest.TestCase):
             f"Current package/Skill release: **{EXPECTED_RELEASE_VERSION}**",
             skill,
         )
-        release_heading = f"## [{EXPECTED_RELEASE_VERSION}] - 2026-08-07"
+        release_heading = f"## [{EXPECTED_RELEASE_VERSION}] - 2026-08-08"
         self.assertIn(release_heading, changelog)
         self.assertLess(changelog.index(release_heading), changelog.index("## [3.3.0]"))
 

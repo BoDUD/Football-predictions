@@ -212,18 +212,50 @@ def _joint_artifact(
 def _valid_corner_observation_audit() -> dict:
     return {
         "_renderer_test_valid": True,
-        "kind": renderer.memory_store.CORNER_OBSERVATION_KIND,
-        "market": "corner_markets",
-        "status": "observation_only",
-        "counts_toward_primary_record": False,
-        "monetary_scope": "none",
-        "best_observation": {
-            "market": "corner_total",
-            "side": "over",
-            "line": 9.5,
-            "odds": 0.91,
-            "diagnostic_qualification_status": "qualified",
-        },
+        "kind": renderer.memory_store.CANDIDATE_EVALUATION_KIND,
+        "schema_version": renderer.memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        "candidates": [
+            {
+                "candidate_id": "sha256:" + "c" * 64,
+                "market": "corner_total",
+                "identity": "corner_total:over:9.5",
+                "side": "over",
+                "line": 9.5,
+                "odds": 0.91,
+                "odds_format": "hk",
+                "probability": 0.56,
+                "ev": 0.042,
+                "edge_pp": 2.1,
+                "market_probability": 0.539,
+                "market_signal": "aligned",
+                "firm_count": 5,
+                "counterfactual_eligible": True,
+                "formal_eligible": False,
+                "shadow_selected": True,
+                "shadow_rank": 1,
+                "shadow_confidence": {
+                    "score": 72.0,
+                    "settlement_safety_probability": 0.64,
+                    "firm_count": 5,
+                },
+                "gates": [
+                    {
+                        "gate": "market_policy_enabled",
+                        "category": "release",
+                        "passed": False,
+                        "reasons": ["market_observation_only_under_active_policy"],
+                    }
+                ],
+            }
+        ],
+        "market_manifest": [
+            {
+                "market": market,
+                "status": "evaluated" if market == "corner_total" else "unavailable",
+                "reasons": [] if market == "corner_total" else ["not_collected"],
+            }
+            for market in renderer.memory_store.PRIMARY_MARKETS
+        ],
     }
 
 
@@ -327,9 +359,11 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.validated_joint = patcher.start()
         self.addCleanup(patcher.stop)
         observation_patcher = mock.patch.object(
-            renderer.memory_store,
-            "validated_observation_audit",
-            side_effect=lambda audit: audit.get("_renderer_test_valid") is True,
+            renderer.plain_text_formatter.publication_outlook.memory_store,
+            "validated_candidate_evaluation_audit",
+            side_effect=lambda audit, version: (
+                audit.get("_renderer_test_valid") is True
+            ),
         )
         self.validated_observation = observation_patcher.start()
         self.addCleanup(observation_patcher.stop)
@@ -477,15 +511,148 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertEqual(card.rows[1].primary, "无正式主推")
         self.assertFalse(card.rows[1].star)
         self.assertNotIn("角球小9.5", renderer.render_svg(card))
+        self.assertIn("角球大9.5", renderer.render_svg(card))
+        self.assertTrue(
+            any("角球大9.5" in line for line in card.publication_rows[1].lines)
+        )
+
+    def test_publication_panel_shows_all_three_states_without_changing_columns(
+        self,
+    ) -> None:
+        card = renderer.validate_payload(_payload(), _history_index())
+        self.assertEqual(
+            tuple((label, key, width) for label, key, width in renderer.COLUMNS),
+            (
+                ("编号", "id", 100),
+                ("时间", "time", 90),
+                ("赛事", "league", 110),
+                ("主队 vs 客队", "match", 320),
+                ("主推", "primary", 250),
+                ("联合首选情景总球", "total_goals", 170),
+                ("半全场", "htft", 220),
+                ("波胆", "scores", 180),
+            ),
+        )
+        self.assertEqual(
+            tuple(row.state for row in card.publication_rows),
+            ("formal_primary", "observation_primary", "no_usable_direction"),
+        )
+        self.assertEqual(card.rows[1].primary, "无正式主推")
+        observation = "\n".join(card.publication_rows[1].lines)
+        self.assertIn("◇ 观察首选：角球大9.5 @0.91", observation)
+        self.assertIn("模型 EV +4.2%", observation)
+        self.assertIn("相对无水边际 +2.1pp", observation)
+        self.assertIn("政策阻断：该市场当前仅允许观察", observation)
+        self.assertIn("不下注、不计战绩", observation)
+        no_direction = "\n".join(card.publication_rows[2].lines)
+        self.assertIn("— 无可用方向", no_direction)
+        self.assertIn("数据阻断：候选评估不可用", no_direction)
+        for publication_row in card.publication_rows:
+            self.assertIn(
+                "初盘结论待 T−30 复核首发与即时盘口",
+                "\n".join(publication_row.lines),
+            )
+            self.assertNotIn("…", "\n".join(publication_row.lines))
+            self.assertNotIn("...", "\n".join(publication_row.lines))
+
+    def test_lineup_panel_reports_maintained_observation_and_formal_upgrade(
+        self,
+    ) -> None:
+        history = _history_index()
+        initial = copy.deepcopy(history["9002"])
+        history["9002"]["revisions"] = [initial]
+        history["9002"]["analysis_stage"] = "lineup-check"
+        payload = _payload()
+        payload["rows"] = payload["rows"][1:2]
+        payload["rows"][0]["archive_stage"] = "lineup-check"
+        _rebind_row(payload, 0, history)
+
+        maintained = renderer.validate_payload(payload, history)
+        self.assertIn(
+            "临场仍受政策阻断，观察首选维持",
+            "\n".join(maintained.publication_rows[0].lines),
+        )
+
+        history["9002"]["primary_market"] = "corner_total"
+        history["9002"]["primary_pick"] = {
+            "side": "over",
+            "line": 9.5,
+            "odds": 0.91,
+            "probability": 0.56,
+            "ev": 0.042,
+        }
+        payload["rows"][0]["status"] = "formal_primary"
+        _rebind_row(payload, 0, history)
+        upgraded = renderer.validate_payload(payload, history)
+        self.assertEqual(upgraded.rows[0].primary, "角球大9.5 @0.91")
+        self.assertIn(
+            "临场已从观察首选升级为正式主推",
+            "\n".join(upgraded.publication_rows[0].lines),
+        )
+
+    def test_publication_panel_geometry_grows_and_fits_svg_and_pillow(self) -> None:
+        payload = _payload()
+        payload["rows"] = payload["rows"][1:2]
+        history = _history_index()
+        baseline = renderer.validate_payload(payload, history)
+        candidate = history["9002"]["candidate_audits"][0]["candidates"][0]
+        candidate["gates"].extend(
+            {
+                "gate": f"long_policy_gate_{index}",
+                "category": "release",
+                "passed": False,
+                "reasons": [f"long_machine_reason_{index}_with_complete_context"],
+            }
+            for index in range(10)
+        )
+        _rebind_row(payload, 0, history)
+        card = renderer.validate_payload(payload, history)
+        self.assertGreater(card.publication_height, baseline.publication_height)
+        table_bottom = (
+            renderer.TITLE_HEIGHT
+            + renderer.HEADER_HEIGHT
+            + len(card.rows) * renderer.ROW_HEIGHT
+        )
+        _header_top, blocks, publication_bottom = renderer._publication_geometry(
+            card, table_bottom
+        )
+        self.assertEqual(
+            publication_bottom - table_bottom,
+            card.publication_height,
+        )
+
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        image = Image.new("RGB", (renderer.WIDTH, card.height))
+        draw = ImageDraw.Draw(image)
+        for publication_row, top, block_height in blocks:
+            for line_index, line in enumerate(publication_row.lines):
+                font = renderer._load_font(
+                    renderer.PUBLICATION_FONT_SIZE, bold=line_index == 0
+                )
+                x = 74
+                y = (
+                    top
+                    + renderer.PUBLICATION_BLOCK_PADDING
+                    + line_index * renderer.PUBLICATION_LINE_HEIGHT
+                )
+                bounds = draw.textbbox((x, y), line, font=font)
+                self.assertLessEqual(bounds[2], renderer.WIDTH - 58)
+                self.assertLessEqual(bounds[3], top + block_height)
+        svg = renderer.render_svg(card)
+        self.assertNotIn("…", svg)
+        self.assertNotIn("...", svg)
 
     def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(
         self,
     ) -> None:
         payload = _payload()
         history = _history_index()
-        history["9002"]["candidate_audits"][0]["best_observation"][
-            "diagnostic_qualification_status"
-        ] = "unqualified"
+        history["9002"]["candidate_audits"][0]["candidates"][0][
+            "counterfactual_eligible"
+        ] = False
         _rebind_row(payload, 1, history)
         with self.assertRaisesRegex(ValueError, "without validated candidate_audits"):
             renderer.validate_payload(payload, history)
@@ -900,6 +1067,9 @@ class PredictionCardRendererTests(unittest.TestCase):
                 renderer.TITLE_HEIGHT
                 + renderer.HEADER_HEIGHT
                 + 3 * renderer.ROW_HEIGHT
+                + renderer.validate_payload(
+                    _payload(), _history_index()
+                ).publication_height
                 + renderer.FOOTER_HEIGHT
             )
             self.assertEqual(int(xml.attrib["height"]), expected)
@@ -1089,7 +1259,8 @@ class PredictionCardRendererTests(unittest.TestCase):
                         + renderer.HEADER_HEIGHT
                         + row_count * renderer.ROW_HEIGHT
                     )
-                    footer_start = table_bottom + 80
+                    footer_start = table_bottom + card.publication_height
+                    footer_y = footer_start + renderer.FOOTER_CONTENT_OFFSET
                     muted = tuple(
                         int(renderer.COLORS["muted"][offset : offset + 2], 16)
                         for offset in (1, 3, 5)
@@ -1100,7 +1271,7 @@ class PredictionCardRendererTests(unittest.TestCase):
                     )
                     muted_rows = [
                         y
-                        for y in range(footer_start, card.height)
+                        for y in range(footer_y + 80, card.height)
                         if any(
                             pixels[x, y] == muted
                             for x in range(72, renderer.WIDTH - 72)
@@ -1108,7 +1279,7 @@ class PredictionCardRendererTests(unittest.TestCase):
                     ]
                     warning_rows = [
                         y
-                        for y in range(footer_start, card.height)
+                        for y in range(footer_y + 45, footer_y + 90)
                         if any(
                             pixels[x, y] == warning
                             for x in range(72, renderer.WIDTH - 72)

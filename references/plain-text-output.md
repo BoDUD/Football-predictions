@@ -26,15 +26,26 @@ Show user-facing text as ordinary wrapped text, not a fenced code block.
 
 ## Primary and observation placement
 
+Initial and lineup output separate publication states explicitly. The formal line is
+`正式主推：<direction>` or `正式主推：无`. When no formal primary exists, a second line is either
+one replay-validated `◇ 观察首选` with recalculated EV/edge and the explicit state
+`不下注、不计战绩`, or `— 无可用方向` when no candidate passed every non-release gate. Compact
+data, value, policy, and mixed-safety blockers explain why formal publication did not happen.
+Initial output says that confirmed lineups and current prices remain due at T−30. Lineup output
+says whether the initial observation upgraded to formal, remained blocked, changed, or
+disappeared, using only that lineup version's own frozen candidate audit.
+
 Derive the card's `主推` cell from the archive; caller prose cannot change it:
 
 1. Show the unique formal primary, with archive-derived `★`.
-2. If no formal primary exists, show exactly `无正式主推` in the card and
-   `主推：无正式推荐` in initial/lineup text.
+2. If no formal primary exists, show exactly `无正式主推` in the card's formal-primary cell and
+   `正式主推：无` in initial/lineup text.
 
-A separately archived and diagnostically qualified observation may appear once in accompanying
-text or audit with `◇` and an explicit no-bet/non-counting label. It never replaces the card's
-no-primary wording. Never derive a headline from the independent 1X2 or goal-range marginal
+A separately archived and replay-validated v3 shadow may appear once in accompanying text and
+the card's distinct table-external observation panel with `◇` and an explicit
+no-bet/non-counting label. It never replaces the card's no-primary wording. A frozen older
+qualified corner observation may remain a compatibility annotation, but a missing old v3 audit
+is never reconstructed. Never derive a headline from the independent 1X2 or goal-range marginal
 Top-1, and do not emit an unlabelled standalone `无` placeholder. If the required joint artifact
 is absent or invalid, retain the no-primary state and show `数据不足` only for the public range
 and paired-event projections.
@@ -50,12 +61,14 @@ Top 2. Never describe an observation or
 secondary reference as won or lost.
 
 When an image is rendered, follow [image-output.md](image-output.md). Initial and lineup images
-use the fixed simple eight-column table. `联合首选情景总球` shows exactly the range mapped from
+use the fixed simple eight-column table plus a distinct table-external publication-status panel.
+`联合首选情景总球` shows exactly the range mapped from
 the frozen joint Rank 1 score plus recomputed Top-2/remaining mass and uncertainty; HT/FT and
 score show the frozen joint Top 2. Complete half-time, 1X2,
 goal-range and BTTS marginal calculations remain in text or audit but cannot fill those compact
 slots. A formal primary carries the archive-derived `★`. A separately qualified observation
-may carry `◇` only in accompanying text/audit and remains excluded from stake, settlement,
+may carry `◇` in accompanying text or the dedicated panel, never in the formal `主推` cell,
+and remains excluded from stake, settlement,
 win/loss, profit, and ROI. The image and normal text must reference the same Rank 1 range and
 paired joint events. Normal text does not repeat the two internal score-derived range labels.
 If either side cannot validate the joint artifact, both use `数据不足` rather than independent

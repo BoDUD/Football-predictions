@@ -384,7 +384,8 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "赛事：芬超",
                 "比赛：主队 vs 客队",
                 "开赛：",
-                "主推：小2.5 @0.92",
+                "正式主推：小2.5 @0.92",
+                "发布状态：初盘结论待 T−30 复核首发与即时盘口",
                 "次选参考：",
                 "胜平负：数据不足",
                 "联合情景：数据不足",
@@ -417,7 +418,7 @@ class PlainTextFormatterTests(unittest.TestCase):
 
             text = formatter.render(base, "42", "initial")
 
-            self.assertIn("主推：半场大1 @0.98", text)
+            self.assertIn("正式主推：半场大1 @0.98", text)
             self.assertIn("次选参考：客队 +0.25 @0.86、小2.5 @0.92", text)
             self.assertNotIn("次选参考：半场大1", text)
             self.assertNotIn("半场 客队 +1", text)
@@ -517,11 +518,16 @@ class PlainTextFormatterTests(unittest.TestCase):
             ):
                 text = formatter.render(base, "42", "initial")
 
-        self.assertIn("主推：无正式推荐", text)
+        self.assertIn("正式主推：无", text)
+        self.assertIn("— 无可用方向", text)
+        self.assertIn("数据阻断：", text)
+        self.assertIn("价值阻断：", text)
+        self.assertIn("政策阻断：", text)
+        self.assertNotIn("主推概率：未取得", text)
         self.assertNotIn("◇ 模型首选", text)
         self.assert_plain(text)
 
-    def test_qualified_observation_precedes_joint_model_leader_in_plain_text(self):
+    def test_legacy_corner_observation_is_not_a_public_observation_primary(self):
         record = base_record()
         record["primary_market"] = None
         record["primary_pick"] = None
@@ -554,12 +560,77 @@ class PlainTextFormatterTests(unittest.TestCase):
             ):
                 text = formatter.render(base, "42", "initial")
 
-        self.assertIn(
-            "◇ 观察方向：角球大9.5 @0.91（不计主推、不计战绩）",
-            text,
-        )
+        self.assertIn("— 无可用方向", text)
+        self.assertNotIn("角球大9.5", text)
         self.assertNotIn("◇ 模型首选", text)
         self.assert_plain(text)
+
+    def test_v3_observation_primary_shows_value_and_policy_blocker(self):
+        record = base_record()
+        record["primary_market"] = None
+        record["primary_pick"] = None
+        record["total_pick"] = None
+        summary = {
+            "stage": "initial",
+            "state": "observation_primary",
+            "formal_primary": None,
+            "observation_primary": {
+                "candidate_id": "sha256:" + "c" * 64,
+                "market": "corner_total",
+                "identity": "corner_total:over:9.5",
+                "side": "over",
+                "line": 9.5,
+                "odds": 0.91,
+                "ev": 0.042,
+                "edge_pp": 2.1,
+            },
+            "blockers": {
+                "data": [],
+                "value": [],
+                "policy": [
+                    {
+                        "gate": "market_policy_enabled",
+                        "reasons": ["market_observation_only_under_active_policy"],
+                    }
+                ],
+            },
+            "safety_blockers": [],
+            "candidate_evaluation_status": "valid",
+        }
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base, [record])
+            with patch.object(
+                formatter.publication_outlook,
+                "publication_summary",
+                return_value=summary,
+            ):
+                text = formatter.render(base, "42", "initial")
+
+        self.assertIn("正式主推：无", text)
+        self.assertIn(
+            "◇ 观察首选：角球大9.5 @0.91｜模型 EV +4.2%｜edge +2.1pp｜不下注、不计战绩",
+            text,
+        )
+        self.assertIn("数据阻断：无", text)
+        self.assertIn("价值阻断：无", text)
+        self.assertIn("政策阻断：该市场当前仅允许观察", text)
+        self.assertNotIn("主推概率：未取得", text)
+        self.assert_plain(text)
+
+    def test_safety_blocker_is_not_mislabeled_as_a_data_blocker(self):
+        line = formatter._blocker_line(
+            {
+                "blockers": {"data": [], "value": [], "policy": []},
+                "safety_blockers": [
+                    {
+                        "gate": "adverse_signal_gate",
+                        "reasons": ["adverse_market_safety_thresholds_not_met"],
+                    }
+                ],
+            }
+        )
+        self.assertIn("数据阻断：无", line)
+        self.assertIn("安全阻断：反向或冲突盘口安全检查未通过", line)
 
     def test_format_pick_supports_expanded_markets(self):
         record = base_record()
@@ -635,7 +706,7 @@ class PlainTextFormatterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base, [record])
             initial_text = formatter.render(base, "42", "initial")
-            self.assertIn("主推：总进球2-3球 @2.10", initial_text)
+            self.assertIn("正式主推：总进球2-3球 @2.10", initial_text)
             self.assertIn(
                 "次选参考：客队 +0.25 @0.86、小2.5 @0.92、双方进球-是 @1.80、角球大10.5 @0.90"
                 "（不结算、不计战绩、不计金额）",
@@ -691,7 +762,7 @@ class PlainTextFormatterTests(unittest.TestCase):
                 "主推变更：总进球2-3球 @2.10 → 主队角球-1.5 @0.95",
                 lineup_text,
             )
-            self.assertIn("当前主推：主队角球-1.5 @0.95", lineup_text)
+            self.assertIn("正式主推：主队角球-1.5 @0.95", lineup_text)
             self.assert_plain(lineup_text)
 
     def test_initial_text_uses_its_frozen_fixture_not_later_lineup_metadata(self):
@@ -730,6 +801,59 @@ class PlainTextFormatterTests(unittest.TestCase):
         self.assertNotIn("英超", text)
         self.assertNotIn("临场主队", text)
         self.assertNotIn("13:00（日本时间）", text)
+
+    def test_initial_revision_cannot_inherit_lineup_settlement_candidate_audit(self):
+        record = base_record()
+        initial = {
+            "analysis_stage": "initial",
+            "primary_market": None,
+            "primary_pick": None,
+            "candidate_audits": [],
+        }
+        final_audit = {
+            "kind": formatter.memory_store.CANDIDATE_EVALUATION_KIND,
+            "schema_version": formatter.memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            "candidates": [
+                {
+                    "candidate_id": "sha256:" + "d" * 64,
+                    "market": "total",
+                    "identity": "total:over:2.5",
+                    "side": "over",
+                    "line": 2.5,
+                    "counterfactual_eligible": True,
+                    "formal_eligible": False,
+                    "shadow_selected": True,
+                    "shadow_confidence": {"score": 80.0},
+                    "gates": [],
+                }
+            ],
+            "market_manifest": [],
+        }
+        record.update(
+            {
+                "status": "reviewed",
+                "analysis_stage": "lineup-check",
+                "primary_market": None,
+                "primary_pick": None,
+                "candidate_audits": [final_audit],
+                "settlement_basis": {"candidate_audits": [final_audit]},
+                "revisions": [initial],
+            }
+        )
+
+        selected = formatter.select_version(record, "initial")
+        merged = formatter.merged_version(record, selected)
+        self.assertNotIn("settlement_basis", merged)
+        self.assertEqual(merged["candidate_audits"], [])
+        with patch.object(
+            formatter.publication_outlook.memory_store,
+            "validated_candidate_evaluation_audit",
+            return_value=True,
+        ):
+            initial_summary = formatter.publication_outlook.publication_summary(merged)
+            lineup_summary = formatter.publication_outlook.publication_summary(record)
+        self.assertEqual(initial_summary["state"], "no_usable_direction")
+        self.assertEqual(lineup_summary["state"], "observation_primary")
 
     def test_zero_zero_is_displayed_only_when_it_ranks_in_top_two(self):
         record = base_record()
@@ -833,7 +957,7 @@ class PlainTextFormatterTests(unittest.TestCase):
             text = formatter.render(base, "42", "lineup-check")
             self.assertTrue(text.startswith("【临场分析｜42】\n"))
             self.assertIn("主推变更：小2.5 @0.92 → 客队 +0.25 @0.86", text)
-            self.assertIn("当前主推：客队 +0.25 @0.86", text)
+            self.assertIn("正式主推：客队 +0.25 @0.86", text)
             self.assertIn("检查时间：2026-07-23 19:02（日本时间）", text)
             self.assertNotIn("0-0核验：", text)
             self.assert_plain(text)
@@ -922,7 +1046,8 @@ class PlainTextFormatterTests(unittest.TestCase):
             write_history(base, [record])
             lineup_text = formatter.render(base, "42", "lineup-check")
             self.assertIn("主推取消：小2.5 @0.92 → 不下注", lineup_text)
-            self.assertIn("当前主推：无正式推荐", lineup_text)
+            self.assertIn("正式主推：无", lineup_text)
+            self.assertIn("— 无可用方向", lineup_text)
             self.assertIn("联合情景：数据不足", lineup_text)
             self.assertNotIn("半全场：观察", lineup_text)
             self.assert_plain(lineup_text)

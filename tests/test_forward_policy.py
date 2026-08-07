@@ -245,6 +245,30 @@ class ForwardPolicyTests(unittest.TestCase):
         self.assertTrue(
             validated["policy"]["display_policy"]["top2_mass_and_remainder_required"]
         )
+        self.assertTrue(
+            validated["policy"]["display_policy"]["formal_primary_definition_unchanged"]
+        )
+        self.assertEqual(
+            validated["policy"]["display_policy"]["observation_primary_schema_version"],
+            "publication-outlook/1.0.0",
+        )
+        self.assertTrue(
+            validated["policy"]["display_policy"][
+                "observation_never_occupies_primary_cell"
+            ]
+        )
+        self.assertEqual(
+            validated["policy"]["candidate_evaluation"][
+                "recent_gate_diagnostics_schema_version"
+            ],
+            "recent-candidate-gate-funnels/1.0.0",
+        )
+        self.assertEqual(
+            validated["policy"]["candidate_evaluation"][
+                "recent_distinct_match_windows"
+            ],
+            [50, 100],
+        )
         self.assertEqual(
             validated["policy"]["validation_protocol"]["minimum_iso_week_clusters"],
             20,

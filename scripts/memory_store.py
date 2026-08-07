@@ -11619,7 +11619,22 @@ def league_performance(
     }
 
 
-def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
+def _recent_candidate_gate_funnels(
+    history: list[dict[str, Any]], windows: tuple[int, ...] = (50, 100)
+) -> dict[str, Any]:
+    """Load the read-only gate diagnostic lazily to avoid an import cycle."""
+
+    try:
+        from scripts import gate_stats
+    except ImportError:  # Direct execution from scripts/.
+        import gate_stats  # type: ignore[no-redef]
+
+    return gate_stats.recent_candidate_gate_funnels(history, windows=windows)
+
+
+def calculate_stats(
+    history: list[dict[str, Any]], *, gate_windows: tuple[int, ...] = (50, 100)
+) -> dict[str, Any]:
     reviewed = [
         r
         for r in history
@@ -11653,6 +11668,7 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     quarantined_by_market = primary_market_performance(excluded_reviewed)
     shadow = shadow_selection_by_market(reviewed)
     release_funnel = release_blocker_funnel(reviewed)
+    recent_gate_funnels = _recent_candidate_gate_funnels(history, windows=gate_windows)
     return {
         "evaluation_scope": "strict_forward_oos",
         "reviewed_matches": len(reviewed),
@@ -11687,6 +11703,7 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "observation_gate_funnel": observation_gate_funnel(reviewed),
         "shadow_selection_by_market": shadow,
         "release_blocker_funnel": release_funnel,
+        "recent_candidate_gate_funnels": recent_gate_funnels,
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,
@@ -11843,7 +11860,10 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
     history_file = data_path(args.base_dir)
     output_file = calibration_path(args.base_dir)
     history = load_history(history_file)
-    stats = calculate_stats(history)
+    stats = calculate_stats(
+        history,
+        gate_windows=tuple(getattr(args, "gate_windows", (50, 100))),
+    )
     existing: dict[str, Any] = {}
     if output_file.exists():
         loaded = json.loads(output_file.read_text(encoding="utf-8"))
@@ -11891,6 +11911,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "shadow_selection_by_market": stats["shadow_selection_by_market"],
         "shadow_review_trigger_met_by_market": shadow_eligibility,
         "release_blocker_funnel": stats["release_blocker_funnel"],
+        "recent_candidate_gate_funnels": stats["recent_candidate_gate_funnels"],
         "weight_change_eligible": {market: False for market in eligibility},
         "active_weight_adjustments": {},
         "parameter_change_authorized": False,
@@ -12460,7 +12481,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     due.add_argument("--min-minutes", type=float, default=0.0)
     due.add_argument("--max-minutes", type=float, default=30.0)
-    sub.add_parser("stats", help="Print cumulative accuracy")
+    stats = sub.add_parser(
+        "stats", help="Print cumulative accuracy and recent candidate-gate diagnostics"
+    )
+    stats.add_argument(
+        "--gate-windows",
+        type=int,
+        nargs="+",
+        default=[50, 100],
+        help="Distinct-match windows for descriptive gate diagnostics",
+    )
+    gate_stats = sub.add_parser(
+        "gate-stats",
+        help="Replay recent candidate gates without calculating settlement performance",
+    )
+    gate_stats.add_argument("--windows", type=int, nargs="+", default=[50, 100])
     calibrate = sub.add_parser(
         "calibrate",
         help="Summarize reviewed performance and persist cautious calibration state",
@@ -12471,6 +12506,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Persist calibration.json beside history.json",
     )
     calibrate.add_argument("--minimum-graded", type=int, default=20)
+    calibrate.add_argument(
+        "--gate-windows",
+        type=int,
+        nargs="+",
+        default=[50, 100],
+        help="Distinct-match windows mirrored into calibration diagnostics",
+    )
     calibrate.add_argument("--guardrail", action="append")
     return parser
 
@@ -12508,7 +12550,18 @@ def main() -> int:
         elif args.command == "calibrate":
             if args.minimum_graded < 1:
                 raise ValueError("--minimum-graded must be at least 1")
+            if any(window < 1 for window in args.gate_windows):
+                raise ValueError("--gate-windows must contain positive integers")
             result = cmd_calibrate(args)
+        elif args.command == "gate-stats":
+            if any(window < 1 for window in args.windows):
+                raise ValueError("--windows must contain positive integers")
+            result = {
+                "path": str(path),
+                "recent_candidate_gate_funnels": _recent_candidate_gate_funnels(
+                    load_history(path), windows=tuple(args.windows)
+                ),
+            }
         else:
             history = load_history(path)
             if args.command == "pending":
@@ -12521,7 +12574,14 @@ def main() -> int:
                     ],
                 }
             else:
-                result = {"path": str(path), "stats": calculate_stats(history)}
+                if any(window < 1 for window in args.gate_windows):
+                    raise ValueError("--gate-windows must contain positive integers")
+                result = {
+                    "path": str(path),
+                    "stats": calculate_stats(
+                        history, gate_windows=tuple(args.gate_windows)
+                    ),
+                }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
