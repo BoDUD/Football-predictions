@@ -5,12 +5,11 @@ import csv
 import importlib.util
 import json
 import math
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "htft_model.py"
 SPEC = importlib.util.spec_from_file_location("soccer_htft_model", SCRIPT)
@@ -19,7 +18,9 @@ htft_model = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(htft_model)
 
 RANKER_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "htft_ranker.py"
-RANKER_SPEC = importlib.util.spec_from_file_location("soccer_htft_ranker", RANKER_SCRIPT)
+RANKER_SPEC = importlib.util.spec_from_file_location(
+    "soccer_htft_ranker", RANKER_SCRIPT
+)
 assert RANKER_SPEC and RANKER_SPEC.loader
 htft_ranker = importlib.util.module_from_spec(RANKER_SPEC)
 RANKER_SPEC.loader.exec_module(htft_ranker)
@@ -166,6 +167,7 @@ class HTFTModelTests(unittest.TestCase):
         self.assertEqual(first["training"]["dataset_manifest_hash"], MANIFEST_HASH)
         self.assertEqual(first["empirical_association"]["smoothing_alpha"], 0.5)
         self.assertEqual(first["empirical_association"]["power"], 1.0)
+        self.assertEqual(first["empirical_association"]["time_decay"]["mode"], "none")
         self.assertEqual(
             first["construction"]["default_seed"], "empirical_association_ipf"
         )
@@ -188,6 +190,94 @@ class HTFTModelTests(unittest.TestCase):
         tampered["model_hash"] = htft_model.calculate_model_hash(tampered)
         with self.assertRaisesRegex(htft_model.HTFTModelError, "counts"):
             htft_model.validate_model(tampered)
+
+        legacy = copy.deepcopy(first)
+        for field in ("time_decay", "weighted_counts", "effective_sample_weight"):
+            legacy["empirical_association"].pop(field)
+        legacy["model_hash"] = htft_model.calculate_model_hash(legacy)
+        htft_model.validate_model(legacy)
+
+    def test_association_seed_records_uniform_and_time_decayed_weighting(self):
+        records = [
+            {
+                "date": htft_model.date(2025, 1, 1),
+                "home_goals": 2,
+                "away_goals": 0,
+                "half_home_goals": 1,
+                "half_away_goals": 0,
+            },
+            {
+                "date": htft_model.date(2025, 3, 2),
+                "home_goals": 0,
+                "away_goals": 2,
+                "half_home_goals": 0,
+                "half_away_goals": 1,
+            },
+        ]
+        uniform = htft_model._fit_empirical_association(records, smoothing_alpha=0.5)
+        decayed = htft_model._fit_empirical_association(
+            records, smoothing_alpha=0.5, half_life_days=30.0
+        )
+
+        self.assertEqual(uniform["time_decay"]["mode"], "none")
+        self.assertEqual(uniform["effective_sample_weight"], 2.0)
+        self.assertEqual(uniform["weighted_counts"]["HH"], 1.0)
+        self.assertEqual(uniform["weighted_counts"]["AA"], 1.0)
+        self.assertEqual(decayed["time_decay"]["mode"], "exponential_half_life")
+        self.assertEqual(decayed["time_decay"]["half_life_days"], 30.0)
+        self.assertAlmostEqual(decayed["weighted_counts"]["HH"], 0.25)
+        self.assertEqual(decayed["weighted_counts"]["AA"], 1.0)
+        self.assertLess(decayed["effective_sample_weight"], 2.0)
+        self.assertGreater(decayed["seed_joint"][2][2], uniform["seed_joint"][2][2])
+
+    def test_association_weighting_is_explicit_in_model_and_prediction(self):
+        model = htft_model.fit_model(
+            self.csv_path,
+            iterations=30,
+            learning_rate=0.025,
+            regularization=0.03,
+            half_time_half_life_days=180.0,
+            second_half_half_life_days=180.0,
+            full_time_half_life_days=180.0,
+            association_half_life_days=45.0,
+            competition_key="test_league",
+            dataset_manifest_hash=MANIFEST_HASH,
+        )
+        association = model["empirical_association"]
+        self.assertEqual(association["time_decay"]["mode"], "exponential_half_life")
+        self.assertEqual(association["time_decay"]["half_life_days"], 45.0)
+        self.assertLess(
+            association["effective_sample_weight"], model["training"]["match_count"]
+        )
+        prediction = htft_model.predict_model(
+            model,
+            "Alpha",
+            "Bravo",
+            kickoff=PREDICTION_KICKOFF,
+            generated_at=PREDICTION_GENERATED_AT,
+        )
+        audit = prediction["joint_construction"]["association"]
+        self.assertEqual(audit["time_decay"], association["time_decay"])
+        self.assertEqual(
+            audit["effective_sample_weight"],
+            association["effective_sample_weight"],
+        )
+
+        tampered = copy.deepcopy(model)
+        tampered["empirical_association"]["effective_sample_weight"] += 0.1
+        tampered["model_hash"] = htft_model.calculate_model_hash(tampered)
+        with self.assertRaisesRegex(
+            htft_model.HTFTModelError, "effective sample weight"
+        ):
+            htft_model.validate_model(tampered)
+
+        tampered_prediction = copy.deepcopy(prediction)
+        tampered_prediction["joint_construction"]["association"].pop("time_decay")
+        tampered_prediction["prediction_hash"] = htft_model.calculate_prediction_hash(
+            tampered_prediction
+        )
+        with self.assertRaisesRegex(htft_model.HTFTModelError, "weighting audit"):
+            htft_model.validate_prediction(tampered_prediction, model=model)
 
     def test_prediction_joint_is_normalized_and_matches_both_marginals(self):
         model = self._fit()
@@ -280,9 +370,7 @@ class HTFTModelTests(unittest.TestCase):
         self._refresh_prediction_htft_mirrors(tampered)
         tampered["prediction_hash"] = htft_model.calculate_prediction_hash(tampered)
 
-        with self.assertRaisesRegex(
-            htft_model.HTFTModelError, "IPF reconstruction"
-        ):
+        with self.assertRaisesRegex(htft_model.HTFTModelError, "IPF reconstruction"):
             htft_model.validate_prediction(tampered)
 
     def test_prediction_ipf_audit_rebuild_uses_precise_provenance_targets(self):
@@ -330,9 +418,7 @@ class HTFTModelTests(unittest.TestCase):
         )
         self.assertLessEqual(precise_difference, 1e-15)
         self.assertGreater(approximate_difference, 1e-12)
-        self.assertEqual(
-            precise_audit["iterations"], construction["ipf"]["iterations"]
-        )
+        self.assertEqual(precise_audit["iterations"], construction["ipf"]["iterations"])
         self.assertAlmostEqual(
             precise_audit["maximum_marginal_error"],
             construction["ipf"]["maximum_marginal_error"],
@@ -372,9 +458,7 @@ class HTFTModelTests(unittest.TestCase):
         tampered["prediction_hash"] = htft_model.calculate_prediction_hash(tampered)
 
         htft_model.validate_prediction(tampered)
-        with self.assertRaisesRegex(
-            htft_model.HTFTModelError, "association seed"
-        ):
+        with self.assertRaisesRegex(htft_model.HTFTModelError, "association seed"):
             htft_model.validate_prediction(tampered, model=model)
 
     def test_external_de_vigged_anchors_are_opt_in_complete_and_audited(self):
@@ -473,9 +557,7 @@ class HTFTModelTests(unittest.TestCase):
             generated_at=PREDICTION_GENERATED_AT,
             unknown_team_policy="league_average",
         )
-        self.assertEqual(
-            prediction["fixture"]["unknown_team_policy"], "league_average"
-        )
+        self.assertEqual(prediction["fixture"]["unknown_team_policy"], "league_average")
         self.assertTrue(prediction["warnings"])
 
         with self.assertRaisesRegex(htft_model.HTFTModelError, "explicit UTC offset"):
@@ -528,6 +610,7 @@ class HTFTModelTests(unittest.TestCase):
             "half_time_half_life_days": 180.0,
             "second_half_half_life_days": 180.0,
             "full_time_half_life_days": 180.0,
+            "association_half_life_days": 45.0,
             "competition_key": "test_league",
             "dataset_manifest_hash": MANIFEST_HASH,
             "unknown_team_policy": "league_average",
@@ -540,6 +623,7 @@ class HTFTModelTests(unittest.TestCase):
         self.assertFalse(first["split_policy"]["random_split"])
         self.assertFalse(first["split_policy"]["same_date_split_allowed"])
         self.assertFalse(first["fit_config"]["external_anchor_enabled"])
+        self.assertEqual(first["fit_config"]["association_half_life_days"], 45.0)
         self.assertLessEqual(
             first["metrics"]["top_one_accuracy"],
             first["metrics"]["top_two_accuracy"],
@@ -568,9 +652,7 @@ class HTFTModelTests(unittest.TestCase):
         tampered = copy.deepcopy(first)
         forecast = tampered["predictions"][0]
         alternatives = [
-            name
-            for name in htft_model.HTFT_CLASSES
-            if name != forecast["actual_class"]
+            name for name in htft_model.HTFT_CLASSES if name != forecast["actual_class"]
         ]
         receiver = alternatives[0]
         donor = max(alternatives[1:], key=forecast["probabilities"].get)
@@ -585,9 +667,9 @@ class HTFTModelTests(unittest.TestCase):
             htft_model.validate_backtest(tampered)
 
         tampered = copy.deepcopy(first)
-        tampered["predictions"][0]["training_cutoff_date"] = tampered[
-            "predictions"
-        ][0]["date"]
+        tampered["predictions"][0]["training_cutoff_date"] = tampered["predictions"][0][
+            "date"
+        ]
         tampered["backtest_hash"] = htft_model.calculate_backtest_hash(tampered)
         with self.assertRaisesRegex(htft_model.HTFTModelError, "strictly before"):
             htft_model.validate_backtest(tampered)
@@ -612,6 +694,8 @@ class HTFTModelTests(unittest.TestCase):
                 str(model_path),
                 "--iterations",
                 "15",
+                "--association-half-life-days",
+                "45",
                 "--competition-key",
                 "test_league",
                 "--dataset-manifest-hash",
@@ -624,6 +708,10 @@ class HTFTModelTests(unittest.TestCase):
         self.assertEqual(fit.returncode, 0, fit.stderr)
         model = json.loads(model_path.read_text(encoding="utf-8"))
         self.assertTrue(model["model_hash"].startswith("sha256:"))
+        self.assertEqual(
+            model["empirical_association"]["time_decay"]["half_life_days"],
+            45.0,
+        )
 
         predict = subprocess.run(
             [
@@ -651,6 +739,10 @@ class HTFTModelTests(unittest.TestCase):
         prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
         self.assertEqual(prediction["model_hash"], model["model_hash"])
         self.assertTrue(prediction["prediction_hash"].startswith("sha256:"))
+        self.assertEqual(
+            prediction["joint_construction"]["association"]["time_decay"],
+            model["empirical_association"]["time_decay"],
+        )
 
 
 if __name__ == "__main__":

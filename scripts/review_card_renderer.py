@@ -12,18 +12,17 @@ goal-range projection from that same event.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from html import escape
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import tempfile
-from typing import Any, Mapping, Sequence
 import unicodedata
-
+from dataclasses import dataclass
+from html import escape
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in os.sys.path:
@@ -32,7 +31,6 @@ if str(SCRIPT_DIR) not in os.sys.path:
 import memory_store
 import plain_text_formatter
 import public_market_outlook
-
 
 WIDTH = 1520
 SIDE_MARGIN = 40
@@ -51,7 +49,7 @@ COLUMNS = (
     ("全场", "final_score", 100),
     ("主推结算", "primary_settlement", 250),
     ("半全场参考", "htft_reference", 260),
-    ("总进球/波胆参考", "score_reference", 280),
+    ("联合首选情景总球/波胆", "score_reference", 280),
 )
 
 if sum(width for _label, _key, width in COLUMNS) != TABLE_WIDTH:
@@ -105,6 +103,21 @@ class JointEvent:
 
 
 @dataclass(frozen=True)
+class JointSummary:
+    marginal_goal_range_label: str
+    marginal_goal_range_probability: float
+    top2_cumulative_probability: float
+    other_scenarios_probability: float
+    uncertainty_label: str
+    normalized_entropy: float
+    uncertainty_schema_version: str
+
+    @property
+    def uncertainty_major_version(self) -> str:
+        return self.uncertainty_schema_version.split(".", 1)[0]
+
+
+@dataclass(frozen=True)
 class ReviewCard:
     identifier: str
     league: str
@@ -119,6 +132,7 @@ class ReviewCard:
     settlement_hash: str
     reviewed_at: str
     events: tuple[JointEvent, ...]
+    joint_summary: JointSummary | None
     joint_status: str
 
     @property
@@ -138,11 +152,18 @@ class ReviewCard:
 
     @property
     def score_reference(self) -> str:
-        if not self.events:
+        if not self.events or self.joint_summary is None:
             return "数据不足"
+        summary = self.joint_summary
         lines = [
-            f"总进球 {self.events[0].goal_range_label}",
-            "高方差·非推荐",
+            f"联合首选情景总球 {self.events[0].goal_range_label}",
+            f"总进球边际第一 {summary.marginal_goal_range_label} "
+            f"{summary.marginal_goal_range_probability * 100.0:.1f}%",
+            "仅审计·不替代联合",
+            f"Top2累计 {summary.top2_cumulative_probability * 100.0:.1f}%",
+            f"其他情景 {summary.other_scenarios_probability * 100.0:.1f}%",
+            f"不确定度 {summary.uncertainty_label}"
+            f"(v{summary.uncertainty_major_version})",
         ]
         lines.extend(
             f"{event.rank}. {event.score} {event.percentage:.1f}%"
@@ -190,7 +211,11 @@ def _required_text(value: Any, field: str) -> str:
 def _optional_equal(
     basis: Mapping[str, Any], record: Mapping[str, Any], key: str
 ) -> None:
-    if key in basis and basis.get(key) is not None and basis.get(key) != record.get(key):
+    if (
+        key in basis
+        and basis.get(key) is not None
+        and basis.get(key) != record.get(key)
+    ):
         raise ReviewCardError(f"settlement_basis.{key} conflicts with reviewed record")
 
 
@@ -202,9 +227,7 @@ def _parse_score(value: Any, field: str) -> tuple[str, int, int]:
     return text, int(match.group(1)), int(match.group(2))
 
 
-def _parse_optional_score(
-    value: Any, field: str
-) -> tuple[str, int | None, int | None]:
+def _parse_optional_score(value: Any, field: str) -> tuple[str, int | None, int | None]:
     """Render an unavailable score honestly while validating any supplied value."""
 
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -217,7 +240,9 @@ def load_history_records(path: Path) -> dict[str, dict[str, Any]]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ReviewCardError(f"cannot read valid UTF-8 history from {path}: {exc}") from exc
+        raise ReviewCardError(
+            f"cannot read valid UTF-8 history from {path}: {exc}"
+        ) from exc
     if not isinstance(raw, list):
         raise ReviewCardError("history must be a JSON array")
     records: dict[str, dict[str, Any]] = {}
@@ -235,7 +260,9 @@ def load_history_records(path: Path) -> dict[str, dict[str, Any]]:
 
 def _validate_settlement_binding(record: dict[str, Any]) -> dict[str, Any]:
     if record.get("mode") != "prematch" or record.get("status") != "reviewed":
-        raise ReviewCardError("review card requires a terminal reviewed prematch record")
+        raise ReviewCardError(
+            "review card requires a terminal reviewed prematch record"
+        )
     basis = record.get("settlement_basis")
     if not isinstance(basis, dict):
         raise ReviewCardError("reviewed record has no immutable settlement_basis")
@@ -246,14 +273,18 @@ def _validate_settlement_binding(record: dict[str, Any]) -> dict[str, Any]:
     stage = basis.get("analysis_stage")
     if stage not in {"initial", "lineup-check"}:
         raise ReviewCardError("settlement_basis analysis_stage is invalid")
-    _required_text(basis.get("version_archived_at"), "settlement_basis.version_archived_at")
+    _required_text(
+        basis.get("version_archived_at"), "settlement_basis.version_archived_at"
+    )
 
     for key in ("match_id", "home_team", "away_team", "kickoff"):
         _optional_equal(basis, record, key)
     if basis.get("fixture_id") is not None and str(basis.get("fixture_id")) != str(
         record.get("match_id")
     ):
-        raise ReviewCardError("settlement_basis.fixture_id conflicts with reviewed record")
+        raise ReviewCardError(
+            "settlement_basis.fixture_id conflicts with reviewed record"
+        )
 
     basis_market = basis.get("primary_market")
     basis_pick = basis.get("primary_pick")
@@ -264,7 +295,9 @@ def _validate_settlement_binding(record: dict[str, Any]) -> dict[str, Any]:
     else:
         record_market = record.get("primary_market")
     if basis_market != record_market or basis_pick != record.get("primary_pick"):
-        raise ReviewCardError("reviewed primary conflicts with immutable settlement_basis")
+        raise ReviewCardError(
+            "reviewed primary conflicts with immutable settlement_basis"
+        )
 
     basis_result = basis.get("primary_result")
     record_result = record.get("primary_result")
@@ -278,7 +311,9 @@ def _validate_settlement_binding(record: dict[str, Any]) -> dict[str, Any]:
         raise ReviewCardError("reviewed primary counting flag is inconsistent")
     if has_primary and basis_result not in RESULT_LABELS:
         raise ReviewCardError("formal primary has no valid frozen settlement result")
-    if not has_primary and (basis_market is not None or basis_pick is not None or basis_result is not None):
+    if not has_primary and (
+        basis_market is not None or basis_pick is not None or basis_result is not None
+    ):
         raise ReviewCardError("no-primary settlement basis is inconsistent")
     return basis
 
@@ -292,14 +327,25 @@ def _probability(value: Any, field: str) -> float:
     return probability
 
 
-def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
-    """Read one ordered event list; never pair independent market rankings."""
+def _bounded_probability(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ReviewCardError(f"{field} must be a finite probability")
+    probability = float(value)
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ReviewCardError(f"{field} must be in [0, 1]")
+    return probability
+
+
+def _joint_projection(
+    record: dict[str, Any],
+) -> tuple[tuple[JointEvent, ...], JointSummary | None]:
+    """Read one ordered event list and its artifact-recomputed public summary."""
     try:
         artifact = memory_store.validated_joint_scenario_audit(record)
     except (TypeError, ValueError):
-        return ()
+        return (), None
     if not isinstance(artifact, Mapping):
-        return ()
+        return (), None
     try:
         outlook = public_market_outlook.build_public_market_outlook(artifact)
         block = outlook["joint_scenarios"]
@@ -313,8 +359,7 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
             or not isinstance(raw_items, list)
             or len(raw_items) != 2
             or display_count != len(raw_items)
-            or block.get("display_policy")
-            != public_market_outlook.JOINT_DISPLAY_POLICY
+            or block.get("display_policy") != public_market_outlook.JOINT_DISPLAY_POLICY
         ):
             raise ReviewCardError("public joint display policy is invalid")
 
@@ -327,11 +372,15 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
             htft = str(item.get("htft") or "")
             score = str(item.get("score") or "")
             score_match = re.fullmatch(r"(\d+)-(\d+)", score)
-            if htft not in {
-                left + right
-                for left in ("H", "D", "A")
-                for right in ("H", "D", "A")
-            } or score_match is None:
+            if (
+                htft
+                not in {
+                    left + right
+                    for left in ("H", "D", "A")
+                    for right in ("H", "D", "A")
+                }
+                or score_match is None
+            ):
                 raise ReviewCardError("public joint display event identity is invalid")
             if item.get("slot") != rank:
                 raise ReviewCardError("public joint display order is not canonical")
@@ -347,15 +396,20 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                 or item.get("counts_as_primary") is not False
                 or item.get("requires_bookmaker_odds") is not False
             ):
-                raise ReviewCardError("public joint display event violates safety policy")
+                raise ReviewCardError(
+                    "public joint display event violates safety policy"
+                )
             home_goals = int(score_match.group(1))
             away_goals = int(score_match.group(2))
             total_goals = home_goals + away_goals
             expected_goal_range = (
-                "0-1" if total_goals <= 1 else
-                "2-3" if total_goals <= 3 else
-                "4-6" if total_goals <= 6 else
-                "7+"
+                "0-1"
+                if total_goals <= 1
+                else "2-3"
+                if total_goals <= 3
+                else "4-6"
+                if total_goals <= 6
+                else "7+"
             )
             goal_range_label = str(item.get("goal_range_label") or "")
             if (
@@ -366,13 +420,22 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                 raise ReviewCardError(
                     "public joint display goal range conflicts with its score"
                 )
-            if item.get("home_goals") != home_goals or item.get("away_goals") != away_goals:
+            if (
+                item.get("home_goals") != home_goals
+                or item.get("away_goals") != away_goals
+            ):
                 raise ReviewCardError("public joint display score fields conflict")
             full_time_result = (
-                "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+                "H"
+                if home_goals > away_goals
+                else "A"
+                if home_goals < away_goals
+                else "D"
             )
             if htft[1] != full_time_result:
-                raise ReviewCardError("public joint display score conflicts with HT/FT result")
+                raise ReviewCardError(
+                    "public joint display score conflicts with HT/FT result"
+                )
             probability = _probability(item.get("probability"), f"joint event {rank}")
             if previous_probability is not None and probability > previous_probability:
                 raise ReviewCardError("public joint Top 2 is not probability-ranked")
@@ -389,7 +452,80 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
                     probability=probability,
                 )
             )
-        return tuple(events)
+
+        top2_probability = _bounded_probability(
+            block.get("top2_cumulative_probability"), "joint Top2 cumulative mass"
+        )
+        other_probability = _bounded_probability(
+            block.get("other_scenarios_probability"), "other joint scenario mass"
+        )
+        if (
+            abs(top2_probability - math.fsum(event.probability for event in events))
+            > 1e-9
+            or abs(top2_probability + other_probability - 1.0) > 1e-9
+        ):
+            raise ReviewCardError("public joint concentration mass is inconsistent")
+
+        uncertainty = block.get("uncertainty")
+        if (
+            not isinstance(uncertainty, Mapping)
+            or uncertainty.get("schema_version")
+            != public_market_outlook.JOINT_UNCERTAINTY_SCHEMA_VERSION
+            or uncertainty.get("policy")
+            != public_market_outlook.JOINT_UNCERTAINTY_POLICY
+        ):
+            raise ReviewCardError("public joint uncertainty policy is invalid")
+        normalized_entropy = _bounded_probability(
+            uncertainty.get("normalized_entropy"), "normalized joint entropy"
+        )
+        if normalized_entropy <= public_market_outlook.JOINT_UNCERTAINTY_LOW_MAX:
+            expected_level, expected_label = "low", "低"
+        elif normalized_entropy <= public_market_outlook.JOINT_UNCERTAINTY_MEDIUM_MAX:
+            expected_level, expected_label = "medium", "中"
+        else:
+            expected_level, expected_label = "high", "高"
+        if (
+            uncertainty.get("level") != expected_level
+            or uncertainty.get("label_zh") != expected_label
+        ):
+            raise ReviewCardError("public joint uncertainty classification is invalid")
+
+        marginal_audit = outlook.get("goal_range_marginal_audit")
+        markets = outlook.get("markets")
+        goal_range_market = (
+            markets.get("goal_ranges") if isinstance(markets, Mapping) else None
+        )
+        marginal_top1 = (
+            marginal_audit.get("top1") if isinstance(marginal_audit, Mapping) else None
+        )
+        if (
+            not isinstance(marginal_audit, Mapping)
+            or marginal_audit.get("label") != "总进球边际第一"
+            or marginal_audit.get("role") != "marginal_distribution_audit_only"
+            or marginal_audit.get("replaces_joint_scenario") is not False
+            or not isinstance(goal_range_market, Mapping)
+            or marginal_top1 != goal_range_market.get("top1")
+            or not isinstance(marginal_top1, Mapping)
+        ):
+            raise ReviewCardError("goal-range marginal audit contract is invalid")
+        marginal_code = str(marginal_top1.get("code") or "")
+        marginal_label = str(marginal_top1.get("label") or "")
+        if marginal_code not in {"0-1", "2-3", "4-6", "7+"} or (
+            marginal_label != f"{marginal_code}球"
+        ):
+            raise ReviewCardError("goal-range marginal leader is invalid")
+        marginal_probability = _probability(
+            marginal_top1.get("probability"), "goal-range marginal leader"
+        )
+        return tuple(events), JointSummary(
+            marginal_goal_range_label=marginal_label,
+            marginal_goal_range_probability=marginal_probability,
+            top2_cumulative_probability=top2_probability,
+            other_scenarios_probability=other_probability,
+            uncertainty_label=expected_label,
+            normalized_entropy=normalized_entropy,
+            uncertainty_schema_version=str(uncertainty["schema_version"]),
+        )
     except (
         KeyError,
         TypeError,
@@ -397,7 +533,7 @@ def _joint_events(record: dict[str, Any]) -> tuple[JointEvent, ...]:
         public_market_outlook.PublicMarketOutlookError,
         ReviewCardError,
     ):
-        return ()
+        return (), None
 
 
 def build_card(record: dict[str, Any]) -> ReviewCard:
@@ -408,7 +544,9 @@ def build_card(record: dict[str, Any]) -> ReviewCard:
     half_score, half_home, half_away = _parse_optional_score(
         record.get("half_time_score"), "half_time_score"
     )
-    final_score, final_home, final_away = _parse_score(record.get("final_score"), "final_score")
+    final_score, final_home, final_away = _parse_score(
+        record.get("final_score"), "final_score"
+    )
     if (
         half_home is not None
         and half_away is not None
@@ -437,7 +575,7 @@ def build_card(record: dict[str, Any]) -> ReviewCard:
     settlement_archived_at = _required_text(
         basis.get("version_archived_at"), "settlement_basis.version_archived_at"
     )
-    events = _joint_events(record)
+    events, joint_summary = _joint_projection(record)
     card = ReviewCard(
         identifier=identifier,
         league=league,
@@ -452,7 +590,12 @@ def build_card(record: dict[str, Any]) -> ReviewCard:
         settlement_hash=_canonical_hash(basis),
         reviewed_at=reviewed_at,
         events=events,
-        joint_status=("validated_joint_paths" if events else "data_insufficient"),
+        joint_summary=joint_summary,
+        joint_status=(
+            "validated_joint_paths"
+            if events and joint_summary is not None
+            else "data_insufficient"
+        ),
     )
     _assert_no_ellipsis(visible_text(card))
     return card
@@ -468,8 +611,15 @@ def load_card(history_path: Path, match_id: str) -> ReviewCard:
 
 
 def joint_reference_note(card: ReviewCard) -> str:
-    if card.joint_status == "validated_joint_paths":
-        return "联合 Top 2 来自结算依据绑定的冻结联合路径；高方差，不计主推或战绩。"
+    if card.joint_status == "validated_joint_paths" and card.joint_summary is not None:
+        summary = card.joint_summary
+        return (
+            f"联合Top2 {summary.top2_cumulative_probability * 100.0:.1f}%｜"
+            f"其他{summary.other_scenarios_probability * 100.0:.1f}%｜"
+            f"不确定度{summary.uncertainty_label}（归一化熵"
+            f"{summary.normalized_entropy * 100.0:.1f}%，v{summary.uncertainty_major_version}）；"
+            "冻结分布重算，高方差不计主推。"
+        )
     return "冻结结算依据未包含可验证联合路径；不从赛后结果或其他版本补填。"
 
 
@@ -505,6 +655,7 @@ def _wrap_units(text: str, maximum_units: int) -> tuple[str, ...]:
             continue
         current: list[str] = []
         used = 0
+        last_break = -1
         for character in paragraph:
             if unicodedata.east_asian_width(character) in {"W", "F"}:
                 cost = 2
@@ -518,11 +669,31 @@ def _wrap_units(text: str, maximum_units: int) -> tuple[str, ...]:
             else:
                 cost = 1
             if current and used + cost > maximum_units:
-                output.append("".join(current))
-                current = []
-                used = 0
+                if last_break >= 0:
+                    head = "".join(current[: last_break + 1])
+                    tail = "".join(current[last_break + 1 :])
+                    if head:
+                        output.append(head)
+                    current = list(tail)
+                    used = sum(
+                        2
+                        if unicodedata.east_asian_width(existing) in {"W", "F"}
+                        or (existing.isascii() and existing.isalpha())
+                        else 1
+                        for existing in current
+                    )
+                else:
+                    output.append("".join(current))
+                    current = []
+                    used = 0
+                last_break = -1
+                for offset, existing in enumerate(current):
+                    if existing.isspace() or existing in {"/", "｜", "·", "；"}:
+                        last_break = offset
             current.append(character)
             used += cost
+            if character.isspace() or character in {"/", "｜", "·", "；"}:
+                last_break = len(current) - 1
         if current:
             output.append("".join(current))
     return tuple(output or [""])
@@ -536,9 +707,7 @@ def _wrapped_cells(card: ReviewCard) -> tuple[tuple[str, ...], ...]:
         # A CJK glyph or Latin letter consumes two visual units and is roughly
         # one font-size wide.  Digits/punctuation consume one.  This
         # conservative budget leaves horizontal cell padding.
-        cells.append(
-            _wrap_units(value, max(2, int((width - 18) / (font_size / 2))))
-        )
+        cells.append(_wrap_units(value, max(2, int((width - 18) / (font_size / 2)))))
     return tuple(cells)
 
 
@@ -548,7 +717,13 @@ def _row_height(card: ReviewCard) -> int:
 
 
 def _card_height(card: ReviewCard) -> int:
-    return TOP_MARGIN * 2 + TITLE_HEIGHT + HEADER_HEIGHT + _row_height(card) + FOOTER_HEIGHT
+    return (
+        TOP_MARGIN * 2
+        + TITLE_HEIGHT
+        + HEADER_HEIGHT
+        + _row_height(card)
+        + FOOTER_HEIGHT
+    )
 
 
 def _svg_multiline(
@@ -617,7 +792,13 @@ def render_svg(card: ReviewCard) -> str:
                 weight=700,
             )
         )
-        color = result_color if index == 5 else COLORS["reference"] if index in {6, 7} else COLORS["text"]
+        color = (
+            result_color
+            if index == 5
+            else COLORS["reference"]
+            if index in {6, 7}
+            else COLORS["text"]
+        )
         pieces.append(
             _svg_multiline(
                 center_x,
@@ -695,6 +876,7 @@ def _draw_centered_lines(draw, box, lines: Sequence[str], *, font, fill) -> None
 
 def render_png(card: ReviewCard) -> bytes:
     from io import BytesIO
+
     from PIL import Image, ImageDraw
 
     _assert_no_ellipsis(visible_text(card))
@@ -752,7 +934,13 @@ def render_png(card: ReviewCard) -> bytes:
             font=_font(24, bold=True),
             fill=(255, 255, 255),
         )
-        color = result_color if index == 5 else COLORS["reference"] if index in {6, 7} else COLORS["text"]
+        color = (
+            result_color
+            if index == 5
+            else COLORS["reference"]
+            if index in {6, 7}
+            else COLORS["text"]
+        )
         _draw_centered_lines(
             draw,
             (x + 8, row_y + 8, x + width - 8, footer_y - 8),
@@ -761,7 +949,9 @@ def render_png(card: ReviewCard) -> bytes:
             fill=_hex_color(color),
         )
         if index:
-            draw.line((x, table_y, x, footer_y), fill=_hex_color(COLORS["grid"]), width=1)
+            draw.line(
+                (x, table_y, x, footer_y), fill=_hex_color(COLORS["grid"]), width=1
+            )
         x += width
     draw.line(
         (SIDE_MARGIN, row_y, WIDTH - SIDE_MARGIN, row_y),

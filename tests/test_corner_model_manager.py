@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import copy
 import csv
-from datetime import date, timedelta
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from datetime import date, timedelta
+from pathlib import Path
 from unittest import mock
 
-from scripts import corner_history_dataset_builder, corner_model, corner_model_manager
 from _corner_source_fixture import build_source_bound_dataset
 
+from scripts import corner_history_dataset_builder, corner_model, corner_model_manager
 
 TEAMS = ("A", "B", "C", "D")
 
@@ -151,7 +151,9 @@ class CornerModelManagerTests(unittest.TestCase):
             entry["lineage_hash"],
             corner_model_manager.calculate_lineage_hash(entry),
         )
-        self.assertEqual(entry["dataset_hash"], registry["dataset_hashes"]["korea_k_league_1"])
+        self.assertEqual(
+            entry["dataset_hash"], registry["dataset_hashes"]["korea_k_league_1"]
+        )
         self.assertRegex(entry["model_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertRegex(entry["evaluation_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(entry["backtest_hash"], entry["evaluation_hash"])
@@ -188,7 +190,10 @@ class CornerModelManagerTests(unittest.TestCase):
                 self.model_dir, "K League 1"
             )
             self.assertEqual(entry["league_key"], "korea_k_league_1")
-            self.assertEqual(registry["registry_hash"], read_json(self.registry_path())["registry_hash"])
+            self.assertEqual(
+                registry["registry_hash"],
+                read_json(self.registry_path())["registry_hash"],
+            )
             self.assertEqual(replay.call_count, 1)
             self.assertEqual(
                 replay.call_args.kwargs.get("league_keys"),
@@ -213,9 +218,7 @@ class CornerModelManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError, "dataset CSV hash"
         ):
-            corner_model_manager.load_registry(
-                self.model_dir, force_full_replay=True
-            )
+            corner_model_manager.load_registry(self.model_dir, force_full_replay=True)
 
     def test_deployment_is_evaluation_derived_not_league_name_hardcoded(self):
         registry = corner_model_manager.load_registry(self.model_dir)
@@ -269,34 +272,22 @@ class CornerModelManagerTests(unittest.TestCase):
         self.assertEqual(prediction["deployment_status"], "shadow")
         self.assertFalse(prediction["formal_corner_total_eligible"])
         self.assertFalse(prediction["formal_corner_handicap_eligible"])
-        self.assertFalse(
-            prediction["usage_policy"]["formal_corner_total_eligible"]
-        )
-        self.assertFalse(
-            prediction["usage_policy"]["formal_corner_handicap_eligible"]
-        )
+        self.assertFalse(prediction["usage_policy"]["formal_corner_total_eligible"])
+        self.assertFalse(prediction["usage_policy"]["formal_corner_handicap_eligible"])
         self.assertEqual(
             prediction["usage_policy"]["status"],
             "registered_model_distribution",
         )
-        self.assertTrue(
-            prediction["usage_policy"]["source_bound_manager_verified"]
-        )
-        self.assertTrue(
-            prediction["usage_policy"]["eligible_for_formal_model_input"]
-        )
-        self.assertEqual(
-            prediction["fixture"]["league_key"], "korea_k_league_1"
-        )
+        self.assertTrue(prediction["usage_policy"]["source_bound_manager_verified"])
+        self.assertTrue(prediction["usage_policy"]["eligible_for_formal_model_input"])
+        self.assertEqual(prediction["fixture"]["league_key"], "korea_k_league_1")
         self.assertEqual(
             prediction["registry_binding"]["evaluation_hash"],
             self.entry(registry)["evaluation_hash"],
         )
         self.assertEqual(
             prediction["registry_binding"]["fixture_graph_hash"],
-            self.entry(registry)["dataset_profile"]["fixture_graph"][
-                "components_hash"
-            ],
+            self.entry(registry)["dataset_profile"]["fixture_graph"]["components_hash"],
         )
         corner_model_manager.validate_registered_prediction(
             prediction, registry, model=model
@@ -353,7 +344,9 @@ class CornerModelManagerTests(unittest.TestCase):
 
         # Re-hashing the forged production flag still cannot exceed the current
         # historical-only deployment authority.
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -379,7 +372,9 @@ class CornerModelManagerTests(unittest.TestCase):
             generated_at="2024-01-15T00:00:00Z",
         )
         prediction["registry_binding"]["evaluation_hash"] = "sha256:" + "0" * 64
-        prediction["prediction_hash"] = corner_model.calculate_prediction_hash(prediction)
+        prediction["prediction_hash"] = corner_model.calculate_prediction_hash(
+            prediction
+        )
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError, "registry binding"
         ):
@@ -395,9 +390,7 @@ class CornerModelManagerTests(unittest.TestCase):
             kickoff="2024-02-01T12:00:00Z",
             generated_at="2024-01-15T00:00:00Z",
         )
-        graph_forgery["registry_binding"]["fixture_graph_hash"] = (
-            "sha256:" + "f" * 64
-        )
+        graph_forgery["registry_binding"]["fixture_graph_hash"] = "sha256:" + "f" * 64
         graph_forgery["prediction_hash"] = corner_model.calculate_prediction_hash(
             graph_forgery
         )
@@ -420,7 +413,9 @@ class CornerModelManagerTests(unittest.TestCase):
         entry["evaluation_hash"] = evaluation["backtest_hash"]
         entry["evaluation_file_sha256"] = file_hash(evaluation_path)
         entry["lineage_hash"] = corner_model_manager.calculate_lineage_hash(entry)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -442,7 +437,9 @@ class CornerModelManagerTests(unittest.TestCase):
         entry["backtest_hash"] = evaluation["backtest_hash"]
         entry["evaluation_file_sha256"] = file_hash(evaluation_path)
         entry["lineage_hash"] = corner_model_manager.calculate_lineage_hash(entry)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -468,7 +465,9 @@ class CornerModelManagerTests(unittest.TestCase):
         entry["backtest_hash"] = evaluation["backtest_hash"]
         entry["evaluation_file_sha256"] = file_hash(evaluation_path)
         entry["lineage_hash"] = corner_model_manager.calculate_lineage_hash(entry)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -489,7 +488,9 @@ class CornerModelManagerTests(unittest.TestCase):
         entry["model_hash"] = model["model_hash"]
         entry["model_file_sha256"] = file_hash(model_path)
         entry["lineage_hash"] = corner_model_manager.calculate_lineage_hash(entry)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -549,15 +550,13 @@ class CornerModelManagerTests(unittest.TestCase):
         backtest["untouched_holdout"]["development_only"] = True
         insufficient = corner_model_manager.derive_historical_deployment(backtest)
         self.assertEqual(insufficient["deployment_status"], "shadow")
-        self.assertFalse(
-            insufficient["gate"]["checks"]["untouched_holdout_available"]
-        )
+        self.assertFalse(insufficient["gate"]["checks"]["untouched_holdout_available"])
         backtest["untouched_holdout"]["status"] = "available"
         backtest["untouched_holdout"]["development_only"] = False
         comparisons["league_nb"]["margin_crps"]["sample_standard_error"] = 0.2
-        comparisons["league_nb"]["margin_crps"][
-            "one_sided_95_lower_bound"
-        ] = 0.2 - corner_model.ONE_SIDED_95_Z * 0.2
+        comparisons["league_nb"]["margin_crps"]["one_sided_95_lower_bound"] = (
+            0.2 - corner_model.ONE_SIDED_95_Z * 0.2
+        )
         deployment = corner_model_manager.derive_historical_deployment(backtest)
         self.assertEqual(deployment["deployment_status"], "shadow")
         self.assertFalse(
@@ -594,7 +593,9 @@ class CornerModelManagerTests(unittest.TestCase):
         entry["backtest_hash"] = evaluation["backtest_hash"]
         entry["evaluation_file_sha256"] = file_hash(evaluation_path)
         entry["lineage_hash"] = corner_model_manager.calculate_lineage_hash(entry)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,
@@ -615,7 +616,9 @@ class CornerModelManagerTests(unittest.TestCase):
         ):
             first[field] = copy.deepcopy(second[field])
         first["lineage_hash"] = corner_model_manager.calculate_lineage_hash(first)
-        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(registry)
+        registry["registry_hash"] = corner_model_manager.calculate_registry_hash(
+            registry
+        )
         write_json(self.registry_path(), registry)
         with self.assertRaisesRegex(
             corner_model_manager.CornerModelManagerError,

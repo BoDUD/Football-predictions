@@ -280,6 +280,11 @@ class PublicMarketOutlookTests(unittest.TestCase):
             markets["goal_ranges"]["display_reason"],
             "goal_ranges_public_top_one",
         )
+        marginal_audit = result["goal_range_marginal_audit"]
+        self.assertEqual(marginal_audit["label"], "总进球边际第一")
+        self.assertEqual(marginal_audit["top1"], markets["goal_ranges"]["top1"])
+        self.assertEqual(marginal_audit["role"], "marginal_distribution_audit_only")
+        self.assertFalse(marginal_audit["replaces_joint_scenario"])
         self.assertEqual(markets["btts"]["display_count"], 2)
         scenarios = result["joint_scenarios"]
         self.assertEqual(scenarios["display_count"], 2)
@@ -309,6 +314,72 @@ class PublicMarketOutlookTests(unittest.TestCase):
         )
         self.assertNotIn("third_probability", scenarios)
         self.assertNotIn("top2_top3_gap_percentage_points", scenarios)
+        self.assertAlmostEqual(scenarios["top2_cumulative_probability"], 0.099)
+        self.assertAlmostEqual(scenarios["other_scenarios_probability"], 0.901)
+        uncertainty = scenarios["uncertainty"]
+        self.assertEqual(
+            uncertainty["schema_version"],
+            public_market_outlook.JOINT_UNCERTAINTY_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            uncertainty["policy"], public_market_outlook.JOINT_UNCERTAINTY_POLICY
+        )
+        self.assertEqual(uncertainty["level"], "high")
+        self.assertEqual(uncertainty["label_zh"], "高")
+        probabilities = [cell["probability"] for cell in artifact["joint_cells"]]
+        expected_entropy = -sum(value * math.log(value) for value in probabilities)
+        self.assertAlmostEqual(uncertainty["entropy_nats"], expected_entropy)
+        self.assertAlmostEqual(
+            uncertainty["normalized_entropy"],
+            expected_entropy / math.log(len(probabilities)),
+        )
+
+    def test_concentration_ignores_caller_summary_fields_and_recomputes_full_mass(self):
+        artifact = self._artifact()
+        artifact["top2_cumulative_probability"] = 0.99
+        artifact["other_scenarios_probability"] = 0.01
+        artifact["uncertainty"] = {
+            "policy": "caller-selected",
+            "level": "low",
+            "normalized_entropy": 0.01,
+        }
+
+        scenarios = self._build(artifact)["joint_scenarios"]
+
+        self.assertAlmostEqual(scenarios["top2_cumulative_probability"], 0.099)
+        self.assertAlmostEqual(scenarios["other_scenarios_probability"], 0.901)
+        self.assertEqual(
+            scenarios["uncertainty"]["policy"],
+            public_market_outlook.JOINT_UNCERTAINTY_POLICY,
+        )
+        self.assertEqual(scenarios["uncertainty"]["level"], "high")
+
+    def test_versioned_normalized_entropy_policy_has_deterministic_levels(self):
+        cases = (
+            ([0.99, 0.01], "low"),
+            ([0.70, 0.20, 0.10], "medium"),
+            ([0.25, 0.25, 0.25, 0.25], "high"),
+        )
+        for probabilities, expected_level in cases:
+            with self.subTest(probabilities=probabilities):
+                reconstructed = [
+                    {"probability": probability} for probability in probabilities
+                ]
+                summary = public_market_outlook._joint_concentration(reconstructed)
+                self.assertEqual(summary["uncertainty"]["level"], expected_level)
+                self.assertEqual(
+                    summary["uncertainty"]["schema_version"],
+                    public_market_outlook.JOINT_UNCERTAINTY_SCHEMA_VERSION,
+                )
+                self.assertAlmostEqual(
+                    summary["top2_cumulative_probability"],
+                    sum(probabilities[:2]),
+                )
+                self.assertAlmostEqual(
+                    summary["top2_cumulative_probability"]
+                    + summary["other_scenarios_probability"],
+                    1.0,
+                )
 
     def test_global_top_two_with_same_htft_are_both_preserved(self):
         artifact = self._artifact()
@@ -433,12 +504,8 @@ class PublicMarketOutlookTests(unittest.TestCase):
 
         self.assertEqual(result["markets"]["half_time"]["clarity"], "clear")
         self.assertEqual(result["markets"]["goal_ranges"]["clarity"], "divided")
-        self.assertEqual(
-            result["markets"]["goal_ranges"]["top1"]["code"], "2-3"
-        )
-        self.assertEqual(
-            result["markets"]["goal_ranges"]["top2"]["code"], "4-6"
-        )
+        self.assertEqual(result["markets"]["goal_ranges"]["top1"]["code"], "2-3")
+        self.assertEqual(result["markets"]["goal_ranges"]["top2"]["code"], "4-6")
         self.assertEqual(result["markets"]["btts"]["clarity"], "clear")
 
     def test_joint_scenarios_remain_high_variance_non_recommendations(self):

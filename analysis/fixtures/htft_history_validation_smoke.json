@@ -1,0 +1,98 @@
+{
+  "fixture_type": "htft-notebook-ci-smoke/1.0.0",
+  "evidence_eligible": false,
+  "purpose": "Minimal executable notebook structure fixture; never model or promotion evidence.",
+  "manifest": {
+    "bundle_hash": "ci-smoke:not-model-evidence",
+    "leagues": [
+      {
+        "league": "芬兰超级联赛",
+        "league_key": "finland_veikkausliiga",
+        "rows": 2,
+        "utc_date_start": "2026-01-01T00:00:00Z",
+        "utc_date_end": "2026-01-02T00:00:00Z",
+        "seasons": {"2026": 2},
+        "competition_regimes": {"2026": {"regular": 2}},
+        "format_versions": {"2026": {"league/ci-smoke": 2}},
+        "phase_groups": {"2026": {"regular": 2}},
+        "season_statuses": {"2026": {"partial_as_of_ci_smoke": 2}}
+      }
+    ]
+  },
+  "evaluation": {
+    "evaluation_hash": "ci-smoke:not-model-evidence",
+    "dataset": {"manifest_bundle_hash": "ci-smoke:not-model-evidence"},
+    "promotion": {"end_to_end_promotion_eligible": false},
+    "leagues": [
+      {
+        "league_key": "finland_veikkausliiga",
+        "splits": [
+          {
+            "split_id": "ci-smoke-2026",
+            "role": "ci_smoke_only",
+            "test_season": 2026,
+            "excluded_test_match_count": 0,
+            "model_only": {
+              "overall": {
+                "metrics": {
+                  "sample_count": 2,
+                  "nine_class_log_loss": 0.0,
+                  "nine_class_brier": 0.0,
+                  "top_one_accuracy": 0.0,
+                  "top_two_accuracy": 0.0
+                }
+              }
+            },
+            "league_empirical_frequency_baseline": {
+              "metrics": {
+                "sample_count": 2,
+                "nine_class_log_loss": 0.0,
+                "nine_class_brier": 0.0,
+                "top_one_accuracy": 0.0,
+                "top_two_accuracy": 0.0
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "all_splits": {
+        "model_only": {"overall": {"metrics": {"sample_count": 2}}}
+      }
+    }
+  },
+  "registry": {
+    "registry_hash": "ci-smoke:not-model-evidence",
+    "dataset_manifest_hash": "ci-smoke:not-model-evidence",
+    "evaluation_hash": "ci-smoke:not-model-evidence",
+    "leagues": [
+      {
+        "league_key": "finland_veikkausliiga",
+        "training_rows": 2,
+        "deployment_status": "shadow",
+        "formal_htft_eligible": false,
+        "model_hash": "ci-smoke:not-model-evidence",
+        "competition_regime_policy": {
+          "allowed_regimes": ["regular"],
+          "source_rows": 2,
+          "included_rows": 2,
+          "excluded_rows": 0
+        },
+        "league_pair_gate_evidence": {
+          "dataset_manifest_hash": "ci-smoke:not-model-evidence",
+          "evaluation_hash": "ci-smoke:not-model-evidence",
+          "model_hash": "ci-smoke:not-model-evidence",
+          "league_key": "finland_veikkausliiga",
+          "formal_htft_eligible": false,
+          "production_confidence_eligible": false,
+          "threshold": 0.0,
+          "eligible_sample_count": 0,
+          "covered_count": 0,
+          "hit_count": 0,
+          "regime_warning": "ci-smoke fixture; not evidence"
+        }
+      }
+    ]
+  }
+}

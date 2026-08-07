@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 import unittest
-
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "lineup_scheduler.py"
 SPEC = importlib.util.spec_from_file_location("soccer_lineup_scheduler", SCRIPT)
@@ -66,12 +66,23 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertEqual(task["source_kickoff"], "2026-07-22T18:30:00+08:00")
             self.assertEqual(task["kickoff"], "2026-07-22T19:30:00+09:00")
             self.assertEqual(task["scheduled_for"], "2026-07-22T19:00:00+09:00")
-            self.assertEqual(task["retry_plan"][0]["run_at_utc"], "2026-07-22T10:00:00+00:00")
+            self.assertEqual(
+                task["retry_plan"][0]["run_at_utc"], "2026-07-22T10:00:00+00:00"
+            )
             self.assertEqual(task["retry_plan"][0]["automation_timezone"], "UTC")
             self.assertEqual(
                 task["retry_plan"][0]["automation_rrule"],
                 "RRULE:FREQ=DAILY;BYHOUR=10;BYMINUTE=0;COUNT=1",
             )
+            schedule_spec = task["retry_plan"][0]["automation_schedule_spec"]
+            self.assertEqual(
+                schedule_spec["schema_version"],
+                lineup_scheduler.EXACT_SCHEDULE_SPEC_VERSION,
+            )
+            self.assertEqual(schedule_spec["dtstart_utc"], "2026-07-22T10:00:00+00:00")
+            self.assertEqual(schedule_spec["until_utc"], schedule_spec["dtstart_utc"])
+            self.assertEqual(schedule_spec["count"], 1)
+            self.assertTrue(schedule_spec["platform_next_run_must_equal_run_at_utc"])
             self.assertEqual(
                 [item["minutes_before_kickoff"] for item in task["retry_plan"]],
                 [30, 25, 20, 15, 10, 5, 2],
@@ -121,7 +132,8 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertEqual(first["registered"], ["41"])
             self.assertEqual(first["skipped_rechecked"], ["42"])
             self.assertEqual(
-                first["skipped_invalid"], [{"match_id": "43", "reason": "kickoff_reached"}]
+                first["skipped_invalid"],
+                [{"match_id": "43", "reason": "kickoff_reached"}],
             )
             second = lineup_scheduler.cmd_sync_pending(args)
             self.assertEqual(second["registered"], [])
@@ -137,7 +149,9 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertEqual(task["source_kickoff"], "2026-07-24T06:30:00+08:00")
             self.assertEqual(task["kickoff"], "2026-07-24T07:30:00+09:00")
             self.assertEqual(task["scheduled_for"], "2026-07-24T07:00:00+09:00")
-            self.assertEqual(task["retry_plan"][0]["run_at_utc"], "2026-07-23T22:00:00+00:00")
+            self.assertEqual(
+                task["retry_plan"][0]["run_at_utc"], "2026-07-23T22:00:00+00:00"
+            )
             self.assertEqual(
                 task["retry_plan"][0]["automation_rrule"],
                 "RRULE:FREQ=DAILY;BYHOUR=22;BYMINUTE=0;COUNT=1",
@@ -151,7 +165,9 @@ class LineupSchedulerTests(unittest.TestCase):
             wrong.home_team = "Home"
             wrong.away_team = "Away"
             first = lineup_scheduler.cmd_register(wrong)
-            self.assertEqual(first["task"]["source_kickoff"], "2026-07-24T07:30:00+09:00")
+            self.assertEqual(
+                first["task"]["source_kickoff"], "2026-07-24T07:30:00+09:00"
+            )
 
             corrected = register_args(base)
             corrected.kickoff = "2026-07-24T07:30:00+09:00"
@@ -160,27 +176,40 @@ class LineupSchedulerTests(unittest.TestCase):
             result = lineup_scheduler.cmd_register(corrected)
             self.assertFalse(result["duplicate_ignored"])
             self.assertEqual(result["task"]["source_timezone"], "Asia/Shanghai")
-            self.assertEqual(result["task"]["source_kickoff"], "2026-07-24T06:30:00+08:00")
+            self.assertEqual(
+                result["task"]["source_kickoff"], "2026-07-24T06:30:00+08:00"
+            )
 
     def test_automation_plan_uses_utc_and_excludes_missed_attempts(self):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             lineup_scheduler.cmd_register(register_args(base))
             before = lineup_scheduler.cmd_automation_plan(
-                SimpleNamespace(base_dir=base, match_id="42", now="2026-07-22T18:50:00+09:00")
+                SimpleNamespace(
+                    base_dir=base, match_id="42", now="2026-07-22T18:50:00+09:00"
+                )
             )
             self.assertFalse(before["catch_up_required"])
             self.assertEqual(len(before["future_attempts"]), 7)
             self.assertEqual(before["rrule_timezone"], "UTC")
-            self.assertEqual(before["future_attempts"][0]["run_at"], "2026-07-22T19:00:00+09:00")
-            self.assertEqual(before["future_attempts"][0]["run_at_utc"], "2026-07-22T10:00:00+00:00")
+            self.assertEqual(
+                before["future_attempts"][0]["run_at"], "2026-07-22T19:00:00+09:00"
+            )
+            self.assertEqual(
+                before["future_attempts"][0]["run_at_utc"], "2026-07-22T10:00:00+00:00"
+            )
 
             catch_up = lineup_scheduler.cmd_automation_plan(
-                SimpleNamespace(base_dir=base, match_id="42", now="2026-07-22T19:12:00+09:00")
+                SimpleNamespace(
+                    base_dir=base, match_id="42", now="2026-07-22T19:12:00+09:00"
+                )
             )
             self.assertTrue(catch_up["catch_up_required"])
             self.assertEqual(
-                [item["minutes_before_kickoff"] for item in catch_up["future_attempts"]],
+                [
+                    item["minutes_before_kickoff"]
+                    for item in catch_up["future_attempts"]
+                ],
                 [15, 10, 5, 2],
             )
 
@@ -198,6 +227,18 @@ class LineupSchedulerTests(unittest.TestCase):
                 first["automation_rrule"],
                 "RRULE:FREQ=DAILY;BYHOUR=14;BYMINUTE=50;COUNT=1",
             )
+            self.assertEqual(
+                first["automation_schedule_spec"]["run_at_utc"],
+                "2026-07-22T14:50:00+00:00",
+            )
+
+    def test_exact_schedule_spec_preserves_previous_utc_month_date(self):
+        spec = lineup_scheduler.exact_utc_schedule_spec(
+            datetime.fromisoformat("2026-03-01T00:15:00+09:00")
+        )
+        self.assertEqual(spec["run_at_utc"], "2026-02-28T15:15:00+00:00")
+        self.assertEqual(spec["dtstart_utc"], spec["until_utc"])
+        self.assertEqual(spec["count"], 1)
 
     def test_duplicate_registration_backfills_old_retry_plan(self):
         with tempfile.TemporaryDirectory() as base:
@@ -241,12 +282,37 @@ class LineupSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     **common,
                     automation_rrule="RRULE:FREQ=DAILY;BYHOUR=10;BYMINUTE=0;COUNT=1",
+                    platform_next_run="2026-07-22T19:00:00+09:00",
                 )
             )
             ref = attached["task"]["automation_refs"][0]
             self.assertTrue(ref["schedule_verified"])
+            self.assertTrue(ref["platform_next_run_verified"])
+            self.assertEqual(ref["platform_next_run_utc"], "2026-07-22T10:00:00+00:00")
             self.assertEqual(ref["run_at"], "2026-07-22T19:00:00+09:00")
             self.assertEqual(ref["run_at_utc"], "2026-07-22T10:00:00+00:00")
+            self.assertEqual(
+                ref["automation_schedule_spec"]["run_at_utc"], ref["run_at_utc"]
+            )
+
+    def test_attach_rejects_platform_next_run_that_slips_to_next_day(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            task = lineup_scheduler.cmd_register(register_args(base))["task"]
+            with self.assertRaisesRegex(
+                ValueError, "does not exactly match run_at_utc"
+            ):
+                lineup_scheduler.cmd_attach_automation(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        automation_id="auto-main",
+                        automation_name="Soccer Predict lineup 42",
+                        attempt_label="T-30",
+                        automation_rrule=task["retry_plan"][0]["automation_rrule"],
+                        platform_next_run="2026-07-23T10:00:00+00:00",
+                    )
+                )
 
     def test_claim_enforces_t30_lease_release_and_catch_up(self):
         with tempfile.TemporaryDirectory() as base:
@@ -370,7 +436,9 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertEqual([item["match_id"] for item in due["due"]], ["42"])
             self.assertTrue(due["due"][0]["catch_up"])
             expired = lineup_scheduler.cmd_status(
-                SimpleNamespace(base_dir=base, match_id="42", now="2026-07-22T19:30:00+09:00")
+                SimpleNamespace(
+                    base_dir=base, match_id="42", now="2026-07-22T19:30:00+09:00"
+                )
             )
             self.assertEqual(expired["task"]["status"], "expired")
 
@@ -447,7 +515,9 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertEqual(delivery_due["due"][0]["next_action"], "verify_delivery")
             self.assertTrue(delivery_due["due"][0]["delivery_pending"])
 
-            with self.assertRaisesRegex(ValueError, "before the lineup result is marked delivered"):
+            with self.assertRaisesRegex(
+                ValueError, "before the lineup result is marked delivered"
+            ):
                 lineup_scheduler.cmd_mark_cleaned(
                     SimpleNamespace(
                         base_dir=base,
@@ -488,7 +558,9 @@ class LineupSchedulerTests(unittest.TestCase):
             self.assertFalse(cleanup_due["due"][0]["delivery_pending"])
             self.assertTrue(cleanup_due["due"][0]["cleanup_pending"])
 
-            with self.assertRaisesRegex(ValueError, "still require cleanup: auto-retry"):
+            with self.assertRaisesRegex(
+                ValueError, "still require cleanup: auto-retry"
+            ):
                 lineup_scheduler.cmd_mark_cleaned(
                     SimpleNamespace(
                         base_dir=base,
@@ -583,7 +655,9 @@ class LineupSchedulerTests(unittest.TestCase):
                     )
                 )
 
-    def test_cleanup_recovery_waits_for_metadata_grace_but_complete_tuple_is_immediate(self):
+    def test_cleanup_recovery_waits_for_metadata_grace_but_complete_tuple_is_immediate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             lineup_scheduler.cmd_register(register_args(base))
@@ -713,7 +787,9 @@ class LineupSchedulerTests(unittest.TestCase):
                     )
                 )
 
-    def test_attach_automation_is_idempotent_while_active_and_rejected_after_final(self):
+    def test_attach_automation_is_idempotent_while_active_and_rejected_after_final(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             lineup_scheduler.cmd_register(register_args(base))
@@ -842,9 +918,7 @@ class LineupSchedulerTests(unittest.TestCase):
             )
             delivery = legacy_cleaned["task"]["result_delivery"]
             self.assertEqual(delivery["delivery_status"], "delivered")
-            self.assertEqual(
-                delivery["delivered_at"], "2026-07-22T10:05:00+00:00"
-            )
+            self.assertEqual(delivery["delivered_at"], "2026-07-22T10:05:00+00:00")
             self.assertTrue(delivery["legacy_inferred"])
 
 

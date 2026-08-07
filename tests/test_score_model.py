@@ -5,12 +5,11 @@ import csv
 import importlib.util
 import json
 import math
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "score_model.py"
 SPEC = importlib.util.spec_from_file_location("soccer_score_model", SCRIPT)
@@ -103,6 +102,192 @@ class ScoreModelTests(unittest.TestCase):
         )
         self.assertEqual(prediction_one, prediction_two)
 
+    def test_joint_optimizer_reports_reproducible_convergence_diagnostics(self):
+        model = self._fit()
+        fit = model["fit"]
+        self.assertEqual(fit["optimizer"], "deterministic_projected_joint_adam")
+        self.assertEqual(fit["optimizer_version"], score_model.JOINT_OPTIMIZER_VERSION)
+        self.assertIsInstance(fit["converged"], bool)
+        self.assertGreaterEqual(fit["iterations"], 1)
+        self.assertLessEqual(fit["iterations"], model["config"]["iterations"])
+        self.assertLessEqual(fit["final_objective"], fit["initial_objective"] + 1e-12)
+        self.assertGreaterEqual(fit["gradient_norm"], 0.0)
+        self.assertEqual(
+            fit["converged"],
+            fit["gradient_norm"] <= fit["convergence"]["projected_gradient_tolerance"],
+        )
+        self.assertEqual(
+            fit["cross_check"]["method"],
+            "conditional_rho_gradient_bisection",
+        )
+        full_cross_check = fit["cross_check"]["full_parameter"]
+        self.assertEqual(
+            full_cross_check["method"],
+            "full_parameter_projected_gradient_armijo",
+        )
+        self.assertEqual(
+            full_cross_check["initialization"],
+            "shared_deterministic_baseline",
+        )
+        self.assertLessEqual(
+            full_cross_check["objective"],
+            full_cross_check["initial_objective"],
+        )
+        self.assertGreaterEqual(full_cross_check["iterations"], 1)
+        self.assertGreaterEqual(full_cross_check["backtracking_evaluations"], 1)
+        self.assertGreaterEqual(full_cross_check["gradient_norm"], 0.0)
+        self.assertGreaterEqual(
+            full_cross_check["maximum_absolute_parameter_delta"], 0.0
+        )
+        self.assertGreaterEqual(full_cross_check["l2_parameter_delta"], 0.0)
+        self.assertGreater(
+            full_cross_check["adoption_minimum_objective_improvement"], 0.0
+        )
+        self.assertIs(full_cross_check["adoption_requires_convergence"], True)
+        self.assertEqual(
+            full_cross_check["converged"],
+            full_cross_check["gradient_norm"]
+            <= fit["convergence"]["projected_gradient_tolerance"],
+        )
+        if full_cross_check["adopted"]:
+            self.assertEqual(
+                fit["cross_check"]["selected_solver"],
+                "full_parameter_projected_gradient_armijo",
+            )
+            self.assertAlmostEqual(
+                fit["final_objective"], full_cross_check["objective"]
+            )
+        else:
+            self.assertTrue(
+                not full_cross_check["converged"]
+                or full_cross_check["objective"]
+                >= fit["cross_check"]["primary_objective"]
+                - full_cross_check["adoption_minimum_objective_improvement"]
+            )
+        self.assertEqual(
+            fit["cross_check"]["legacy_grid"]["step"],
+            model["config"]["rho_grid"]["step"],
+        )
+        self.assertTrue(
+            math.isfinite(
+                fit["cross_check"]["legacy_grid"]["objective_minus_bisection"]
+            )
+        )
+
+        parameters = model["parameters"]
+        for home in parameters["attack"]:
+            for away in parameters["attack"]:
+                if home == away:
+                    continue
+                home_rate, away_rate, _ = score_model.expected_rates(model, home, away)
+                for home_goals, away_goals in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                    self.assertGreater(
+                        score_model._dc_tau(
+                            home_goals,
+                            away_goals,
+                            home_rate,
+                            away_rate,
+                            parameters["rho"],
+                        ),
+                        0.0,
+                    )
+
+        # Frozen pre-upgrade artifacts did not contain optimizer diagnostics.
+        legacy = copy.deepcopy(model)
+        legacy["fit"] = {
+            "objective": "weighted_negative_log_likelihood",
+            "poisson_nll": fit["poisson_nll"],
+            "dixon_coles_nll": fit["dixon_coles_nll"],
+            "optimizer": "deterministic_adam_then_rho_grid",
+        }
+        legacy["model_hash"] = score_model.calculate_model_hash(legacy)
+        score_model.validate_model(legacy)
+
+        tampered = copy.deepcopy(model)
+        tampered["fit"]["gradient_norm"] = -1.0
+        tampered["model_hash"] = score_model.calculate_model_hash(tampered)
+        with self.assertRaisesRegex(score_model.ScoreModelError, "gradient_norm"):
+            score_model.validate_model(tampered)
+
+        tampered = copy.deepcopy(model)
+        tampered["fit"]["converged"] = not tampered["fit"]["converged"]
+        tampered["model_hash"] = score_model.calculate_model_hash(tampered)
+        with self.assertRaisesRegex(score_model.ScoreModelError, "converged conflicts"):
+            score_model.validate_model(tampered)
+
+        tampered = copy.deepcopy(model)
+        tampered["fit"]["cross_check"]["legacy_grid"]["objective_minus_bisection"] += (
+            0.1
+        )
+        tampered["model_hash"] = score_model.calculate_model_hash(tampered)
+        with self.assertRaisesRegex(score_model.ScoreModelError, "legacy_grid"):
+            score_model.validate_model(tampered)
+
+        tampered = copy.deepcopy(model)
+        tampered["fit"]["cross_check"]["full_parameter"][
+            "objective_delta_vs_primary"
+        ] += 0.1
+        tampered["model_hash"] = score_model.calculate_model_hash(tampered)
+        with self.assertRaisesRegex(score_model.ScoreModelError, "full-parameter"):
+            score_model.validate_model(tampered)
+
+    def test_joint_dixon_coles_analytic_gradient_matches_finite_difference(self):
+        records = score_model.load_training_csv(self.csv_path)
+        teams = sorted(
+            {row["home_team"] for row in records}
+            | {row["away_team"] for row in records}
+        )
+        values = [0.1, 0.08] + [0.01 * (index - 3) for index in range(8)]
+        weights = [1.0 - index * 0.02 for index in range(len(records))]
+        rho = -0.04
+        regularization = 0.03
+        _, gradient, rho_gradient = score_model._dc_nll_and_gradient(
+            records, weights, teams, values, rho, regularization
+        )
+        epsilon = 1e-6
+        for index in range(len(values)):
+            lower = list(values)
+            upper = list(values)
+            lower[index] -= epsilon
+            upper[index] += epsilon
+            lower_loss = score_model._dc_nll_and_gradient(
+                records, weights, teams, lower, rho, regularization
+            )[0]
+            upper_loss = score_model._dc_nll_and_gradient(
+                records, weights, teams, upper, rho, regularization
+            )[0]
+            numeric = (upper_loss - lower_loss) / (2.0 * epsilon)
+            self.assertAlmostEqual(gradient[index], numeric, places=6)
+        lower_loss = score_model._dc_nll_and_gradient(
+            records, weights, teams, values, rho - epsilon, regularization
+        )[0]
+        upper_loss = score_model._dc_nll_and_gradient(
+            records, weights, teams, values, rho + epsilon, regularization
+        )[0]
+        numeric_rho = (upper_loss - lower_loss) / (2.0 * epsilon)
+        self.assertAlmostEqual(rho_gradient, numeric_rho, places=6)
+
+    def test_unfinished_full_parameter_cross_check_cannot_replace_primary(self):
+        model = score_model.fit_model(
+            self.csv_path,
+            iterations=1,
+            learning_rate=0.025,
+            regularization=0.03,
+            half_life_days=180.0,
+        )
+        fit = model["fit"]
+        full_cross_check = fit["cross_check"]["full_parameter"]
+        self.assertFalse(full_cross_check["converged"])
+        self.assertFalse(full_cross_check["adopted"])
+        self.assertNotEqual(
+            fit["cross_check"]["selected_solver"],
+            "full_parameter_projected_gradient_armijo",
+        )
+        self.assertEqual(
+            fit["converged"],
+            fit["gradient_norm"] <= fit["convergence"]["projected_gradient_tolerance"],
+        )
+
     def test_prediction_matrix_is_normalized_and_all_markets_are_consistent(self):
         prediction = score_model.predict_model(
             self._fit(),
@@ -160,9 +345,7 @@ class ScoreModelTests(unittest.TestCase):
         )
         self.assertEqual(prediction["fixture"]["kickoff"], "2099-01-02T00:00:00Z")
         self.assertEqual(prediction["generated_at"], "2099-01-01T23:00:00Z")
-        self.assertEqual(
-            prediction["provenance"]["training_cutoff_date"], "2025-03-22"
-        )
+        self.assertEqual(prediction["provenance"]["training_cutoff_date"], "2025-03-22")
         self.assertEqual(
             prediction["provenance"]["model_schema_version"],
             model["schema_version"],
@@ -204,9 +387,7 @@ class ScoreModelTests(unittest.TestCase):
 
         future_generated_model = copy.deepcopy(model)
         future_generated_model["generated_at"] = "2099-01-01T00:00:00Z"
-        with self.assertRaisesRegex(
-            score_model.ScoreModelError, "model.generated_at"
-        ):
+        with self.assertRaisesRegex(score_model.ScoreModelError, "model.generated_at"):
             score_model.predict_model(
                 future_generated_model,
                 "Alpha",
@@ -347,7 +528,9 @@ class ScoreModelTests(unittest.TestCase):
 
     def test_integer_and_half_lines_have_only_reachable_states(self):
         matrix, _ = score_model.build_score_matrix(1.4, 1.2, 0.0)
-        integer_total = score_model.aggregate_total(matrix, "over", 2.0)["probabilities"]
+        integer_total = score_model.aggregate_total(matrix, "over", 2.0)[
+            "probabilities"
+        ]
         self.assertGreater(integer_total["push"], 0.0)
         self.assertEqual(integer_total["half_win"], 0.0)
         self.assertEqual(integer_total["half_loss"], 0.0)
@@ -377,9 +560,7 @@ class ScoreModelTests(unittest.TestCase):
             unknown_team_policy="league_average",
         )
         self.assertTrue(prediction["warnings"])
-        self.assertEqual(
-            prediction["fixture"]["unknown_team_policy"], "league_average"
-        )
+        self.assertEqual(prediction["fixture"]["unknown_team_policy"], "league_average")
 
     def test_rejects_nonfinite_negative_and_tampered_inputs(self):
         with self.assertRaises(score_model.ScoreModelError):
@@ -515,14 +696,10 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual(len(first["predictions"]), 6)
 
         for prediction in first["predictions"]:
-            self.assertLess(
-                prediction["training_cutoff_date"], prediction["date"]
-            )
+            self.assertLess(prediction["training_cutoff_date"], prediction["date"])
             self.assertTrue(prediction["model_hash"].startswith("sha256:"))
             self.assertTrue(
-                prediction["prediction"]["score_matrix_hash"].startswith(
-                    "sha256:"
-                )
+                prediction["prediction"]["score_matrix_hash"].startswith("sha256:")
             )
         for name, value in first["metrics"].items():
             if name not in {"sample_count", "definitions"}:
@@ -549,9 +726,7 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual(first_block["test_start_date"], "2025-02-15")
         self.assertEqual(first_block["test_end_date"], "2025-02-15")
         self.assertEqual(first_block["test_match_count"], 2)
-        first_block_rows = [
-            row for row in artifact["predictions"] if row["block"] == 1
-        ]
+        first_block_rows = [row for row in artifact["predictions"] if row["block"] == 1]
         self.assertEqual(len(first_block_rows), 2)
         self.assertEqual({row["date"] for row in first_block_rows}, {"2025-02-15"})
 

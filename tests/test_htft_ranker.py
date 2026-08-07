@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "htft_ranker.py"
 SPEC = importlib.util.spec_from_file_location("soccer_htft_ranker", SCRIPT)
@@ -166,10 +165,7 @@ class HtftRankerTests(unittest.TestCase):
             ["H", "D"],
         )
         self.assertTrue(
-            all(
-                item["coherence_status"] == "on_thesis"
-                for item in result["scenarios"]
-            )
+            all(item["coherence_status"] == "on_thesis" for item in result["scenarios"])
         )
 
     def test_exact_score_results_are_audit_only(self):
@@ -208,10 +204,7 @@ class HtftRankerTests(unittest.TestCase):
         )
         self.assertTrue(result["coherence_policy"]["exact_score_audit_only"])
         self.assertEqual(
-            [
-                item["exact_score_result_aligned"]
-                for item in result["scenarios"]
-            ],
+            [item["exact_score_result_aligned"] for item in result["scenarios"]],
             [True, False],
         )
 
@@ -299,10 +292,7 @@ class HtftRankerTests(unittest.TestCase):
         self.assertFalse(result["scenarios"][0]["state_continuity"])
         self.assertTrue(result["coherence_policy"]["exact_score_audit_only"])
         self.assertTrue(
-            all(
-                item["exact_score_result_aligned"]
-                for item in result["scenarios"]
-            )
+            all(item["exact_score_result_aligned"] for item in result["scenarios"])
         )
 
     def test_exact_score_result_audit_requires_exactly_two_valid_results(self):
@@ -386,7 +376,9 @@ class HtftRankerTests(unittest.TestCase):
         market["HH"] -= 0.04
         market["DD"] -= 0.04
         market["AA"] += 0.08
-        odds = {selection: 1.0 / probability for selection, probability in market.items()}
+        odds = {
+            selection: 1.0 / probability for selection, probability in market.items()
+        }
 
         model_only = ranker.rank_htft(
             matrix,
@@ -460,9 +452,7 @@ class HtftRankerTests(unittest.TestCase):
                 "captured_at": "2026-08-02T12:00:00Z",
             },
         )
-        self.assertEqual(
-            anchored["matrix_mode"], "half_time_market_anchor_unvalidated"
-        )
+        self.assertEqual(anchored["matrix_mode"], "half_time_market_anchor_unvalidated")
         self.assertIsNone(anchored["pair_mass_threshold"])
         self.assertFalse(anchored["pair_mass_gate_passed"])
         self.assertEqual(anchored["confidence_status"], "anchor_gate_unvalidated")
@@ -553,7 +543,9 @@ class HtftRankerTests(unittest.TestCase):
             "historical_component_signal_live_forward_unconfirmed",
         )
         self.assertTrue(spain["league_gate_evidence"]["historical_component_signal"])
-        self.assertFalse(spain["league_gate_evidence"]["production_confidence_eligible"])
+        self.assertFalse(
+            spain["league_gate_evidence"]["production_confidence_eligible"]
+        )
         self.assertFalse(spain["pair_mass_gate_passed"])
         self.assertEqual(korea["formal_count"], 0)
 
@@ -641,8 +633,12 @@ class HtftRankerTests(unittest.TestCase):
             [item["selection"] for item in result["scenarios"]],
             ["HH", "DH"],
         )
-        self.assertTrue(all(item["status"] == "observation" for item in result["scenarios"]))
-        self.assertTrue(all(not item["pair_mass_gate_passed"] for item in result["scenarios"]))
+        self.assertTrue(
+            all(item["status"] == "observation" for item in result["scenarios"])
+        )
+        self.assertTrue(
+            all(not item["pair_mass_gate_passed"] for item in result["scenarios"])
+        )
         self.assertGreaterEqual(result["scenarios"][0]["ev"], 0.08)
         self.assertGreaterEqual(result["scenarios"][0]["edge_pp"], 4.0)
         self.assertIn(
@@ -670,7 +666,9 @@ class HtftRankerTests(unittest.TestCase):
             ["HH", "DH"],
         )
         self.assertFalse(result["pair_mass_gate_passed"])
-        self.assertTrue(all(item["status"] == "observation" for item in result["scenarios"]))
+        self.assertTrue(
+            all(item["status"] == "observation" for item in result["scenarios"])
+        )
         self.assertTrue(
             all(
                 "complete current 9-way HT/FT odds unavailable"
@@ -703,7 +701,10 @@ class HtftRankerTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                any("is not positive" in failure for failure in item["failed_thresholds"])
+                any(
+                    "is not positive" in failure
+                    for failure in item["failed_thresholds"]
+                )
                 for item in result["scenarios"]
             )
         )
@@ -728,8 +729,10 @@ class HtftRankerTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                any("edge" in failure and "not positive" in failure
-                    for failure in item["failed_thresholds"])
+                any(
+                    "edge" in failure and "not positive" in failure
+                    for failure in item["failed_thresholds"]
+                )
                 for item in result["scenarios"]
             )
         )

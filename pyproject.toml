@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soccer-predict"
-version = "3.3.0"
+version = "3.4.0"
 description = "Football match analysis skill with guarded recommendations and verified reviews"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "BoDUD" }]
-dependencies = []
+dependencies = [
+  "tzdata>=2024.1; platform_system == 'Windows'",
+]
 keywords = ["football", "soccer", "prediction", "odds", "codex-skill"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -17,9 +19,62 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 
+[project.optional-dependencies]
+render = ["Pillow>=10,<13"]
+notebook = [
+  "ipykernel>=6,<8",
+  "nbconvert>=7,<8",
+  "pandas>=2,<4",
+]
+dev = [
+  "mypy>=1.11,<2",
+  "pytest>=8,<10",
+  "pytest-cov>=5,<8",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+soccer-predict = "soccer_predict.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/BoDUD/Football-predictions"
 Issues = "https://github.com/BoDUD/Football-predictions/issues"
 
-[tool.setuptools]
-packages = []
+[tool.setuptools.packages.find]
+include = ["soccer_predict*"]
+
+[tool.setuptools.package-data]
+soccer_predict = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+markers = [
+  "unit: isolated deterministic behavior",
+  "property: invariant or generated-case checks",
+  "schema_contract: executable artifact/schema compatibility",
+  "documentation_contract: documentation-only contract checks",
+  "integration_replay: offline adapter or artifact replay",
+  "live_canary: opt-in network canary (never part of default CI)",
+  "e2e: installed command or multi-component workflow",
+  "uncategorized: collected test awaiting explicit taxonomy",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/plain_text_formatter.py" = ["E402"]
+"scripts/prediction_card_renderer.py" = ["E402"]
+"scripts/review_card_renderer.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = [
+  "soccer_predict",
+]

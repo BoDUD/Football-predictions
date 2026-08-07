@@ -2,12 +2,11 @@ import argparse
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "soccer_watchdog.py"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -174,9 +173,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout([lineup], [review])
         self.addCleanup(temp.cleanup)
 
-        report, returncode = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        report, returncode = self.run_watchdog(self.args(workspace, skill_dir))
 
         self.assertEqual(returncode, 0)
         self.assertTrue(report["ok"])
@@ -194,9 +191,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             (workspace / soccer_watchdog.OUTBOX_RELATIVE).glob("*.json")
         )
         self.assertEqual(len(event_files), 2)
-        events = [
-            json.loads(path.read_text(encoding="utf-8")) for path in event_files
-        ]
+        events = [json.loads(path.read_text(encoding="utf-8")) for path in event_files]
         self.assertEqual(
             {event["scheduler"]: event["due"] for event in events},
             {"lineup": lineup, "review": review},
@@ -216,12 +211,8 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout([item], [])
         self.addCleanup(temp.cleanup)
 
-        first, first_code = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
-        second, second_code = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        first, first_code = self.run_watchdog(self.args(workspace, skill_dir))
+        second, second_code = self.run_watchdog(self.args(workspace, skill_dir))
 
         self.assertEqual((first_code, second_code), (0, 0))
         self.assertEqual(first["new_event_count"], 1)
@@ -248,9 +239,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         temp, workspace, skill_dir = self.make_layout(lineup_cleanup=[waiting])
         self.addCleanup(temp.cleanup)
 
-        first, first_code = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        first, first_code = self.run_watchdog(self.args(workspace, skill_dir))
         self.assertEqual(first_code, 0)
         event_path = Path(first["queued"][0]["event_path"])
         original = json.loads(event_path.read_text(encoding="utf-8"))
@@ -279,9 +268,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.assertEqual(refreshed["detected_at"], "2026-07-24T00:05:00+00:00")
         self.assertEqual(refreshed["delivery_state"], "pending")
         self.assertEqual(refreshed["event_id"], original["event_id"])
-        self.assertEqual(
-            refreshed["dispatcher_note"], "preserve this audit field"
-        )
+        self.assertEqual(refreshed["dispatcher_note"], "preserve this audit field")
 
     def test_missing_review_scheduler_does_not_discard_lineup_due(self):
         item = {
@@ -292,9 +279,7 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         (skill_dir / "scripts" / "review_scheduler.py").unlink()
 
-        report, returncode = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        report, returncode = self.run_watchdog(self.args(workspace, skill_dir))
 
         self.assertEqual(returncode, 2)
         self.assertFalse(report["ok"])
@@ -334,7 +319,9 @@ class SoccerWatchdogTests(unittest.TestCase):
     def test_no_codex_cli_or_ui_is_invoked_in_default_outbox_mode(self):
         with (
             mock.patch.object(soccer_watchdog.os, "name", "nt"),
-            mock.patch.object(soccer_watchdog, "codex_process_running", return_value=False),
+            mock.patch.object(
+                soccer_watchdog, "codex_process_running", return_value=False
+            ),
             mock.patch.object(
                 soccer_watchdog,
                 "discover_codex_package",
@@ -367,7 +354,9 @@ class SoccerWatchdogTests(unittest.TestCase):
         }
         with (
             mock.patch.object(soccer_watchdog.os, "name", "nt"),
-            mock.patch.object(soccer_watchdog, "codex_process_running", return_value=False),
+            mock.patch.object(
+                soccer_watchdog, "codex_process_running", return_value=False
+            ),
             mock.patch.object(
                 soccer_watchdog,
                 "discover_codex_package",
@@ -418,14 +407,10 @@ class SoccerWatchdogTests(unittest.TestCase):
             "next_action": "verify_delivery",
             "delivery_status": "pending",
         }
-        temp, workspace, skill_dir = self.make_layout(
-            lineup_cleanup=[cleanup]
-        )
+        temp, workspace, skill_dir = self.make_layout(lineup_cleanup=[cleanup])
         self.addCleanup(temp.cleanup)
 
-        report, returncode = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        report, returncode = self.run_watchdog(self.args(workspace, skill_dir))
         self.assertEqual(returncode, 0)
         self.assertEqual(report["due_count"], 1)
         events = soccer_watchdog.list_pending_events(workspace)
@@ -456,13 +441,9 @@ class SoccerWatchdogTests(unittest.TestCase):
             "next_action": "await_complete_metadata",
             "delivery_status": "pending",
         }
-        temp, workspace, skill_dir = self.make_layout(
-            lineup_cleanup=[cleanup]
-        )
+        temp, workspace, skill_dir = self.make_layout(lineup_cleanup=[cleanup])
         self.addCleanup(temp.cleanup)
-        first, first_code = self.run_watchdog(
-            self.args(workspace, skill_dir)
-        )
+        first, first_code = self.run_watchdog(self.args(workspace, skill_dir))
         self.assertEqual(first_code, 0)
         event = soccer_watchdog.list_pending_events(workspace)[0]
         soccer_watchdog.acknowledge_event(
@@ -507,9 +488,7 @@ class SoccerWatchdogTests(unittest.TestCase):
             "next_action": "verify_delivery",
             "result_artifact": "result-42.json",
         }
-        temp, workspace, skill_dir = self.make_layout(
-            lineup_cleanup=[waiting]
-        )
+        temp, workspace, skill_dir = self.make_layout(lineup_cleanup=[waiting])
         self.addCleanup(temp.cleanup)
         self.run_watchdog(self.args(workspace, skill_dir))
         event = soccer_watchdog.list_pending_events(workspace)[0]
@@ -542,9 +521,9 @@ class SoccerWatchdogTests(unittest.TestCase):
         self.assertEqual(pending[0]["event_id"], event["event_id"])
 
     def test_windows_installer_is_explicit_opt_in_and_recoverably_disableable(self):
-        installer = (
-            REPO_ROOT / "scripts" / "install_windows_watchdog.ps1"
-        ).read_text(encoding="utf-8")
+        installer = (REPO_ROOT / "scripts" / "install_windows_watchdog.ps1").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("[switch] $AllowRecurring", installer)
         self.assertIn(
@@ -572,9 +551,9 @@ class SoccerWatchdogTests(unittest.TestCase):
 
     def test_skill_defaults_to_exact_one_time_automations(self):
         skill = (REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        runtime = (
-            REPO_ROOT / "references" / "watchdog-runtime.md"
-        ).read_text(encoding="utf-8")
+        runtime = (REPO_ROOT / "references" / "watchdog-runtime.md").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             "Exact per-match, one-time Codex automations are the default executor",

@@ -16,36 +16,86 @@ for source integrity but are quarantined from training outputs.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import csv
-from datetime import date, datetime, timedelta, timezone, tzinfo
 import hashlib
 import json
 import math
-from pathlib import Path, PurePosixPath
 import re
 import sys
 import tempfile
-from typing import Any, Iterable, Mapping, Sequence
 import unicodedata
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Mapping, Sequence
 from xml.etree import ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-
 DATASET_ARTIFACT_TYPE = "soccer_history_dataset_bundle"
-DATASET_SCHEMA_VERSION = "1.2.0"
-IMPORTER_VERSION = "league-workbook-importer/1.5.0"
+DATASET_SCHEMA_VERSION = "1.4.0"
+IMPORTER_VERSION = "league-workbook-importer/1.7.0"
 
 REGULAR_COMPETITION_REGIME = "regular"
 JAPAN_J1_VISION_REGIME = "2026_vision_regional"
+NORWAY_RELEGATION_PLAYOFF_REGIME = "relegation_playoff"
 # The official opening may be presented as 7 February in other timezones, but
 # the supplied source has three finished fixtures dated 6 February in its
 # explicitly declared source timezone.  These bounds deliberately preserve the
 # complete regional and placement tournament in the audited 2026 snapshot.
 JAPAN_J1_VISION_SOURCE_DATE_START = date(2026, 2, 6)
 JAPAN_J1_VISION_SOURCE_DATE_END = date(2026, 6, 6)
+ADMINISTRATIVE_RESULT_EXCLUSIONS: dict[str, dict[str, dict[str, str]]] = {
+    "uefa_nations_league": {
+        # Neither fixture was played. UEFA awarded each match 3-0, so treating
+        # the displayed result as observed goals would corrupt every score and
+        # HT/FT target derived from it.
+        "1858422": {
+            "reason": "Romania-Norway was not played; UEFA awarded a 3-0 result",
+            "source": (
+                "https://editorial.uefa.com/resources/0264-11087084fb9c-"
+                "cf80ec57c11c-1000/2020.12.03_website_publication_ab_34054_b_final.pdf"
+            ),
+        },
+        "1858413": {
+            "reason": "Switzerland-Ukraine was not played; UEFA awarded a 3-0 result",
+            "source": (
+                "https://www.uefa.com/news-media/news/0263-10f07669c421-"
+                "a1b7e2cc6859-1000--ab-switzerland-v-ukraine/"
+            ),
+        },
+    }
+}
+MATCH_ID_REQUIRED_LEAGUES = frozenset(ADMINISTRATIVE_RESULT_EXCLUSIONS)
+ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION = "administrative-result-exclusion/1.0.0"
+
+
+def _administrative_result_exclusion_policy() -> dict[str, Any]:
+    return {
+        "version": ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION,
+        "match_id_source_column": "Titan比赛ID",
+        "required_leagues": sorted(MATCH_ID_REQUIRED_LEAGUES),
+        "excluded_matches": {
+            league_key: {
+                match_id: dict(evidence)
+                for match_id, evidence in sorted(exclusions.items())
+            }
+            for league_key, exclusions in sorted(
+                ADMINISTRATIVE_RESULT_EXCLUSIONS.items()
+            )
+        },
+        "rule": "administrative or awarded unplayed results cannot enter training",
+    }
+
+
 SEASON_COMPLETENESS_POLICY_VERSION = "known-schedule-match-counts-v1"
+NATIONS_LEAGUE_EDITION_END_YEARS = {
+    # Every completed edition in the frozen 2020-2026 source scope has a league
+    # phase in year N, finals in N+1 and lower-league play-outs in N+2.
+    2020: 2022,
+    2022: 2024,
+    2024: 2026,
+}
 # Expected finished-match totals for the source competition scope.  Stable
 # round-robin totals are repeated deliberately so every supported season has an
 # explicit, reviewable expectation.  Variable or exceptional formats (for
@@ -62,6 +112,17 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2026: 117,
     },
     "brazil_serie_a": {season: 380 for season in range(2020, 2027)},
+    "brazil_cup": {
+        2020: 120,
+        2021: 122,
+        2022: 122,
+        2023: 122,
+        2024: 122,
+        2025: 122,
+        # CBF's frozen 2026 format contains 155 matches; the 142 rows available
+        # at the 2026-08-07 cutoff are therefore an explicit partial cohort.
+        2026: 155,
+    },
     "england_premier_league": {season: 380 for season in range(2020, 2027)},
     "france_ligue_1": {
         2020: 380,
@@ -111,6 +172,9 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2025: 228,
         2026: 228,
     },
+    # The 2025/2026 source scope contains the 240-match league plus two
+    # relegation play-off legs.  Those legs remain in the complete workbook but
+    # are tagged ``relegation_playoff`` and excluded from production fitting.
     "norway_eliteserien": {
         2020: 240,
         2021: 240,
@@ -130,6 +194,14 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2024: 279,
         2025: 281,
         2026: 281,
+    },
+    # Only matches actually played are counted. Romania-Norway and
+    # Switzerland-Ukraine in the 2020 edition were administrative 3-0 awards
+    # and are intentionally absent from the workbook/training cohort.
+    "uefa_nations_league": {
+        2020: 168,
+        2022: 162,
+        2024: 188,
     },
     # MLS includes every Titan-listed tournament/postseason phase, not only the
     # regular-season table.  This keeps the workbook promise of all matches;
@@ -160,6 +232,20 @@ LEAGUE_SPECS = {
         "league_key": "brazil_serie_a",
         "filename": "brazil-serie-a",
         "calendar_policy": "brazil_2020_delayed",
+    },
+    "巴西杯": {
+        "league_key": "brazil_cup",
+        "filename": "brazil-cup",
+        # The 2020 edition was delayed by the COVID-19 schedule disruption and
+        # finished in March 2021. Keep this as a competition-specific frozen
+        # exception instead of weakening the calendar-year policy globally.
+        "calendar_policy": "brazil_cup_2020_delayed",
+        "aliases": (
+            "brazil_cup",
+            "巴西杯",
+            "Copa do Brasil",
+            "Brazil Cup",
+        ),
     },
     "挪超": {
         "league_key": "norway_eliteserien",
@@ -228,6 +314,18 @@ LEAGUE_SPECS = {
         "filename": "uefa-champions-league",
         "calendar_policy": "autumn_to_spring",
     },
+    "欧国联": {
+        "league_key": "uefa_nations_league",
+        "filename": "uefa-nations-league",
+        "calendar_policy": "nations_league_cycle",
+        "aliases": (
+            "uefa_nations_league",
+            "欧国联",
+            "UEFA Nations League",
+            "Nations League",
+            "UNL",
+        ),
+    },
     "亚冠": {
         "league_key": "afc_champions_league",
         "filename": "afc-champions-league",
@@ -293,7 +391,9 @@ EXPECTED_TOP_HEADERS = {
     **{
         16 + book_index * 18 + market_index * 3: book_label + market_label
         for book_index, (_book_key, book_label) in enumerate(BOOKMAKERS)
-        for market_index, (_market_key, market_label, _fields) in enumerate(MARKET_GROUPS)
+        for market_index, (_market_key, market_label, _fields) in enumerate(
+            MARKET_GROUPS
+        )
     },
 }
 
@@ -306,6 +406,7 @@ ROUND_RE = re.compile(r"^第(?P<round>\d+)轮$")
 CELL_REF_RE = re.compile(r"^(?P<column>[A-Z]+)(?P<row>\d+)$")
 
 SCORE_FIELDS = (
+    "match_id",
     "date",
     "home_team",
     "away_team",
@@ -330,6 +431,7 @@ SCORE_FIELDS = (
     "kickoff_utc",
 )
 MARKET_FIELDS = (
+    "match_id",
     "league_key",
     "league",
     "season",
@@ -382,9 +484,7 @@ def _integer(value: Any, field: str, row_number: int, *, minimum: int = 0) -> in
     else:
         raise HistoryImportError(f"row {row_number}: {field} must be an integer")
     if result < minimum:
-        raise HistoryImportError(
-            f"row {row_number}: {field} must be >= {minimum}"
-        )
+        raise HistoryImportError(f"row {row_number}: {field} must be >= {minimum}")
     return result
 
 
@@ -417,7 +517,9 @@ def _result_code(home_goals: int, away_goals: int) -> str:
 def _half_full_label(
     half_home: int, half_away: int, full_home: int, full_away: int
 ) -> str:
-    return f"{_result_label(half_home, half_away)}-{_result_label(full_home, full_away)}"
+    return (
+        f"{_result_label(half_home, half_away)}-{_result_label(full_home, full_away)}"
+    )
 
 
 def _column_index(reference: str) -> int:
@@ -431,7 +533,9 @@ def _column_index(reference: str) -> int:
 
 
 def _xml_text(element: ET.Element) -> str:
-    return "".join(node.text or "" for node in element.iter() if node.tag.endswith("}t"))
+    return "".join(
+        node.text or "" for node in element.iter() if node.tag.endswith("}t")
+    )
 
 
 def _parse_numeric(raw: str) -> int | float | str:
@@ -473,7 +577,9 @@ def read_xlsx_rows(path: str | Path) -> tuple[str, list[list[Any]]]:
                 archive.read("xl/_rels/workbook.xml.rels")
             )
         except (KeyError, ET.ParseError) as exc:
-            raise HistoryImportError(f"invalid XLSX workbook structure: {source}") from exc
+            raise HistoryImportError(
+                f"invalid XLSX workbook structure: {source}"
+            ) from exc
 
         sheets = [node for node in workbook_root.iter() if node.tag.endswith("}sheet")]
         primary_sheets = [
@@ -509,7 +615,7 @@ def read_xlsx_rows(path: str | Path) -> tuple[str, list[list[Any]]]:
         }
         if relationship_id not in relationship_targets:
             raise HistoryImportError("worksheet relationship is missing")
-        sheet_member = _resolve_sheet_member(relationship_targets[relationship_id])
+        _sheet_member = _resolve_sheet_member(relationship_targets[relationship_id])
 
         shared_strings: list[str] = []
         if "xl/sharedStrings.xml" in archive.namelist():
@@ -518,9 +624,7 @@ def read_xlsx_rows(path: str | Path) -> tuple[str, list[list[Any]]]:
             except ET.ParseError as exc:
                 raise HistoryImportError("invalid shared strings XML") from exc
             shared_strings = [
-                _xml_text(node)
-                for node in shared_root
-                if node.tag.endswith("}si")
+                _xml_text(node) for node in shared_root if node.tag.endswith("}si")
             ]
 
         worksheet_roots: dict[str, ET.Element] = {}
@@ -598,7 +702,10 @@ def read_xlsx_rows(path: str | Path) -> tuple[str, list[list[Any]]]:
         maximum_row = max(dense_rows)
         maximum_column = max(max(columns) for columns in dense_rows.values())
         rows = [
-            [dense_rows.get(row, {}).get(column) for column in range(1, maximum_column + 1)]
+            [
+                dense_rows.get(row, {}).get(column)
+                for column in range(1, maximum_column + 1)
+            ]
             for row in range(1, maximum_row + 1)
         ]
         return sheet_name, rows
@@ -657,16 +764,16 @@ def _validate_schema(sheet_name: str, rows: Sequence[Sequence[Any]]) -> None:
         if corner_top != [CORNER_AUDIT_TOP_HEADER] + [""] * (
             len(CORNER_AUDIT_HEADERS) - 1
         ):
-            raise HistoryImportError(
-                "merged corner-audit header schema does not match"
-            )
+            raise HistoryImportError("merged corner-audit header schema does not match")
     actual_top = {
         index: _text(value)
         for index, value in enumerate(rows[0][: len(EXPECTED_HEADERS)], start=1)
         if _text(value)
     }
     if actual_top != EXPECTED_TOP_HEADERS:
-        raise HistoryImportError("merged market header schema does not match the supported format")
+        raise HistoryImportError(
+            "merged market header schema does not match the supported format"
+        )
 
 
 def _parse_source_kickoff(
@@ -710,7 +817,9 @@ def _load_timezone(name: str) -> tzinfo:
         raise HistoryImportError(f"unknown source timezone: {name}") from exc
 
 
-def _market_value(row: Sequence[Any], book_index: int, market_index: int) -> tuple[Any, Any, Any]:
+def _market_value(
+    row: Sequence[Any], book_index: int, market_index: int
+) -> tuple[Any, Any, Any]:
     start = 15 + book_index * 18 + market_index * 3
     return row[start], row[start + 1], row[start + 2]
 
@@ -748,16 +857,65 @@ def _calendar_rollover_allowed(
         return previous_month >= 10 and month <= 3
     if policy == "brazil_2020_delayed":
         return season == 2020 and previous_month == 12 and month == 1
+    if policy == "brazil_cup_2020_delayed":
+        # The 2020 Copa do Brasil moved directly from the December semi-finals
+        # to the March 2021 final. No other edition may cross a calendar year.
+        return season == 2020 and previous_month == 12 and month == 3
     if policy == "afc_transition":
-        return (
-            (previous_month >= 10 and month <= 3)
-            or (season == 2022 and previous_month == 8 and month == 2)
+        return (previous_month >= 10 and month <= 3) or (
+            season == 2022 and previous_month == 8 and month == 2
         )
+    if policy == "nations_league_cycle":
+        # The source workbook stores the edition start year plus MM-DD HH:MM.
+        # Rows are chronological, so the single month decrease marks the
+        # edition's move into its second calendar year (for example 2020 ->
+        # 2021 finals or 2022 -> 2023 finals).
+        return month < previous_month
     raise HistoryImportError(f"unsupported calendar policy: {policy}")
 
 
+def _maximum_calendar_rollovers(policy: str, season: int) -> int:
+    """Return the predeclared number of calendar boundaries in one season.
+
+    Completed Nations League editions in the frozen source scope each have a
+    third-calendar-year play-out boundary. The delayed 2020 Copa do Brasil has
+    one frozen December-to-March boundary. Other supported cross-year seasons
+    span at most two calendar years.
+    """
+
+    if policy == "calendar_year":
+        return 0
+    if policy == "brazil_cup_2020_delayed":
+        return 1 if season == 2020 else 0
+    if policy == "nations_league_cycle":
+        return 2 if season in NATIONS_LEAGUE_EDITION_END_YEARS else 1
+    return 1
+
+
+def _normalized_round_label(raw_round: Any) -> str:
+    """Normalize a source round label without discarding stage semantics."""
+
+    return " ".join(unicodedata.normalize("NFKC", _text(raw_round)).casefold().split())
+
+
+def _is_norway_relegation_playoff_round(raw_round: Any) -> bool:
+    """Identify Eliteserien relegation play-offs from stable schedule text."""
+
+    normalized = _normalized_round_label(raw_round)
+    compact = normalized.replace(" ", "").replace("-", "")
+    return (
+        compact.startswith("保级附加赛")
+        or compact.startswith("降级附加赛")
+        or normalized.startswith("relegation playoff")
+        or normalized.startswith("relegation play-off")
+    )
+
+
 def _competition_regime(
-    league_key: str, season: int, source_date: date
+    league_key: str,
+    season: int,
+    source_date: date,
+    raw_round: Any = None,
 ) -> str:
     """Return the explicitly versioned competition format for one fixture."""
 
@@ -769,6 +927,14 @@ def _competition_regime(
         <= JAPAN_J1_VISION_SOURCE_DATE_END
     ):
         return JAPAN_J1_VISION_REGIME
+    if league_key == "brazil_cup":
+        return "national_knockout_cup"
+    if league_key == "uefa_nations_league":
+        return "national_team_league_and_knockout"
+    if league_key == "norway_eliteserien" and _is_norway_relegation_playoff_round(
+        raw_round
+    ):
+        return NORWAY_RELEGATION_PLAYOFF_REGIME
     return REGULAR_COMPETITION_REGIME
 
 
@@ -795,6 +961,15 @@ def _format_version(league_key: str, season: int) -> str:
         if season == 2023:
             return "afc_40_team_cross_year"
         return "afc_elite_24_team_league_phase"
+    if league_key == "brazil_cup":
+        if season == 2020:
+            return "copa_do_brasil_2020"
+        if season <= 2025:
+            return "copa_do_brasil_2021_2025"
+        return "copa_do_brasil_2026_expanded"
+    if league_key == "uefa_nations_league":
+        end_year = NATIONS_LEAGUE_EDITION_END_YEARS.get(season, season + 1)
+        return f"uefa_nations_league_{season}_{end_year}_edition"
     if league_key == "japan_j1" and season == 2026:
         return "j1_2026_vision_regional"
     return "standard_league_format"
@@ -804,6 +979,10 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
     """Map source round labels to a stable, audit-only phase family."""
 
     value = _text(raw_round)
+    if league_key == "norway_eliteserien":
+        if _is_norway_relegation_playoff_round(raw_round):
+            return "relegation_playoff"
+        return "regular_season"
     if league_key == "korea_k_league_1":
         if value.startswith("争冠组"):
             return "championship_split"
@@ -829,8 +1008,7 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
         return "relegation_playoff"
     if league_key == "uefa_champions_league":
         if any(
-            token in value
-            for token in ("预选", "第一圈", "第二圈", "第三圈", "附加赛")
+            token in value for token in ("预选", "第一圈", "第二圈", "第三圈", "附加赛")
         ):
             return "qualifying"
         if "分组赛" in value:
@@ -843,6 +1021,14 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
             return "qualifying"
         if "分组" in value:
             return "group_or_league_stage"
+        return "knockout"
+    if league_key == "brazil_cup":
+        return "knockout"
+    if league_key == "uefa_nations_league":
+        if "联赛" in value and "附加" not in value:
+            return "league_phase"
+        if "降级附加" in value:
+            return "relegation_playoff"
         return "knockout"
     return "regular_season"
 
@@ -915,9 +1101,9 @@ def _season_status(
 ) -> str:
     """Return a status only when row count and audit date are explicit."""
 
-    return _season_completeness(
-        league_key, season, observed_matches, as_of_date
-    )["status"]
+    return _season_completeness(league_key, season, observed_matches, as_of_date)[
+        "status"
+    ]
 
 
 def import_workbook(
@@ -941,6 +1127,7 @@ def import_workbook(
     season_state: dict[int, dict[str, Any]] = {}
     rollover_events: list[dict[str, Any]] = []
     fixture_keys: dict[tuple[str, str, str], int] = {}
+    match_ids: dict[str, int] = {}
     bookmaker_completeness = {
         book_key: {"opening_1x2": 0, "opening_asian": 0, "opening_total": 0}
         for book_key, _book_label in BOOKMAKERS
@@ -950,11 +1137,10 @@ def import_workbook(
     for row_number, source_row in enumerate(rows[2:], start=3):
         row = list(source_row) + [None] * (len(EXPECTED_HEADERS) - len(source_row))
         if not any(_text(value) for value in row):
-            if any(
-                any(_text(value) for value in later)
-                for later in rows[row_number:]
-            ):
-                raise HistoryImportError(f"row {row_number}: blank row inside the data region")
+            if any(any(_text(value) for value in later) for later in rows[row_number:]):
+                raise HistoryImportError(
+                    f"row {row_number}: blank row inside the data region"
+                )
             continue
 
         identifier = _integer(row[0], "编号", row_number, minimum=1)
@@ -965,7 +1151,9 @@ def import_workbook(
         expected_identifier += 1
         season = _integer(row[1], "年份", row_number, minimum=1900)
         if season > datetime.now(timezone.utc).year + 1:
-            raise HistoryImportError(f"row {row_number}: 年份 is implausibly far in the future")
+            raise HistoryImportError(
+                f"row {row_number}: 年份 is implausibly far in the future"
+            )
         if _text(row[2]) != sheet_name:
             raise HistoryImportError(
                 f"row {row_number}: 赛事 {_text(row[2])!r} does not match sheet {sheet_name!r}"
@@ -975,34 +1163,72 @@ def import_workbook(
                 f"row {row_number}: only finished rows (状态=完) may be imported"
             )
 
+        raw_match_id = (
+            row[len(EXPECTED_HEADERS)] if len(row) > len(EXPECTED_HEADERS) else None
+        )
+        match_id_text = _text(raw_match_id)
+        if spec["league_key"] in MATCH_ID_REQUIRED_LEAGUES and not match_id_text:
+            raise HistoryImportError(
+                f"row {row_number}: Titan比赛ID is required for "
+                f"{spec['league_key']} administrative-result exclusion"
+            )
+        if match_id_text:
+            match_id = str(_integer(raw_match_id, "Titan比赛ID", row_number, minimum=1))
+            if match_id in match_ids:
+                raise HistoryImportError(
+                    f"row {row_number}: duplicate Titan比赛ID also present at row "
+                    f"{match_ids[match_id]}"
+                )
+            match_ids[match_id] = row_number
+            exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(
+                spec["league_key"], {}
+            ).get(match_id)
+            if exclusion is not None:
+                raise HistoryImportError(
+                    f"row {row_number}: Titan match {match_id} is an administrative "
+                    f"result and cannot enter training ({exclusion['reason']}; "
+                    f"{exclusion['source']})"
+                )
+        else:
+            match_id = ""
+
         kickoff_match = KICKOFF_RE.fullmatch(_text(row[4]))
         if not kickoff_match:
             raise HistoryImportError(f"row {row_number}: invalid 比赛时间")
         month = int(kickoff_match.group("month"))
         state = season_state.setdefault(
-            season, {"calendar_year": season, "previous_month": None, "previous": None}
+            season,
+            {
+                "calendar_year": season,
+                "rollover_count": 0,
+                "previous_month": None,
+                "previous": None,
+            },
         )
         previous_month = state["previous_month"]
         # Calendar-year leagues must never turn an out-of-order row into a new
         # year.  Cross-year competitions use an explicit per-competition
         # policy, including the exceptional delayed 2022 AFC season.
-        if (
-            previous_month is not None
-            and _calendar_rollover_allowed(
-                spec["calendar_policy"], season, previous_month, month
-            )
+        if previous_month is not None and _calendar_rollover_allowed(
+            spec["calendar_policy"], season, previous_month, month
         ):
-            if state["calendar_year"] != season:
+            maximum_rollovers = _maximum_calendar_rollovers(
+                spec["calendar_policy"], season
+            )
+            if state["rollover_count"] >= maximum_rollovers:
                 raise HistoryImportError(
-                    f"row {row_number}: more than one calendar rollover in season {season}"
+                    f"row {row_number}: more than {maximum_rollovers} calendar "
+                    f"rollover(s) in season {season}"
                 )
+            from_calendar_year = state["calendar_year"]
             state["calendar_year"] += 1
+            state["rollover_count"] += 1
             rollover_events.append(
                 {
                     "season": season,
                     "source_row": row_number,
-                    "from_calendar_year": season,
-                    "to_calendar_year": season + 1,
+                    "from_calendar_year": from_calendar_year,
+                    "to_calendar_year": state["calendar_year"],
                     "trigger": f"{previous_month:02d}->{month:02d}",
                 }
             )
@@ -1037,17 +1263,23 @@ def import_workbook(
             )
         total_goals = _integer(row[12], "总进球数", row_number)
         if total_goals != home_goals + away_goals:
-            raise HistoryImportError(f"row {row_number}: 总进球数 does not match 全场比分")
+            raise HistoryImportError(
+                f"row {row_number}: 总进球数 does not match 全场比分"
+            )
         if _text(row[13]) != _half_full_label(
             half_home, half_away, home_goals, away_goals
         ):
             raise HistoryImportError(f"row {row_number}: 半全场 does not match scores")
         if _text(row[14]) != _result_label(home_goals, away_goals):
-            raise HistoryImportError(f"row {row_number}: 胜平负 does not match 全场比分")
+            raise HistoryImportError(
+                f"row {row_number}: 胜平负 does not match 全场比分"
+            )
 
         kickoff_utc = kickoff.astimezone(timezone.utc)
         source_kickoff = kickoff.isoformat(timespec="minutes")
-        kickoff_utc_text = kickoff_utc.isoformat(timespec="minutes").replace("+00:00", "Z")
+        kickoff_utc_text = kickoff_utc.isoformat(timespec="minutes").replace(
+            "+00:00", "Z"
+        )
         fixture_key = (kickoff_utc_text, home_team, away_team)
         if fixture_key in fixture_keys:
             raise HistoryImportError(
@@ -1056,11 +1288,12 @@ def import_workbook(
         fixture_keys[fixture_key] = row_number
         round_value = _round_number(row[3])
         competition_regime = _competition_regime(
-            spec["league_key"], season, kickoff.date()
+            spec["league_key"], season, kickoff.date(), row[3]
         )
         format_version = _format_version(spec["league_key"], season)
         phase_group = _phase_group(spec["league_key"], row[3])
         common = {
+            "match_id": match_id,
             "league_key": spec["league_key"],
             "league": sheet_name,
             "season": season,
@@ -1078,6 +1311,7 @@ def import_workbook(
         }
         score_rows.append(
             {
+                "match_id": match_id,
                 "date": kickoff_utc.date().isoformat(),
                 "home_team": home_team,
                 "away_team": away_team,
@@ -1154,21 +1388,25 @@ def import_workbook(
         row["season_status"] = season_completeness[str(row["season"])]["status"]
     score_rows.sort(
         key=lambda row: (
-            row["kickoff_utc"], row["home_team"], row["away_team"], row["source_row"]
+            row["kickoff_utc"],
+            row["home_team"],
+            row["away_team"],
+            row["source_row"],
         )
     )
     market_rows.sort(
         key=lambda row: (
-            row["kickoff_utc"], row["home_team"], row["away_team"], row["bookmaker"]
+            row["kickoff_utc"],
+            row["home_team"],
+            row["away_team"],
+            row["bookmaker"],
         )
     )
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     summary = {
         "league": sheet_name,
         "league_key": spec["league_key"],
-        "aliases": list(
-            spec.get("aliases", (spec["league_key"], sheet_name))
-        ),
+        "aliases": list(spec.get("aliases", (spec["league_key"], sheet_name))),
         "output_stem": spec["filename"],
         "source_file": source.name,
         "source_sha256": "sha256:" + source_hash,
@@ -1190,7 +1428,9 @@ def import_workbook(
             str(year): {
                 value: format_counts[(year, value)]
                 for value in sorted(
-                    label for counted_year, label in format_counts if counted_year == year
+                    label
+                    for counted_year, label in format_counts
+                    if counted_year == year
                 )
             }
             for year in sorted(season_counts)
@@ -1199,7 +1439,9 @@ def import_workbook(
             str(year): {
                 value: phase_counts[(year, value)]
                 for value in sorted(
-                    label for counted_year, label in phase_counts if counted_year == year
+                    label
+                    for counted_year, label in phase_counts
+                    if counted_year == year
                 )
             }
             for year in sorted(season_counts)
@@ -1208,7 +1450,9 @@ def import_workbook(
             str(year): {
                 value: status_counts[(year, value)]
                 for value in sorted(
-                    label for counted_year, label in status_counts if counted_year == year
+                    label
+                    for counted_year, label in status_counts
+                    if counted_year == year
                 )
             }
             for year in sorted(season_counts)
@@ -1227,7 +1471,9 @@ def import_workbook(
     return summary, score_rows, market_rows
 
 
-def _atomic_csv(path: Path, fields: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> str:
+def _atomic_csv(
+    path: Path, fields: Sequence[str], rows: Sequence[Mapping[str, Any]]
+) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="", delete=False, dir=path.parent, suffix=".tmp"
@@ -1242,11 +1488,17 @@ def _atomic_csv(path: Path, fields: Sequence[str], rows: Sequence[Mapping[str, A
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
-    ) + "\n"
+    payload = (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+        + "\n"
+    )
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", newline="\n", delete=False, dir=path.parent, suffix=".tmp"
+        "w",
+        encoding="utf-8",
+        newline="\n",
+        delete=False,
+        dir=path.parent,
+        suffix=".tmp",
     ) as handle:
         handle.write(payload)
         temporary = Path(handle.name)
@@ -1256,15 +1508,18 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 def _canonical_manifest_hash(manifest: Mapping[str, Any]) -> str:
     payload = dict(manifest)
     payload.pop("bundle_hash", None)
-    return "sha256:" + hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def _bundle_file(destination: Path, raw_name: Any, label: str) -> Path:
@@ -1355,8 +1610,10 @@ def _bundle_datetime(raw: Any, label: str) -> datetime:
 
 
 def _canonical_utc_minute(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="minutes").replace(
-        "+00:00", "Z"
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="minutes")
+        .replace("+00:00", "Z")
     )
 
 
@@ -1382,6 +1639,13 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
     audit_date = _parse_as_of_date(manifest.get("as_of_date"), "manifest.as_of_date")
     if manifest.get("season_completeness_policy") != SEASON_COMPLETENESS_POLICY:
         raise HistoryImportError("manifest season_completeness_policy is invalid")
+    if (
+        manifest.get("administrative_result_exclusion_policy")
+        != _administrative_result_exclusion_policy()
+    ):
+        raise HistoryImportError(
+            "manifest administrative_result_exclusion_policy is invalid"
+        )
     source_timezone = _text(manifest.get("source_timezone"))
     if not source_timezone:
         raise HistoryImportError("manifest source_timezone is required")
@@ -1390,7 +1654,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
     league_summaries = manifest.get("leagues")
     if not isinstance(league_summaries, list) or not league_summaries:
         raise HistoryImportError("manifest leagues must be a non-empty list")
-    specifications = {spec["league_key"]: (name, spec) for name, spec in LEAGUE_SPECS.items()}
+    specifications = {
+        spec["league_key"]: (name, spec) for name, spec in LEAGUE_SPECS.items()
+    }
     expected_bookmakers = {book_key for book_key, _book_label in BOOKMAKERS}
     observed_leagues: set[str] = set()
     validated_summaries: list[Mapping[str, Any]] = []
@@ -1457,7 +1723,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         for row_index, row in enumerate(score_rows, start=2):
             season_counts[
                 _bundle_integer(
-                    row.get("season"), f"{score_path.name}:{row_index} season", minimum=1900
+                    row.get("season"),
+                    f"{score_path.name}:{row_index} season",
+                    minimum=1900,
                 )
             ] += 1
         expected_completeness = {
@@ -1473,8 +1741,10 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         status_counts: Counter[tuple[int, str]] = Counter()
         fixture_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
         dated_fixtures: set[tuple[str, str, str]] = set()
+        score_match_ids: set[str] = set()
         score_dates: list[str] = []
         identity_fields = (
+            "match_id",
             "league_key",
             "league",
             "season",
@@ -1492,11 +1762,38 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         )
         for row_index, row in enumerate(score_rows, start=2):
             row_label = f"{score_path.name}:{row_index}"
-            season = _bundle_integer(row.get("season"), f"{row_label} season", minimum=1900)
+            season = _bundle_integer(
+                row.get("season"), f"{row_label} season", minimum=1900
+            )
             if row.get("league_key") != league_key:
-                raise HistoryImportError(f"{row_label} league_key does not match manifest")
+                raise HistoryImportError(
+                    f"{row_label} league_key does not match manifest"
+                )
             if row.get("league") != expected_league:
                 raise HistoryImportError(f"{row_label} league does not match manifest")
+            match_id = _text(row.get("match_id"))
+            if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
+                raise HistoryImportError(
+                    f"{row_label} match_id is required for administrative-result "
+                    "exclusion"
+                )
+            if match_id:
+                parsed_match_id = _bundle_integer(
+                    match_id, f"{row_label} match_id", minimum=1
+                )
+                if str(parsed_match_id) != match_id:
+                    raise HistoryImportError(f"{row_label} match_id is not canonical")
+                if match_id in score_match_ids:
+                    raise HistoryImportError(f"{row_label} duplicate match_id")
+                score_match_ids.add(match_id)
+                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                    match_id
+                )
+                if exclusion is not None:
+                    raise HistoryImportError(
+                        f"{row_label} administrative result {match_id} cannot enter "
+                        f"training ({exclusion['reason']})"
+                    )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
             if not home_team or not away_team or home_team == away_team:
@@ -1506,7 +1803,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             kickoff_utc_raw = _text(row.get("kickoff_utc"))
             kickoff_utc = _bundle_datetime(kickoff_utc_raw, f"{row_label} kickoff_utc")
             if kickoff_utc_raw != _canonical_utc_minute(kickoff_utc):
-                raise HistoryImportError(f"{row_label} kickoff_utc is not canonical UTC")
+                raise HistoryImportError(
+                    f"{row_label} kickoff_utc is not canonical UTC"
+                )
             if kickoff_utc.astimezone(timezone.utc).date() != match_date:
                 raise HistoryImportError(f"{row_label} date and kickoff_utc disagree")
             source_kickoff_raw = _text(row.get("source_kickoff"))
@@ -1516,7 +1815,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             if source_kickoff.isoformat(timespec="minutes") != source_kickoff_raw:
                 raise HistoryImportError(f"{row_label} source_kickoff is not canonical")
             if row.get("source_timezone") != source_timezone:
-                raise HistoryImportError(f"{row_label} source_timezone does not match manifest")
+                raise HistoryImportError(
+                    f"{row_label} source_timezone does not match manifest"
+                )
             if source_kickoff_raw != kickoff_utc.astimezone(source_zone).isoformat(
                 timespec="minutes"
             ):
@@ -1551,14 +1852,22 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 goals["home_goals"], goals["away_goals"]
             )
             if row.get("half_result") != expected_half_result:
-                raise HistoryImportError(f"{row_label} half_result disagrees with scores")
+                raise HistoryImportError(
+                    f"{row_label} half_result disagrees with scores"
+                )
             if row.get("full_result") != expected_full_result:
-                raise HistoryImportError(f"{row_label} full_result disagrees with scores")
+                raise HistoryImportError(
+                    f"{row_label} full_result disagrees with scores"
+                )
             if row.get("htft_result") != expected_half_result + expected_full_result:
-                raise HistoryImportError(f"{row_label} htft_result disagrees with scores")
+                raise HistoryImportError(
+                    f"{row_label} htft_result disagrees with scores"
+                )
 
             source_date = source_kickoff.date()
-            expected_regime = _competition_regime(league_key, season, source_date)
+            expected_regime = _competition_regime(
+                league_key, season, source_date, row.get("round")
+            )
             expected_format = _format_version(league_key, season)
             expected_phase = _phase_group(league_key, row.get("round"))
             expected_status = expected_completeness[str(season)]["status"]
@@ -1579,6 +1888,7 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 raise HistoryImportError(f"{row_label} duplicate fixture")
             dated_fixtures.add(dated_key)
             identity = {
+                "match_id": match_id,
                 "league_key": league_key,
                 "league": expected_league,
                 "season": season,
@@ -1628,7 +1938,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             if summary.get(field) != expected:
                 raise HistoryImportError(f"{label}.{field} does not match score rows")
         if summary.get("utc_date_start") != min(score_dates):
-            raise HistoryImportError(f"{label}.utc_date_start does not match score rows")
+            raise HistoryImportError(
+                f"{label}.utc_date_start does not match score rows"
+            )
         if summary.get("utc_date_end") != max(score_dates):
             raise HistoryImportError(f"{label}.utc_date_end does not match score rows")
 
@@ -1656,9 +1968,36 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         }
         for row_index, row in enumerate(market_rows, start=2):
             row_label = f"{market_path.name}:{row_index}"
-            season = _bundle_integer(row.get("season"), f"{row_label} season", minimum=1900)
-            if row.get("league_key") != league_key or row.get("league") != expected_league:
-                raise HistoryImportError(f"{row_label} league identity does not match manifest")
+            season = _bundle_integer(
+                row.get("season"), f"{row_label} season", minimum=1900
+            )
+            if (
+                row.get("league_key") != league_key
+                or row.get("league") != expected_league
+            ):
+                raise HistoryImportError(
+                    f"{row_label} league identity does not match manifest"
+                )
+            match_id = _text(row.get("match_id"))
+            if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
+                raise HistoryImportError(
+                    f"{row_label} match_id is required for administrative-result "
+                    "exclusion"
+                )
+            if match_id:
+                parsed_match_id = _bundle_integer(
+                    match_id, f"{row_label} match_id", minimum=1
+                )
+                if str(parsed_match_id) != match_id:
+                    raise HistoryImportError(f"{row_label} match_id is not canonical")
+                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                    match_id
+                )
+                if exclusion is not None:
+                    raise HistoryImportError(
+                        f"{row_label} administrative result {match_id} cannot enter "
+                        f"training ({exclusion['reason']})"
+                    )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
             if not home_team or not away_team or home_team == away_team:
@@ -1666,7 +2005,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             kickoff_utc_raw = _text(row.get("kickoff_utc"))
             kickoff_utc = _bundle_datetime(kickoff_utc_raw, f"{row_label} kickoff_utc")
             if kickoff_utc_raw != _canonical_utc_minute(kickoff_utc):
-                raise HistoryImportError(f"{row_label} kickoff_utc is not canonical UTC")
+                raise HistoryImportError(
+                    f"{row_label} kickoff_utc is not canonical UTC"
+                )
             source_kickoff_raw = _text(row.get("source_kickoff"))
             source_kickoff = _bundle_datetime(
                 source_kickoff_raw, f"{row_label} source_kickoff"
@@ -1674,7 +2015,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             if source_kickoff.isoformat(timespec="minutes") != source_kickoff_raw:
                 raise HistoryImportError(f"{row_label} source_kickoff is not canonical")
             if row.get("source_timezone") != source_timezone:
-                raise HistoryImportError(f"{row_label} source_timezone does not match manifest")
+                raise HistoryImportError(
+                    f"{row_label} source_timezone does not match manifest"
+                )
             if source_kickoff_raw != kickoff_utc.astimezone(source_zone).isoformat(
                 timespec="minutes"
             ):
@@ -1692,12 +2035,13 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                     f"{row_label} fixture identity has no matching score row"
                 )
             expected_regime = _competition_regime(
-                league_key, season, source_kickoff.date()
+                league_key, season, source_kickoff.date(), row.get("round")
             )
             expected_format = _format_version(league_key, season)
             expected_phase = _phase_group(league_key, row.get("round"))
             expected_status = expected_completeness.get(str(season), {}).get("status")
             market_identity = {
+                "match_id": match_id,
                 "league_key": league_key,
                 "league": expected_league,
                 "season": season,
@@ -1723,14 +2067,19 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             ):
                 if market_identity[field] != expected:
                     raise HistoryImportError(f"{row_label} {field} must be {expected}")
-            if any(market_identity[field] != score_identity[field] for field in identity_fields):
+            if any(
+                market_identity[field] != score_identity[field]
+                for field in identity_fields
+            ):
                 raise HistoryImportError(
                     f"{row_label} fixture identity does not match its score row"
                 )
 
             bookmaker = _text(row.get("bookmaker"))
             if bookmaker not in expected_bookmakers:
-                raise HistoryImportError(f"{row_label} bookmaker is not a target company")
+                raise HistoryImportError(
+                    f"{row_label} bookmaker is not a target company"
+                )
             books = market_books.setdefault(fixture_key, set())
             if bookmaker in books:
                 raise HistoryImportError(
@@ -1740,7 +2089,10 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             for market_name, value_fields in completeness_fields.items():
                 expected_complete = all(_text(row.get(field)) for field in value_fields)
                 flag = row.get(f"{market_name}_complete")
-                if flag not in {"true", "false"} or (flag == "true") != expected_complete:
+                if (
+                    flag not in {"true", "false"}
+                    or (flag == "true") != expected_complete
+                ):
                     raise HistoryImportError(
                         f"{row_label} {market_name}_complete disagrees with market cells"
                     )
@@ -1751,7 +2103,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
             market_status_counts[(season, expected_status)] += 1
 
         if set(market_books) != set(fixture_rows):
-            raise HistoryImportError(f"{label} opening market fixtures do not match score rows")
+            raise HistoryImportError(
+                f"{label} opening market fixtures do not match score rows"
+            )
         for fixture_key, books in market_books.items():
             if books != expected_bookmakers:
                 missing = sorted(expected_bookmakers - books)
@@ -1767,22 +2121,42 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         for observed, expected, field in (
             (
                 market_regime_counts,
-                Counter({key: count * len(BOOKMAKERS) for key, count in regime_counts.items()}),
+                Counter(
+                    {
+                        key: count * len(BOOKMAKERS)
+                        for key, count in regime_counts.items()
+                    }
+                ),
                 "competition_regime",
             ),
             (
                 market_format_counts,
-                Counter({key: count * len(BOOKMAKERS) for key, count in format_counts.items()}),
+                Counter(
+                    {
+                        key: count * len(BOOKMAKERS)
+                        for key, count in format_counts.items()
+                    }
+                ),
                 "format_version",
             ),
             (
                 market_phase_counts,
-                Counter({key: count * len(BOOKMAKERS) for key, count in phase_counts.items()}),
+                Counter(
+                    {
+                        key: count * len(BOOKMAKERS)
+                        for key, count in phase_counts.items()
+                    }
+                ),
                 "phase_group",
             ),
             (
                 market_status_counts,
-                Counter({key: count * len(BOOKMAKERS) for key, count in status_counts.items()}),
+                Counter(
+                    {
+                        key: count * len(BOOKMAKERS)
+                        for key, count in status_counts.items()
+                    }
+                ),
                 "season_status",
             ),
         ):
@@ -1891,15 +2265,17 @@ def import_bundle(
         "importer_version": IMPORTER_VERSION,
         "as_of_date": audit_date.isoformat(),
         "season_completeness_policy": dict(SEASON_COMPLETENESS_POLICY),
+        "administrative_result_exclusion_policy": (
+            _administrative_result_exclusion_policy()
+        ),
         "source_timezone": source_timezone,
         "kickoff_year_policy": (
-            "explicit per-competition calendar policy; cross-year rollover is "
-            "allowed once only for autumn-to-spring competitions and the documented "
-            "Brazil 2020/AFC 2022 exceptions"
+            "explicit per-competition calendar policy; ordinary cross-year seasons "
+            "allow one rollover; the frozen 2020, 2022 and 2024 Nations League "
+            "editions allow two, and the delayed 2020 Copa do Brasil allows only "
+            "its observed December-to-March boundary"
         ),
-        "training_feature_whitelist": [
-            "date", "home_team", "away_team"
-        ],
+        "training_feature_whitelist": ["date", "home_team", "away_team"],
         "outcome_label_fields": [
             "home_goals",
             "away_goals",
@@ -1910,7 +2286,9 @@ def import_bundle(
             "htft_result",
         ],
         "research_only_fields": [
-            "opening 1X2", "opening Asian handicap", "opening goal total"
+            "opening 1X2",
+            "opening Asian handicap",
+            "opening goal total",
         ],
         "quarantined_fields": [
             "all closing prices",
@@ -1925,12 +2303,11 @@ def import_bundle(
             "Source kickoff timezone is supplied explicitly by the importer operator.",
             "Rows labelled partial_as_of_* are right-censored snapshots and cannot support model promotion.",
             "Competition format_version and phase_group labels must be evaluated as separate cohorts when material.",
+            "UEFA administrative 3-0 awards are excluded by immutable Titan match ID, not inferred from the displayed score.",
         ],
         "leagues": sorted(league_summaries, key=lambda item: item["league_key"]),
     }
-    manifest["competition_regime_counts"] = _flat_regime_counts(
-        manifest["leagues"]
-    )
+    manifest["competition_regime_counts"] = _flat_regime_counts(manifest["leagues"])
     manifest["bundle_hash"] = _canonical_manifest_hash(manifest)
     _atomic_json(destination / "manifest.json", manifest)
     return validate_bundle(destination)

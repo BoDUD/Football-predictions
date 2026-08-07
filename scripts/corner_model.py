@@ -15,16 +15,15 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import sys
 import tempfile
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-
 
 MODEL_ARTIFACT_TYPE = "soccer_corner_count_model"
 PREDICTION_ARTIFACT_TYPE = "soccer_corner_prediction"
@@ -32,7 +31,8 @@ BACKTEST_ARTIFACT_TYPE = "soccer_corner_backtest"
 MODEL_SCHEMA_VERSION = "2.1.0"
 PREDICTION_SCHEMA_VERSION = "2.1.0"
 BACKTEST_SCHEMA_VERSION = "2.1.0"
-MODEL_VERSION = "corner-nb2-independent-time-decay/2.1.0"
+MODEL_VERSION = "corner-nb2-independent-time-decay/2.1.1"
+OPTIMIZER = "deterministic_projected_adam_with_dispersion_grid"
 DEPENDENCE_MODEL = "independent_nb"
 FIXTURE_GRAPH_POLICY_VERSION = "undirected-team-fixture-components/1.0.0"
 CROSS_COMPONENT_PREDICTION_POLICY = "fail_closed"
@@ -40,6 +40,7 @@ COMPONENT_IDENTIFICATION_METHOD = (
     "shared_league_intercepts_global_zero_centering_positive_l2_regularization"
 )
 MIN_COMPONENT_REGULARIZATION = 1e-8
+DEFAULT_HARD_MAX_CORNERS = 200
 TRAINING_COLUMNS = (
     "date",
     "kickoff_utc",
@@ -84,8 +85,10 @@ class CornerModelError(ValueError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -159,8 +162,10 @@ def _parse_aware_datetime(value: str | datetime, name: str) -> datetime:
 
 
 def _canonical_datetime(value: str | datetime, name: str) -> str:
-    return _parse_aware_datetime(value, name).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        _parse_aware_datetime(value, name)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )
 
 
@@ -337,7 +342,9 @@ def _fixture_graph_team_components(graph: Mapping[str, Any]) -> dict[str, str]:
         for team in teams:
             name = str(team)
             if name in mapping:
-                raise CornerModelError("fixture graph team appears in multiple components")
+                raise CornerModelError(
+                    "fixture graph team appears in multiple components"
+                )
             mapping[name] = component_id
     return mapping
 
@@ -386,7 +393,10 @@ def _validate_fixture_graph_profile(
     }
     total_matches = 0
     for index, component in enumerate(components):
-        if not isinstance(component, Mapping) or set(component) != expected_component_fields:
+        if (
+            not isinstance(component, Mapping)
+            or set(component) != expected_component_fields
+        ):
             raise CornerModelError(f"fixture graph component {index} is incomplete")
         component_teams = component.get("teams")
         if (
@@ -405,7 +415,9 @@ def _validate_fixture_graph_profile(
             or not isinstance(component_matches, int)
             or component_matches < 1
         ):
-            raise CornerModelError(f"fixture graph component {index} matches are invalid")
+            raise CornerModelError(
+                f"fixture graph component {index} matches are invalid"
+            )
         total_matches += component_matches
         start = _parse_aware_datetime(
             str(component.get("kickoff_utc_start") or ""),
@@ -431,7 +443,9 @@ def _validate_fixture_graph_profile(
     if teams is not None and sorted(mapping) != sorted(str(team) for team in teams):
         raise CornerModelError("fixture graph teams do not match model training teams")
     if matches is not None and total_matches != matches:
-        raise CornerModelError("fixture graph match counts do not match training matches")
+        raise CornerModelError(
+            "fixture graph match counts do not match training matches"
+        )
     return mapping
 
 
@@ -446,7 +460,11 @@ def _installed_cohort_policy(
         import corner_history_dataset_builder as builder  # type: ignore
     matches = [
         source_key
-        for source_key, (registered_key, _name, _aliases) in builder.COMPETITIONS.items()
+        for source_key, (
+            registered_key,
+            _name,
+            _aliases,
+        ) in builder.COMPETITIONS.items()
         if registered_key == league_key
     ]
     if not matches:
@@ -520,15 +538,15 @@ def load_training_csv(
                 raise CornerModelError(
                     f"row {row_number}: date does not match kickoff_utc UTC date"
                 )
-            league_key = _required_text(
-                row.get("league_key"), "league_key", row_number
-            )
+            league_key = _required_text(row.get("league_key"), "league_key", row_number)
             if not LEAGUE_KEY_RE.fullmatch(league_key):
                 raise CornerModelError(f"row {row_number}: league_key is invalid")
             if observed_league is None:
                 observed_league = league_key
             elif league_key != observed_league:
-                raise CornerModelError("training CSV must contain exactly one league_key")
+                raise CornerModelError(
+                    "training CSV must contain exactly one league_key"
+                )
             home_corners = _parse_count(
                 row.get("home_corners") or "", "home_corners", row_number
             )
@@ -537,9 +555,13 @@ def load_training_csv(
             )
             match_id = _required_text(row.get("match_id"), "match_id", row_number)
             if not match_id.isdigit() or int(match_id) <= 0:
-                raise CornerModelError(f"row {row_number}: match_id must be positive digits")
+                raise CornerModelError(
+                    f"row {row_number}: match_id must be positive digits"
+                )
             if match_id in match_ids:
-                raise CornerModelError(f"row {row_number}: duplicate match_id {match_id}")
+                raise CornerModelError(
+                    f"row {row_number}: duplicate match_id {match_id}"
+                )
             match_ids.add(match_id)
             fixture_fingerprint = _required_row_hash(
                 row.get("fixture_fingerprint"), "fixture_fingerprint", row_number
@@ -620,8 +642,7 @@ def load_training_csv(
         invalid_phases = sorted(observed_phases - eligible_phases)
         hard_excluded_cohorts: list[str] = []
         if league_key == "japan_j1" and any(
-            str(row["season"]) == "2026"
-            or row["kickoff_utc"].year == 2026
+            str(row["season"]) == "2026" or row["kickoff_utc"].year == 2026
             for row in records
         ):
             hard_excluded_cohorts.append("japan_j1:2026")
@@ -634,9 +655,7 @@ def load_training_csv(
             if invalid_phases:
                 details.append("phases=" + ",".join(invalid_phases))
             if hard_excluded_cohorts:
-                details.append(
-                    "hard_exclusions=" + ",".join(hard_excluded_cohorts)
-                )
+                details.append("hard_exclusions=" + ",".join(hard_excluded_cohorts))
             raise CornerModelError(
                 "training CSV contains cohorts outside the installed eligible "
                 f"policy for {league_key}: {'; '.join(details)}"
@@ -708,9 +727,7 @@ def training_dataset_profile(
         "kickoff_utc_start": _canonical_datetime(
             first["kickoff_utc"], "kickoff_utc_start"
         ),
-        "kickoff_utc_end": _canonical_datetime(
-            last["kickoff_utc"], "kickoff_utc_end"
-        ),
+        "kickoff_utc_end": _canonical_datetime(last["kickoff_utc"], "kickoff_utc_end"),
         "kickoff_epoch_start": int(first["kickoff_epoch"]),
         "kickoff_epoch_end": int(last["kickoff_epoch"]),
         "seasons": sorted({str(row["season"]) for row in ordered}),
@@ -750,17 +767,12 @@ def _nb2_prefix(mean: float, dispersion: float, maximum: int) -> list[float]:
     dispersion = _require_positive(dispersion, "NB2 dispersion")
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0:
         raise CornerModelError("maximum corner count must be a non-negative integer")
-    first = math.exp(
-        dispersion * (math.log(dispersion) - math.log(dispersion + mean))
-    )
+    first = math.exp(dispersion * (math.log(dispersion) - math.log(dispersion + mean)))
     probabilities = [first]
     ratio = mean / (dispersion + mean)
     for count in range(maximum):
         probabilities.append(
-            probabilities[-1]
-            * (count + dispersion)
-            / (count + 1.0)
-            * ratio
+            probabilities[-1] * (count + dispersion) / (count + 1.0) * ratio
         )
     return probabilities
 
@@ -770,7 +782,7 @@ def nb2_distribution(
     dispersion: float,
     *,
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
 ) -> dict[str, Any]:
     """Build an adaptive NB2 marginal and retain its unnormalized tail audit."""
 
@@ -827,9 +839,7 @@ def _weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
 
 def _moment_dispersion(values: Sequence[int], weights: Sequence[float]) -> float:
     mean = max(_weighted_mean([float(value) for value in values], weights), 1e-6)
-    variance = _weighted_mean(
-        [(float(value) - mean) ** 2 for value in values], weights
-    )
+    variance = _weighted_mean([(float(value) - mean) ** 2 for value in values], weights)
     if variance <= mean + 1e-9:
         return 256.0
     return max(0.25, min(256.0, mean * mean / (variance - mean)))
@@ -864,23 +874,86 @@ def _mean_objective(
 ) -> float:
     home_rates, away_rates = _rates(records, parameters)
     total_weight = math.fsum(weights)
-    loss = math.fsum(
-        weight
-        * (
-            -nb2_log_pmf(int(row["home_corners"]), home_rate, home_dispersion)
-            - nb2_log_pmf(int(row["away_corners"]), away_rate, away_dispersion)
+    loss = (
+        math.fsum(
+            weight
+            * (
+                -nb2_log_pmf(int(row["home_corners"]), home_rate, home_dispersion)
+                - nb2_log_pmf(int(row["away_corners"]), away_rate, away_dispersion)
+            )
+            for row, weight, home_rate, away_rate in zip(
+                records, weights, home_rates, away_rates
+            )
         )
-        for row, weight, home_rate, away_rate in zip(
-            records, weights, home_rates, away_rates
-        )
-    ) / total_weight
+        / total_weight
+    )
     effects = list(parameters["attack"].values()) + list(
         parameters["concession"].values()
     )
-    penalty = regularization * math.fsum(float(value) ** 2 for value in effects) / max(
-        1, len(effects)
+    penalty = (
+        regularization
+        * math.fsum(float(value) ** 2 for value in effects)
+        / max(1, len(effects))
     )
     return loss + penalty
+
+
+def _project_zero_sum_bounded_effects(
+    values: Mapping[str, float], *, bound: float = 3.0
+) -> dict[str, float]:
+    """Project one effect vector onto the zero-sum bounded parameter space.
+
+    Adam first clamps individual effects and the identifiability transform then
+    zero-centres them. A value sitting on a clamp can therefore move just beyond
+    it when the vector mean is removed. This active-set projection solves the
+    joint constraints together: every effect remains in ``[-bound, bound]`` and
+    the vector sum remains zero.
+    """
+
+    if not values:
+        raise CornerModelError("cannot project an empty effect vector")
+    raw = {name: float(value) for name, value in values.items()}
+    free = list(raw)
+    fixed: dict[str, float] = {}
+    projected: dict[str, float] = {}
+    tolerance = 1e-12
+
+    for _ in range(len(raw) + 1):
+        if not free:
+            if abs(math.fsum(fixed.values())) <= tolerance:
+                projected = dict(fixed)
+            break
+        offset = (
+            math.fsum(raw[name] for name in free) + math.fsum(fixed.values())
+        ) / len(free)
+        lower = [name for name in free if raw[name] - offset < -bound]
+        upper = [name for name in free if raw[name] - offset > bound]
+        if not lower and not upper:
+            projected = dict(fixed)
+            projected.update({name: raw[name] - offset for name in free})
+            residual = math.fsum(projected.values())
+            if abs(residual) > tolerance:
+                for name in free:
+                    corrected = projected[name] - residual
+                    if -bound <= corrected <= bound:
+                        projected[name] = corrected
+                        break
+            break
+        lower_names = set(lower)
+        upper_names = set(upper)
+        fixed.update({name: -bound for name in lower})
+        fixed.update({name: bound for name in upper})
+        free = [
+            name for name in free if name not in lower_names and name not in upper_names
+        ]
+
+    if set(projected) != set(raw):
+        raise CornerModelError("effect projection did not converge")
+    if any(abs(value) > bound + tolerance for value in projected.values()):
+        raise CornerModelError("effect projection exceeded fitted bounds")
+    if abs(math.fsum(projected.values())) > tolerance:
+        raise CornerModelError("effect projection did not preserve zero centring")
+    return projected
 
 
 def _fit_mean_parameters(
@@ -895,7 +968,11 @@ def _fit_mean_parameters(
     learning_rate: float,
     regularization: float,
 ) -> dict[str, Any]:
-    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
         raise CornerModelError("iterations must be a positive integer")
     learning_rate = _require_positive(learning_rate, "learning_rate")
     regularization = _require_finite(regularization, "regularization")
@@ -908,13 +985,13 @@ def _fit_mean_parameters(
         "home_intercept": float(parameters["home_intercept"]),
         "away_intercept": float(parameters["away_intercept"]),
         "attack": {team: float(parameters["attack"][team]) for team in teams},
-        "concession": {
-            team: float(parameters["concession"][team]) for team in teams
-        },
+        "concession": {team: float(parameters["concession"][team]) for team in teams},
     }
-    names = ["home_intercept", "away_intercept"] + [
-        f"attack:{team}" for team in teams
-    ] + [f"concession:{team}" for team in teams]
+    names = (
+        ["home_intercept", "away_intercept"]
+        + [f"attack:{team}" for team in teams]
+        + [f"concession:{team}" for team in teams]
+    )
     first_moment = {name: 0.0 for name in names}
     second_moment = {name: 0.0 for name in names}
     beta1, beta2, epsilon = 0.9, 0.999, 1e-8
@@ -967,10 +1044,7 @@ def _fit_mean_parameters(
                 2.0 * regularization * float(result["attack"][team]) / denominator
             )
             gradients[f"concession:{team}"] += (
-                2.0
-                * regularization
-                * float(result["concession"][team])
-                / denominator
+                2.0 * regularization * float(result["concession"][team]) / denominator
             )
         for name in names:
             gradient = gradients[name]
@@ -996,9 +1070,15 @@ def _fit_mean_parameters(
         for team in teams:
             result["attack"][team] -= attack_mean
             result["concession"][team] -= concession_mean
+        result["attack"] = _project_zero_sum_bounded_effects(result["attack"])
+        result["concession"] = _project_zero_sum_bounded_effects(result["concession"])
         adjustment = attack_mean + concession_mean
-        result["home_intercept"] += adjustment
-        result["away_intercept"] += adjustment
+        result["home_intercept"] = max(
+            -2.5, min(4.5, result["home_intercept"] + adjustment)
+        )
+        result["away_intercept"] = max(
+            -2.5, min(4.5, result["away_intercept"] + adjustment)
+        )
     return result
 
 
@@ -1031,10 +1111,13 @@ def _select_dispersion(
     total_weight = math.fsum(weights)
 
     def loss(shape: float) -> float:
-        return math.fsum(
-            weight * -nb2_log_pmf(count, mean, shape)
-            for count, mean, weight in zip(counts, means, weights)
-        ) / total_weight
+        return (
+            math.fsum(
+                weight * -nb2_log_pmf(count, mean, shape)
+                for count, mean, weight in zip(counts, means, weights)
+            )
+            / total_weight
+        )
 
     return min(sorted(candidates), key=lambda shape: (loss(shape), shape))
 
@@ -1209,7 +1292,7 @@ def _fit_records(
         "parameters": parameters,
         "fit": {
             "objective": "time_weighted_independent_nb2_negative_log_likelihood",
-            "optimizer": "deterministic_adam_with_dispersion_grid",
+            "optimizer": OPTIMIZER,
             "penalized_mean_nll": objective,
             "effective_weight": math.fsum(weights),
             "historical_simulation": bool(historical_simulation),
@@ -1232,9 +1315,7 @@ def fit_model(
     allow_research_cohorts: bool = False,
 ) -> dict[str, Any]:
     source = Path(csv_path).resolve()
-    records = load_training_csv(
-        source, allow_research_cohorts=allow_research_cohorts
-    )
+    records = load_training_csv(source, allow_research_cohorts=allow_research_cohorts)
     generated = generated_at if generated_at is not None else _utc_now()
     return _fit_records(
         records,
@@ -1285,7 +1366,8 @@ def validate_model(model: Mapping[str, Any]) -> None:
         or authority.get("formal_eligible") is not False
         or authority.get("scope") != "research_observation_only"
         or authority.get("manager_source_replay_required") is not True
-        or authority.get("source_lineage_is_claim_only_until_manager_replay") is not True
+        or authority.get("source_lineage_is_claim_only_until_manager_replay")
+        is not True
         or not isinstance(authority.get("research_cohort_opt_in"), bool)
     ):
         raise CornerModelError("model authority must remain research-observation-only")
@@ -1294,9 +1376,14 @@ def validate_model(model: Mapping[str, Any]) -> None:
         raise CornerModelError("model_hash must be a SHA-256 hash")
     if stored_hash != calculate_model_hash(model):
         raise CornerModelError("model_hash does not match model contents")
-    generated = _parse_aware_datetime(str(model.get("generated_at") or ""), "generated_at")
+    generated = _parse_aware_datetime(
+        str(model.get("generated_at") or ""), "generated_at"
+    )
     dependence = model.get("dependence")
-    if not isinstance(dependence, Mapping) or dependence.get("model") != DEPENDENCE_MODEL:
+    if (
+        not isinstance(dependence, Mapping)
+        or dependence.get("model") != DEPENDENCE_MODEL
+    ):
         raise CornerModelError("model dependence must be independent_nb")
     if dependence.get("fitted_correlation") is not False:
         raise CornerModelError("independent NB model cannot claim fitted correlation")
@@ -1335,7 +1422,9 @@ def validate_model(model: Mapping[str, Any]) -> None:
     ):
         raise CornerModelError("training kickoff range or epoch is inconsistent")
     if generated <= cutoff_kickoff:
-        raise CornerModelError("model generated_at must be after training cutoff kickoff")
+        raise CornerModelError(
+            "model generated_at must be after training cutoff kickoff"
+        )
     latest_collection = _parse_aware_datetime(
         str(training.get("latest_source_collected_at") or ""),
         "training.latest_source_collected_at",
@@ -1372,8 +1461,12 @@ def validate_model(model: Mapping[str, Any]) -> None:
             raise CornerModelError(f"training dataset_profile.{field} is invalid")
     _validate_fixture_graph_profile(
         profile.get("fixture_graph"),
-        teams=training.get("teams") if isinstance(training.get("teams"), list) else None,
-        matches=training.get("matches") if isinstance(training.get("matches"), int) else None,
+        teams=training.get("teams")
+        if isinstance(training.get("teams"), list)
+        else None,
+        matches=training.get("matches")
+        if isinstance(training.get("matches"), int)
+        else None,
     )
     for field in ("seasons", "phases", "competition_regimes"):
         values = profile.get(field)
@@ -1410,7 +1503,9 @@ def validate_model(model: Mapping[str, Any]) -> None:
     if isinstance(matches, bool) or not isinstance(matches, int) or matches < 2:
         raise CornerModelError("training matches must be at least two")
     if profile.get("rows") != matches:
-        raise CornerModelError("training dataset_profile rows do not match training matches")
+        raise CornerModelError(
+            "training dataset_profile rows do not match training matches"
+        )
     config = model.get("config")
     if not isinstance(config, Mapping):
         raise CornerModelError("model config is missing")
@@ -1427,7 +1522,11 @@ def validate_model(model: Mapping[str, Any]) -> None:
     if config.get("fixture_graph_identification") != COMPONENT_IDENTIFICATION_METHOD:
         raise CornerModelError("config fixture graph identification is unsupported")
     iterations = config.get("iterations")
-    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
         raise CornerModelError("config.iterations must be a positive integer")
     parameters = model.get("parameters")
     if not isinstance(parameters, Mapping):
@@ -1447,6 +1546,8 @@ def validate_model(model: Mapping[str, Any]) -> None:
         raise CornerModelError("model fit metadata is missing")
     if fit.get("objective") != "time_weighted_independent_nb2_negative_log_likelihood":
         raise CornerModelError("fit objective is unsupported")
+    if fit.get("optimizer") != OPTIMIZER:
+        raise CornerModelError("fit optimizer is unsupported")
     _require_finite(fit.get("penalized_mean_nll"), "fit.penalized_mean_nll")
     _require_positive(fit.get("effective_weight"), "fit.effective_weight")
     if not isinstance(fit.get("historical_simulation"), bool):
@@ -1475,9 +1576,7 @@ def _component_outcome(value: float) -> str:
 
 def _combined_settlement_state(outcomes: Sequence[str]) -> str:
     if len(outcomes) == 1:
-        return {"win": "full_win", "push": "push", "loss": "loss"}[
-            outcomes[0]
-        ]
+        return {"win": "full_win", "push": "push", "loss": "loss"}[outcomes[0]]
     key = tuple(sorted(outcomes))
     mapping = {
         ("win", "win"): "full_win",
@@ -1492,7 +1591,11 @@ def _combined_settlement_state(outcomes: Sequence[str]) -> str:
 
 
 def _validate_matrix(matrix: Sequence[Sequence[float]]) -> list[list[float]]:
-    if not isinstance(matrix, Sequence) or isinstance(matrix, (str, bytes)) or not matrix:
+    if (
+        not isinstance(matrix, Sequence)
+        or isinstance(matrix, (str, bytes))
+        or not matrix
+    ):
         raise CornerModelError("joint corner matrix must be non-empty")
     result: list[list[float]] = []
     width: int | None = None
@@ -1589,7 +1692,9 @@ def _fixture_rates(
     model: Mapping[str, Any], home_team: str, away_team: str, unknown_team_policy: str
 ) -> tuple[float, float, list[str], dict[str, Any]]:
     if not home_team or not away_team or home_team == away_team:
-        raise CornerModelError("fixture requires distinct non-empty home and away teams")
+        raise CornerModelError(
+            "fixture requires distinct non-empty home and away teams"
+        )
     if unknown_team_policy not in {"error", "league_average"}:
         raise CornerModelError("unknown_team_policy must be error or league_average")
     teams = set(model["training"]["teams"])
@@ -1668,7 +1773,7 @@ def predict_model(
     generated_at: str | datetime | None = None,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
     total_markets: Iterable[tuple[str, float]] = (),
     corner_handicaps: Iterable[tuple[str, float]] = (),
 ) -> dict[str, Any]:
@@ -1679,7 +1784,9 @@ def predict_model(
     )
     model_time = _parse_aware_datetime(str(model["generated_at"]), "model.generated_at")
     if prediction_time < model_time:
-        raise CornerModelError("prediction generated_at cannot predate model generation")
+        raise CornerModelError(
+            "prediction generated_at cannot predate model generation"
+        )
     if prediction_time >= kickoff_time:
         raise CornerModelError("prediction generated_at must be before kickoff")
     training_end = date.fromisoformat(str(model["training"]["end_date"]))
@@ -1710,15 +1817,17 @@ def predict_model(
         tail_tolerance=marginal_tolerance,
         hard_max_corners=hard_max_corners,
     )
-    raw_retained = (
-        float(home_distribution["raw_retained_probability"])
-        * float(away_distribution["raw_retained_probability"])
+    raw_retained = float(home_distribution["raw_retained_probability"]) * float(
+        away_distribution["raw_retained_probability"]
     )
     raw_omitted = max(0.0, 1.0 - raw_retained)
     if raw_omitted > tolerance + 1e-15:
         raise CornerModelError("joint corner tail exceeds requested tolerance")
     matrix = [
-        [home_probability * away_probability / raw_retained for away_probability in away_distribution["probabilities"]]
+        [
+            home_probability * away_probability / raw_retained
+            for away_probability in away_distribution["probabilities"]
+        ]
         for home_probability in home_distribution["probabilities"]
     ]
     expected = _matrix_expectations(matrix)
@@ -1726,8 +1835,7 @@ def predict_model(
         aggregate_corner_total(matrix, side, line) for side, line in total_markets
     ]
     handicaps = [
-        aggregate_corner_handicap(matrix, side, line)
-        for side, line in corner_handicaps
+        aggregate_corner_handicap(matrix, side, line) for side, line in corner_handicaps
     ]
     warnings = []
     fallback_used = bool(unknown)
@@ -1756,15 +1864,9 @@ def predict_model(
             "unknown_team_policy": unknown_team_policy,
             "unknown_teams": unknown,
             "fixture_graph_policy": component_audit["policy"],
-            "home_training_component_id": component_audit[
-                "home_training_component_id"
-            ],
-            "away_training_component_id": component_audit[
-                "away_training_component_id"
-            ],
-            "same_training_component": component_audit[
-                "same_training_component"
-            ],
+            "home_training_component_id": component_audit["home_training_component_id"],
+            "away_training_component_id": component_audit["away_training_component_id"],
+            "same_training_component": component_audit["same_training_component"],
         },
         "provenance": {
             "training_source_data_hash": model["training"]["source_data_hash"],
@@ -1847,7 +1949,9 @@ def predict_model(
     return prediction
 
 
-def _assert_close(actual: Any, expected: float, name: str, tolerance: float = 1e-10) -> None:
+def _assert_close(
+    actual: Any, expected: float, name: str, tolerance: float = 1e-10
+) -> None:
     number = _require_finite(actual, name)
     if abs(number - expected) > tolerance:
         raise CornerModelError(f"{name} does not match its canonical distribution")
@@ -1882,7 +1986,9 @@ def _validate_market_list(
         if not isinstance(supplied_probabilities, Mapping) or set(
             supplied_probabilities
         ) != set(SETTLEMENT_STATES):
-            raise CornerModelError(f"{market}[{index}] needs all five settlement states")
+            raise CornerModelError(
+                f"{market}[{index}] needs all five settlement states"
+            )
         for state in SETTLEMENT_STATES:
             _assert_close(
                 supplied_probabilities[state],
@@ -1940,8 +2046,12 @@ def validate_prediction(
     if not LEAGUE_KEY_RE.fullmatch(league_key):
         raise CornerModelError("prediction fixture league_key is invalid")
     if not home_team or not away_team or home_team == away_team:
-        raise CornerModelError("prediction fixture teams must be distinct and non-empty")
-    kickoff = _parse_aware_datetime(str(fixture.get("kickoff") or ""), "fixture.kickoff")
+        raise CornerModelError(
+            "prediction fixture teams must be distinct and non-empty"
+        )
+    kickoff = _parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "fixture.kickoff"
+    )
     if fixture.get("kickoff_epoch") != int(kickoff.timestamp()):
         raise CornerModelError("prediction fixture kickoff_epoch is inconsistent")
     if generated >= kickoff:
@@ -1950,11 +2060,11 @@ def validate_prediction(
     if not isinstance(provenance, Mapping):
         raise CornerModelError("prediction provenance is missing")
     try:
-        cutoff = date.fromisoformat(
-            str(provenance.get("training_cutoff_date") or "")
-        )
+        cutoff = date.fromisoformat(str(provenance.get("training_cutoff_date") or ""))
     except ValueError as exc:
-        raise CornerModelError("prediction training cutoff must be an ISO date") from exc
+        raise CornerModelError(
+            "prediction training cutoff must be an ISO date"
+        ) from exc
     cutoff_kickoff = _parse_aware_datetime(
         str(provenance.get("training_cutoff_kickoff_utc") or ""),
         "prediction.training_cutoff_kickoff_utc",
@@ -1998,11 +2108,13 @@ def validate_prediction(
         )
     for field in ("fixture_set_hash", "response_set_hash", "semantic_rows_hash"):
         if not HASH_RE.fullmatch(str(provenance_profile.get(field) or "")):
-            raise CornerModelError(
-                f"prediction dataset profile {field} is invalid"
-            )
+            raise CornerModelError(f"prediction dataset profile {field} is invalid")
     profile_rows = provenance_profile.get("rows")
-    if isinstance(profile_rows, bool) or not isinstance(profile_rows, int) or profile_rows < 2:
+    if (
+        isinstance(profile_rows, bool)
+        or not isinstance(profile_rows, int)
+        or profile_rows < 2
+    ):
         raise CornerModelError("prediction dataset profile rows are invalid")
     component_map = _validate_fixture_graph_profile(
         provenance_profile["fixture_graph"], matches=profile_rows
@@ -2011,11 +2123,9 @@ def validate_prediction(
         str(provenance_profile.get("kickoff_utc_end") or ""),
         "prediction.dataset_profile.kickoff_utc_end",
     )
-    if (
-        profile_end != cutoff_kickoff
-        or provenance_profile.get("kickoff_epoch_end")
-        != int(cutoff_kickoff.timestamp())
-    ):
+    if profile_end != cutoff_kickoff or provenance_profile.get(
+        "kickoff_epoch_end"
+    ) != int(cutoff_kickoff.timestamp()):
         raise CornerModelError(
             "prediction dataset profile cutoff does not match provenance"
         )
@@ -2023,7 +2133,10 @@ def validate_prediction(
     if lineage is not None and _normalize_source_lineage(lineage) != lineage:
         raise CornerModelError("prediction source lineage is not canonical")
     dependence = prediction.get("dependence")
-    if not isinstance(dependence, Mapping) or dependence.get("model") != DEPENDENCE_MODEL:
+    if (
+        not isinstance(dependence, Mapping)
+        or dependence.get("model") != DEPENDENCE_MODEL
+    ):
         raise CornerModelError("prediction dependence must be independent_nb")
     if dependence.get("fitted_correlation") is not False:
         raise CornerModelError("prediction cannot claim a fitted correlation")
@@ -2159,7 +2272,9 @@ def validate_prediction(
             "core prediction validation cannot grant manager verification authority"
         )
     expected_status = (
-        "registered_model_distribution" if verified and not fallback else "observation_only"
+        "registered_model_distribution"
+        if verified and not fallback
+        else "observation_only"
     )
     if (
         usage.get("status") != expected_status
@@ -2167,7 +2282,8 @@ def validate_prediction(
         or usage.get("known_team_model_input") is not (not fallback)
         or usage.get("same_training_component_model_input") is not (not fallback)
         or usage.get("source_bound_manager_verified") is not verified
-        or usage.get("eligible_for_formal_model_input") is not (verified and not fallback)
+        or usage.get("eligible_for_formal_model_input")
+        is not (verified and not fallback)
     ):
         raise CornerModelError(
             "usage_policy does not match source verification and unknown-team handling"
@@ -2183,9 +2299,10 @@ def validate_prediction(
         validate_model(model)
         if prediction.get("model_hash") != model.get("model_hash"):
             raise CornerModelError("prediction model_hash does not match model")
-        if provenance.get("training_source_data_hash") != model["training"][
-            "source_data_hash"
-        ]:
+        if (
+            provenance.get("training_source_data_hash")
+            != model["training"]["source_data_hash"]
+        ):
             raise CornerModelError("prediction source hash does not match model")
         if provenance.get("training_source_lineage") != model["training"].get(
             "source_lineage"
@@ -2208,11 +2325,13 @@ def validate_prediction(
         )
         if generated < model_generated:
             raise CornerModelError("prediction predates model generation")
-        expected_home, expected_away, expected_unknown, expected_components = _fixture_rates(
-            model,
-            home_team,
-            away_team,
-            policy,
+        expected_home, expected_away, expected_unknown, expected_components = (
+            _fixture_rates(
+                model,
+                home_team,
+                away_team,
+                policy,
+            )
         )
         _assert_close(home_mean, expected_home, "home_mean versus model")
         _assert_close(away_mean, expected_away, "away_mean versus model")
@@ -2227,20 +2346,28 @@ def validate_prediction(
 
 
 def save_json(value: Mapping[str, Any], output: str | Path | None) -> None:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-        allow_nan=False,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
     if output is None:
         sys.stdout.write(payload)
         return
     path = Path(output).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", newline="\n", delete=False, dir=path.parent, suffix=".tmp"
+        "w",
+        encoding="utf-8",
+        newline="\n",
+        delete=False,
+        dir=path.parent,
+        suffix=".tmp",
     ) as handle:
         handle.write(payload)
         temporary = Path(handle.name)
@@ -2315,13 +2442,12 @@ def _date_groups(records: Sequence[Mapping[str, Any]]) -> list[list[dict[str, An
 
 
 def _count_crps(probabilities: Sequence[float], actual: int, minimum: int = 0) -> float:
-    if actual < minimum:
-        raise CornerModelError("actual count is below distribution support")
     maximum = minimum + len(probabilities) - 1
+    lower = min(minimum, actual)
     upper = max(maximum, actual)
     cumulative = 0.0
     score = 0.0
-    for value in range(minimum, upper + 1):
+    for value in range(lower, upper + 1):
         if minimum <= value <= maximum:
             cumulative += probabilities[value - minimum]
         observed = 1.0 if value >= actual else 0.0
@@ -2377,9 +2503,7 @@ def _weighted_empirical_distribution(
     # that mass on the training-only league mean instead of spreading it
     # uniformly over 0..99: a uniform prior has mean 49.5 and badly distorts
     # the small early walk-forward blocks for which smoothing matters most.
-    prior_mean = max(
-        _weighted_mean([float(value) for value in counts], weights), 1e-3
-    )
+    prior_mean = max(_weighted_mean([float(value) for value in counts], weights), 1e-3)
     prior_dispersion = _moment_dispersion(counts, weights)
     raw_prior = _nb2_prefix(prior_mean, prior_dispersion, maximum)
     retained_prior = math.fsum(raw_prior)
@@ -2466,9 +2590,8 @@ def _score_baseline(
             )
         )
     else:
-        probability = (
-            float(home_probabilities[actual_home])
-            * float(away_probabilities[actual_away])
+        probability = float(home_probabilities[actual_home]) * float(
+            away_probabilities[actual_away]
         )
         joint_log_loss = -math.log(max(probability, LOG_LOSS_FLOOR))
     totals = _total_distribution(matrix)
@@ -2476,9 +2599,7 @@ def _score_baseline(
     return {
         "joint_log_loss": joint_log_loss,
         "total_crps": _count_crps(totals, actual_home + actual_away),
-        "margin_crps": _count_crps(
-            margins, actual_home - actual_away, margin_minimum
-        ),
+        "margin_crps": _count_crps(margins, actual_home - actual_away, margin_minimum),
     }
 
 
@@ -2507,8 +2628,7 @@ def _paired_comparison(
     independent_units = len(clusters)
     if independent_units >= 2:
         cluster_sums = [
-            math.fsum(value - mean for value in values)
-            for values in clusters.values()
+            math.fsum(value - mean for value in values) for values in clusters.values()
         ]
         variance = (
             independent_units
@@ -2528,9 +2648,7 @@ def _paired_comparison(
         "model_mean": model_mean,
         "baseline_mean": baseline_mean,
         "mean_improvement": mean,
-        "relative_improvement": (
-            mean / baseline_mean if baseline_mean > 0.0 else None
-        ),
+        "relative_improvement": (mean / baseline_mean if baseline_mean > 0.0 else None),
         "sample_standard_error": standard_error,
         "one_sided_95_lower_bound": lower_bound,
         "uncertainty_estimable": independent_units >= 2,
@@ -2548,7 +2666,7 @@ def backtest_model(
     regularization: float = 0.02,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
     source_lineage: Mapping[str, Any] | None = None,
     allow_research_cohorts: bool = False,
 ) -> dict[str, Any]:
@@ -2569,9 +2687,7 @@ def backtest_model(
     if unknown_team_policy not in {"error", "league_average"}:
         raise CornerModelError("unknown_team_policy must be error or league_average")
     source = Path(csv_path).resolve()
-    records = load_training_csv(
-        source, allow_research_cohorts=allow_research_cohorts
-    )
+    records = load_training_csv(source, allow_research_cohorts=allow_research_cohorts)
     normalized_lineage = _normalize_source_lineage(source_lineage)
     dataset_profile = training_dataset_profile(records)
     groups = _date_groups(records)
@@ -2598,11 +2714,11 @@ def backtest_model(
         train_groups.append(group)
         train_count += len(group)
     if not remaining:
-        raise CornerModelError("backtest needs matches after the initial training window")
+        raise CornerModelError(
+            "backtest needs matches after the initial training window"
+        )
     remaining_matches = sum(len(group) for group in remaining)
-    adaptive_block_size = math.ceil(
-        remaining_matches / MAX_WALK_FORWARD_BLOCKS
-    )
+    adaptive_block_size = math.ceil(remaining_matches / MAX_WALK_FORWARD_BLOCKS)
     effective_test_block_size = max(test_block_size, adaptive_block_size)
 
     blocks: list[dict[str, Any]] = []
@@ -2643,7 +2759,9 @@ def backtest_model(
             cutoff = max(row["date"] for row in training_rows)
             cutoff_kickoff = max(row["kickoff_utc"] for row in training_rows)
             if cutoff >= test_start or cutoff_kickoff >= first_test_kickoff:
-                raise CornerModelError("walk-forward training cutoff leaked into test block")
+                raise CornerModelError(
+                    "walk-forward training cutoff leaked into test block"
+                )
             baselines = _block_baselines(
                 training_rows,
                 half_life_days=half_life_days,
@@ -2697,13 +2815,9 @@ def backtest_model(
                 margin_minimum, margins = _margin_distribution(matrix)
                 expected = prediction["expected_corners"]
                 total_diagnostic_line = round(float(expected["total"]) * 4.0) / 4.0
-                handicap_diagnostic_line = (
-                    round(-float(expected["margin"]) * 4.0) / 4.0
-                )
+                handicap_diagnostic_line = round(-float(expected["margin"]) * 4.0) / 4.0
                 baseline_scores = {
-                    baseline_name: _score_baseline(
-                        baseline, actual_home, actual_away
-                    )
+                    baseline_name: _score_baseline(baseline, actual_home, actual_away)
                     for baseline_name, baseline in baselines.items()
                 }
                 forecasts.append(
@@ -2775,9 +2889,7 @@ def backtest_model(
                             float(parameters["away_mean"]),
                             float(parameters["away_dispersion"]),
                         ),
-                        "total_crps": _count_crps(
-                            totals, actual_home + actual_away
-                        ),
+                        "total_crps": _count_crps(totals, actual_home + actual_away),
                         "margin_crps": _count_crps(
                             margins, actual_home - actual_away, margin_minimum
                         ),
@@ -2798,9 +2910,7 @@ def backtest_model(
                     "training_cutoff_kickoff_utc": _canonical_datetime(
                         cutoff_kickoff, "training_cutoff_kickoff"
                     ),
-                    "training_cutoff_kickoff_epoch": int(
-                        cutoff_kickoff.timestamp()
-                    ),
+                    "training_cutoff_kickoff_epoch": int(cutoff_kickoff.timestamp()),
                     "test_dates": [
                         group[0]["date"].isoformat() for group in test_groups
                     ],
@@ -2837,8 +2947,7 @@ def backtest_model(
             "predictions": len(forecasts),
             "metrics": {
                 metric: math.fsum(
-                    float(row["baselines"][baseline_name][metric])
-                    for row in forecasts
+                    float(row["baselines"][baseline_name][metric]) for row in forecasts
                 )
                 / len(forecasts)
                 for metric in COMPARISON_METRICS
@@ -2847,10 +2956,7 @@ def backtest_model(
         comparisons[baseline_name] = {
             metric: _paired_comparison(
                 [float(row[metric]) for row in forecasts],
-                [
-                    float(row["baselines"][baseline_name][metric])
-                    for row in forecasts
-                ],
+                [float(row["baselines"][baseline_name][metric]) for row in forecasts],
                 [int(row["block"]) for row in forecasts],
             )
             for metric in COMPARISON_METRICS
@@ -2862,9 +2968,7 @@ def backtest_model(
     holdout_component_excluded = 0
     holdout_model_hash: str | None = None
     if holdout_rows:
-        holdout_training_rows = [
-            row for group in development_groups for row in group
-        ]
+        holdout_training_rows = [row for group in development_groups for row in group]
         first_holdout_kickoff = min(row["kickoff_utc"] for row in holdout_rows)
         holdout_generated = _canonical_datetime(
             first_holdout_kickoff - timedelta(microseconds=1),
@@ -2974,9 +3078,7 @@ def backtest_model(
                         float(expected["total"]) - actual_home - actual_away
                     ),
                     "baselines": {
-                        name: _score_baseline(
-                            baseline, actual_home, actual_away
-                        )
+                        name: _score_baseline(baseline, actual_home, actual_away)
                         for name, baseline in holdout_baselines.items()
                     },
                 }
@@ -3146,7 +3248,9 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--regularization", type=float, default=0.02)
     fit.add_argument("--generated-at")
 
-    predict = subparsers.add_parser("predict", help="create a corner prediction artifact")
+    predict = subparsers.add_parser(
+        "predict", help="create a corner prediction artifact"
+    )
     predict.add_argument("--model", required=True)
     predict.add_argument("--home-team", required=True)
     predict.add_argument("--away-team", required=True)
@@ -3157,7 +3261,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--unknown-team-policy", choices=("error", "league_average"), default="error"
     )
     predict.add_argument("--tail-tolerance", type=float, default=1e-8)
-    predict.add_argument("--hard-max-corners", type=int, default=80)
+    predict.add_argument(
+        "--hard-max-corners", type=int, default=DEFAULT_HARD_MAX_CORNERS
+    )
     predict.add_argument("--total", action="append", default=[])
     predict.add_argument("--handicap", action="append", default=[])
 
@@ -3176,7 +3282,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--unknown-team-policy", choices=("error", "league_average"), default="error"
     )
     backtest.add_argument("--tail-tolerance", type=float, default=1e-8)
-    backtest.add_argument("--hard-max-corners", type=int, default=80)
+    backtest.add_argument(
+        "--hard-max-corners", type=int, default=DEFAULT_HARD_MAX_CORNERS
+    )
     return parser
 
 

@@ -3,12 +3,11 @@ from __future__ import annotations
 import copy
 import csv
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from scripts import htft_model, joint_path_kernel, joint_scenario_model, score_model
-
 
 SAMPLE_ROWS = [
     ("2025-01-01", "Alpha", "Bravo", 2, 0, 1, 0),
@@ -141,9 +140,7 @@ class JointScenarioModelTests(unittest.TestCase):
             "one_x_two": {
                 "odds_format": "decimal",
                 "stored_complete_firm_count": 1,
-                "rows": [
-                    {"bookmaker": "Firm", "home": 2.3, "draw": 3.2, "away": 2.9}
-                ],
+                "rows": [{"bookmaker": "Firm", "home": 2.3, "draw": 3.2, "away": 2.9}],
             },
             "asian_handicap": {
                 "odds_format": "hong_kong",
@@ -210,9 +207,7 @@ class JointScenarioModelTests(unittest.TestCase):
         rebuilt = joint_path_kernel.validate_kernel(prediction["path_kernel"])
         self.assertAlmostEqual(rebuilt["total_probability"], 1.0, places=12)
         self.assertTrue(prediction["support_feasibility_audit"]["feasible"])
-        self.assertTrue(
-            prediction["support_feasibility_audit"]["performed_before_ipf"]
-        )
+        self.assertTrue(prediction["support_feasibility_audit"]["performed_before_ipf"])
         for actual_row, expected_row in zip(
             prediction["full_time_score_marginal"]["probabilities"],
             self.score_prediction["score_matrix"]["probabilities"],
@@ -263,8 +258,11 @@ class JointScenarioModelTests(unittest.TestCase):
         mutations = (
             (
                 "kernel scale",
-                lambda item: item["path_kernel"]["group_scales"]["entries"][0]
-                .__setitem__(3, item["path_kernel"]["group_scales"]["entries"][0][3] * 1.01),
+                lambda item: item["path_kernel"]["group_scales"]["entries"][
+                    0
+                ].__setitem__(
+                    3, item["path_kernel"]["group_scales"]["entries"][0][3] * 1.01
+                ),
             ),
             (
                 "kernel Hall audit",
@@ -284,8 +282,11 @@ class JointScenarioModelTests(unittest.TestCase):
             ),
             (
                 "half-time path marginal",
-                lambda item: item["half_time_score_marginal"]["probabilities"][0]
-                .__setitem__(0, item["half_time_score_marginal"]["probabilities"][0][0] + 0.01),
+                lambda item: item["half_time_score_marginal"]["probabilities"][
+                    0
+                ].__setitem__(
+                    0, item["half_time_score_marginal"]["probabilities"][0][0] + 0.01
+                ),
             ),
         )
         for label, mutate in mutations:
@@ -305,12 +306,8 @@ class JointScenarioModelTests(unittest.TestCase):
         seed, seed_tail = joint_scenario_model.build_feasible_joint_seed(
             components["half_time"]["conditional_score_matrix"],
             components["second_half"]["conditional_score_matrix"],
-            full_home_goals_max=current["full_time_score_marginal"][
-                "home_goals_max"
-            ],
-            full_away_goals_max=current["full_time_score_marginal"][
-                "away_goals_max"
-            ],
+            full_home_goals_max=current["full_time_score_marginal"]["home_goals_max"],
+            full_away_goals_max=current["full_time_score_marginal"]["away_goals_max"],
         )
         legacy = copy.deepcopy(current)
         legacy["schema_version"] = joint_scenario_model.LEGACY_SCHEMA_VERSION
@@ -333,15 +330,11 @@ class JointScenarioModelTests(unittest.TestCase):
         legacy["htft_marginal"]["full_time_result_probabilities"] = (
             joint_scenario_model._htft_column_marginal(legacy_htft)
         )
-        legacy["joint_top_two"] = joint_scenario_model._top_two(
-            legacy["joint_cells"]
-        )
+        legacy["joint_top_two"] = joint_scenario_model._top_two(legacy["joint_cells"])
         legacy["joint_top_two_probability_mass"] = sum(
             item["probability"] for item in legacy["joint_top_two"]
         )
-        legacy["derived"] = joint_scenario_model._derived_full_time_fields(
-            legacy_score
-        )
+        legacy["derived"] = joint_scenario_model._derived_full_time_fields(legacy_score)
         for field in (
             "path_kernel",
             "support_feasibility_audit",
@@ -421,9 +414,7 @@ class JointScenarioModelTests(unittest.TestCase):
             joint_path_kernel.validate_kernel(prediction["path_kernel"])[
                 "event_planes"
             ],
-            joint_path_kernel.validate_kernel(baseline["path_kernel"])[
-                "event_planes"
-            ],
+            joint_path_kernel.validate_kernel(baseline["path_kernel"])["event_planes"],
         )
         joint_scenario_model.validate_prediction_inputs(
             prediction,
@@ -452,9 +443,7 @@ class JointScenarioModelTests(unittest.TestCase):
         self.assertEqual(audit["fixture_binding"]["status"], "verified")
         self.assertEqual(audit["limitations"], [])
         self.assertEqual(audit["effective_quality"], "complete")
-        self.assertEqual(
-            audit["bundle_validation_status"], "validated_current_schema"
-        )
+        self.assertEqual(audit["bundle_validation_status"], "validated_current_schema")
         joint_scenario_model.validate_prediction_inputs(
             prediction,
             self.model,
@@ -478,7 +467,9 @@ class JointScenarioModelTests(unittest.TestCase):
         ):
             self._predict(bundle, expected_match_id="other-match")
 
-    def test_upstream_half_time_anchor_is_disclosed_but_attached_bundle_stays_zero_weight(self):
+    def test_upstream_half_time_anchor_is_disclosed_but_attached_bundle_stays_zero_weight(
+        self,
+    ):
         anchored_htft = self._anchored_htft_prediction()
         bundle = self._current_market_bundle()
         prediction = self._predict(
@@ -494,9 +485,7 @@ class JointScenarioModelTests(unittest.TestCase):
         self.assertTrue(prediction["upstream_anchor_conditioning_enabled"])
         self.assertTrue(prediction["research_market_informed"])
         self.assertFalse(prediction["formal_eligible"])
-        self.assertFalse(
-            prediction["attached_market_evidence_conditioning_enabled"]
-        )
+        self.assertFalse(prediction["attached_market_evidence_conditioning_enabled"])
         anchor = prediction["external_anchor_audit"]
         self.assertTrue(anchor["enabled"])
         self.assertEqual(anchor["component"], "half_time")
@@ -505,14 +494,10 @@ class JointScenarioModelTests(unittest.TestCase):
         self.assertFalse(anchor["same_price_independent_ev_authorized"])
         self.assertEqual(prediction["market_evidence"]["conditioning_weight"], 0.0)
         self.assertFalse(prediction["market_evidence"]["used_for_probability"])
-        self.assertFalse(
-            prediction["policy"]["same_price_independent_ev_authorized"]
-        )
+        self.assertFalse(prediction["policy"]["same_price_independent_ev_authorized"])
         for result, expected in {"H": 0.20, "D": 0.50, "A": 0.30}.items():
             self.assertAlmostEqual(
-                prediction["htft_marginal"]["half_time_result_probabilities"][
-                    result
-                ],
+                prediction["htft_marginal"]["half_time_result_probabilities"][result],
                 expected,
                 places=12,
             )
@@ -550,10 +535,17 @@ class JointScenarioModelTests(unittest.TestCase):
     def test_policy_generated_at_and_derived_audits_are_strict_after_rehash(self):
         prediction = self._predict()
         mutations = (
-            ("policy", lambda item: item["policy"].__setitem__("template_fallback_allowed", True)),
+            (
+                "policy",
+                lambda item: item["policy"].__setitem__(
+                    "template_fallback_allowed", True
+                ),
+            ),
             (
                 "generated_at",
-                lambda item: item.__setitem__("generated_at", "2098-12-31T09:01:00+09:00"),
+                lambda item: item.__setitem__(
+                    "generated_at", "2098-12-31T09:01:00+09:00"
+                ),
             ),
             (
                 "derived-field",
@@ -624,9 +616,7 @@ class JointScenarioModelTests(unittest.TestCase):
         saved = json.loads(output_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["fixture"]["match_id"], "2913681")
         self.assertEqual(
-            joint_scenario_model.main(
-                ["validate", "--prediction", str(output_path)]
-            ),
+            joint_scenario_model.main(["validate", "--prediction", str(output_path)]),
             0,
         )
 

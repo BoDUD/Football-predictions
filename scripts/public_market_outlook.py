@@ -23,28 +23,35 @@ except ImportError:  # Invoked directly from the ``scripts`` directory.
 
 
 ARTIFACT_TYPE = "soccer_public_market_outlook"
-SCHEMA_VERSION = "1.3.0"
+SCHEMA_VERSION = "1.4.0"
 PROBABILITY_TOLERANCE = 1e-9
 THREE_WAY_CLARITY_GAP_PP = 8.0
 GOAL_RANGE_CLARITY_GAP_PP = 8.0
 BTTS_CLARITY_GAP_PP = 10.0
 JOINT_DISPLAY_COUNT = 2
 JOINT_DISPLAY_POLICY = "global_joint_probability_top_two_with_rank1_goal_range_v2"
+JOINT_UNCERTAINTY_SCHEMA_VERSION = "1.0.0"
+JOINT_UNCERTAINTY_POLICY = "normalized_shannon_entropy_positive_joint_events_v1"
+JOINT_UNCERTAINTY_LOW_MAX = 0.65
+JOINT_UNCERTAINTY_MEDIUM_MAX = 0.82
 JOINT_SCENARIO_WARNING = (
-    "总进球取联合概率第 1 名事件的比分映射；半全场和波胆逐行来自联合 Top 2；"
-    "属于高方差概率参考，不构成主推或正式推荐。"
+    "联合首选情景总球取联合概率第 1 名事件的比分映射；半全场和波胆逐行来自联合 Top 2；"
+    "总进球边际第一仅作分布审计，不替代联合情景；以上均不构成主推或正式推荐。"
 )
 
 _HALF_TIME_ITEMS = (("H", "胜"), ("D", "平"), ("A", "负"))
 _ONE_X_TWO_ITEMS = (("home", "胜"), ("draw", "平"), ("away", "负"))
-_GOAL_RANGE_ITEMS = (("0-1", "0-1球"), ("2-3", "2-3球"), ("4-6", "4-6球"), ("7+", "7+球"))
+_GOAL_RANGE_ITEMS = (
+    ("0-1", "0-1球"),
+    ("2-3", "2-3球"),
+    ("4-6", "4-6球"),
+    ("7+", "7+球"),
+)
 _BTTS_ITEMS = (("yes", "是"), ("no", "否"))
 _HTFT_CODES = frozenset(
     half + full for half in ("H", "D", "A") for full in ("H", "D", "A")
 )
-_HTFT_ORDER = tuple(
-    half + full for half in ("H", "D", "A") for full in ("H", "D", "A")
-)
+_HTFT_ORDER = tuple(half + full for half in ("H", "D", "A") for full in ("H", "D", "A"))
 
 
 class PublicMarketOutlookError(ValueError):
@@ -57,9 +64,7 @@ def _finite_probability(value: Any, name: str) -> float:
     try:
         probability = float(value)
     except (TypeError, ValueError) as exc:
-        raise PublicMarketOutlookError(
-            f"{name} must be a finite probability"
-        ) from exc
+        raise PublicMarketOutlookError(f"{name} must be a finite probability") from exc
     if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
         raise PublicMarketOutlookError(f"{name} must be between zero and one")
     return probability
@@ -84,10 +89,7 @@ def _distribution(
             "code": code,
             "label": label,
             "probability": _finite_probability(value[code], f"{name}.{code}"),
-            "percentage": _finite_probability(
-                value[code], f"{name}.{code}"
-            )
-            * 100.0,
+            "percentage": _finite_probability(value[code], f"{name}.{code}") * 100.0,
         }
         for code, label in item_order
     ]
@@ -261,8 +263,7 @@ def _validate_saved_joint_top_two(value: Any) -> list[dict[str, Any]]:
                 f"joint_top_two[{index - 1}] violates high-variance safety policy"
             )
         if (
-            "counts_as_primary" in item
-            and item.get("counts_as_primary") is not False
+            "counts_as_primary" in item and item.get("counts_as_primary") is not False
         ) or (
             "requires_bookmaker_odds" in item
             and item.get("requires_bookmaker_odds") is not False
@@ -295,7 +296,9 @@ def _validate_saved_joint_top_two(value: Any) -> list[dict[str, Any]]:
             item.get("probability"), f"joint_top_two[{index - 1}].probability"
         )
         if probability <= 0.0:
-            raise PublicMarketOutlookError("joint scenario probabilities must be positive")
+            raise PublicMarketOutlookError(
+                "joint scenario probabilities must be positive"
+            )
         if previous_probability is not None and probability > previous_probability:
             raise PublicMarketOutlookError("joint_top_two is not probability-ranked")
         previous_probability = probability
@@ -352,7 +355,9 @@ def _rank_legacy_joint_cells(value: Any) -> list[dict[str, Any]]:
             )
         )
     if abs(math.fsum(total_terms) - 1.0) > PROBABILITY_TOLERANCE:
-        raise PublicMarketOutlookError("legacy joint_cells probabilities must sum to one")
+        raise PublicMarketOutlookError(
+            "legacy joint_cells probabilities must sum to one"
+        )
     ranked.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
     if len(ranked) < 2:
         raise PublicMarketOutlookError(
@@ -412,11 +417,15 @@ def _rank_kernel_event_planes(path_kernel: Any) -> list[dict[str, Any]]:
             total_terms.extend(row)
         plane_shape = (len(rows), len(rows[0]))
         if any(len(row) != plane_shape[1] for row in rows):
-            raise PublicMarketOutlookError("path_kernel event planes must be rectangular")
+            raise PublicMarketOutlookError(
+                "path_kernel event planes must be rectangular"
+            )
         if shape is None:
             shape = plane_shape
         elif plane_shape != shape:
-            raise PublicMarketOutlookError("path_kernel event planes must share one grid")
+            raise PublicMarketOutlookError(
+                "path_kernel event planes must share one grid"
+            )
         half_result = ("H", "D", "A")[half_index]
         for home_goals, row in enumerate(rows):
             for away_goals, probability in enumerate(row):
@@ -479,6 +488,81 @@ def _reconstruct_joint_ranking(
     )
 
 
+def _joint_concentration(reconstructed: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Recompute concentration and entropy from the complete archived joint distribution.
+
+    Saved or caller-supplied summary fields are deliberately ignored.  The only
+    input is the ranking reconstructed from validated legacy cells or validated
+    compact-kernel event planes.
+    """
+
+    probabilities = [
+        _finite_probability(
+            item.get("probability"), f"joint_event[{index}].probability"
+        )
+        for index, item in enumerate(reconstructed)
+    ]
+    if len(probabilities) < JOINT_DISPLAY_COUNT or any(
+        probability <= 0.0 for probability in probabilities
+    ):
+        raise PublicMarketOutlookError(
+            "joint concentration requires at least two positive events"
+        )
+    probability_sum = math.fsum(probabilities)
+    if abs(probability_sum - 1.0) > PROBABILITY_TOLERANCE:
+        raise PublicMarketOutlookError(
+            "reconstructed joint probabilities must sum to one"
+        )
+
+    top_two_probability = math.fsum(probabilities[:JOINT_DISPLAY_COUNT])
+    other_probability = math.fsum(probabilities[JOINT_DISPLAY_COUNT:])
+    if abs(top_two_probability + other_probability - 1.0) > PROBABILITY_TOLERANCE:
+        raise PublicMarketOutlookError("joint concentration mass is inconsistent")
+
+    entropy_nats = -math.fsum(
+        probability * math.log(probability) for probability in probabilities
+    )
+    maximum_entropy_nats = math.log(len(probabilities))
+    normalized_entropy = (
+        entropy_nats / maximum_entropy_nats if maximum_entropy_nats > 0.0 else 0.0
+    )
+    if -PROBABILITY_TOLERANCE <= normalized_entropy < 0.0:
+        normalized_entropy = 0.0
+    elif 1.0 < normalized_entropy <= 1.0 + PROBABILITY_TOLERANCE:
+        normalized_entropy = 1.0
+    if not 0.0 <= normalized_entropy <= 1.0:
+        raise PublicMarketOutlookError("normalized joint entropy is outside [0, 1]")
+
+    if normalized_entropy <= JOINT_UNCERTAINTY_LOW_MAX:
+        level, label = "low", "低"
+    elif normalized_entropy <= JOINT_UNCERTAINTY_MEDIUM_MAX:
+        level, label = "medium", "中"
+    else:
+        level, label = "high", "高"
+
+    return {
+        "top2_cumulative_probability": top_two_probability,
+        "top2_cumulative_percentage": top_two_probability * 100.0,
+        "other_scenarios_probability": other_probability,
+        "other_scenarios_percentage": other_probability * 100.0,
+        "uncertainty": {
+            "schema_version": JOINT_UNCERTAINTY_SCHEMA_VERSION,
+            "policy": JOINT_UNCERTAINTY_POLICY,
+            "level": level,
+            "label_zh": label,
+            "entropy_nats": entropy_nats,
+            "maximum_entropy_nats": maximum_entropy_nats,
+            "normalized_entropy": normalized_entropy,
+            "effective_event_count": math.exp(entropy_nats),
+            "positive_event_count": len(probabilities),
+            "thresholds": {
+                "low_max": JOINT_UNCERTAINTY_LOW_MAX,
+                "medium_max": JOINT_UNCERTAINTY_MEDIUM_MAX,
+            },
+        },
+    }
+
+
 def _safe_joint_scenarios(
     joint_artifact: Mapping[str, Any],
     *,
@@ -489,8 +573,7 @@ def _safe_joint_scenarios(
         raise PublicMarketOutlookError("derived_field_audits is missing")
     audit = audits.get("joint_top_two")
     if not isinstance(audit, Mapping) or (
-        audit.get("provenance")
-        != "validated_joint_cells_probability_ranking"
+        audit.get("provenance") != "validated_joint_cells_probability_ranking"
         or audit.get("probability_mode") != probability_mode
         or audit.get("status") != "high_variance_reference"
         or audit.get("recommendation_eligible") is not False
@@ -499,9 +582,7 @@ def _safe_joint_scenarios(
         raise PublicMarketOutlookError(
             "derived_field_audits.joint_top_two is not a safe reference"
         )
-    saved_top_two = _validate_saved_joint_top_two(
-        joint_artifact.get("joint_top_two")
-    )
+    saved_top_two = _validate_saved_joint_top_two(joint_artifact.get("joint_top_two"))
     reconstructed, ranking_source = _reconstruct_joint_ranking(joint_artifact)
     if reconstructed[:2] != saved_top_two:
         raise PublicMarketOutlookError(
@@ -521,6 +602,7 @@ def _safe_joint_scenarios(
     top_one_top_two_gap_pp = (
         reconstructed[0]["probability"] - reconstructed[1]["probability"]
     ) * 100.0
+    concentration = _joint_concentration(reconstructed)
     return {
         "items": display_items,
         "display_count": JOINT_DISPLAY_COUNT,
@@ -538,6 +620,7 @@ def _safe_joint_scenarios(
         "counts_as_primary": False,
         "requires_bookmaker_odds": False,
         "warning": JOINT_SCENARIO_WARNING,
+        **concentration,
     }
 
 
@@ -626,6 +709,12 @@ def build_public_market_outlook(joint_artifact: Mapping[str, Any]) -> dict[str, 
             "goal_ranges": goal_ranges,
             "btts": btts,
         },
+        "goal_range_marginal_audit": {
+            "label": "总进球边际第一",
+            "top1": dict(goal_ranges["top1"]),
+            "role": "marginal_distribution_audit_only",
+            "replaces_joint_scenario": False,
+        },
         "joint_scenarios": joint_scenarios,
         "warning": JOINT_SCENARIO_WARNING,
         "formal_recommendation_generated": False,
@@ -639,6 +728,10 @@ __all__ = [
     "JOINT_DISPLAY_COUNT",
     "JOINT_DISPLAY_POLICY",
     "JOINT_SCENARIO_WARNING",
+    "JOINT_UNCERTAINTY_LOW_MAX",
+    "JOINT_UNCERTAINTY_MEDIUM_MAX",
+    "JOINT_UNCERTAINTY_POLICY",
+    "JOINT_UNCERTAINTY_SCHEMA_VERSION",
     "PublicMarketOutlookError",
     "SCHEMA_VERSION",
     "THREE_WAY_CLARITY_GAP_PP",

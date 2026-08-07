@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import csv
 import copy
+import csv
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-
-SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "htft_holdout_evaluator.py"
-)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "htft_holdout_evaluator.py"
 SPEC = importlib.util.spec_from_file_location("soccer_htft_holdout_evaluator", SCRIPT)
 assert SPEC and SPEC.loader
 evaluator = importlib.util.module_from_spec(SPEC)
@@ -52,6 +47,10 @@ def _row(
         if spec["league_key"] == league_key
     )
     return {
+        "match_id": (
+            f"{season}{month_day.replace('-', '')}"
+            f"{sum(ord(char) for char in home + away) % 10000:04d}"
+        ),
         "date": match_date,
         "home_team": home,
         "away_team": away,
@@ -81,7 +80,79 @@ def _row(
     }
 
 
-def _league_rows(league_key: str, extra_per_holdout: int = 0) -> list[dict[str, object]]:
+def _league_rows(
+    league_key: str, extra_per_holdout: int = 0
+) -> list[dict[str, object]]:
+    if league_key == "uefa_nations_league":
+        regime = "national_team_league_and_knockout"
+        return [
+            _row(
+                league_key,
+                2020,
+                "09-03",
+                "A",
+                "B",
+                (1, 0),
+                (0, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2020,
+                "11-18",
+                "B",
+                "C",
+                (1, 1),
+                (0, 1),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+            _row(
+                league_key,
+                2022,
+                "06-03",
+                "A",
+                "C",
+                (2, 1),
+                (1, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2022,
+                "09-27",
+                "C",
+                "B",
+                (0, 1),
+                (0, 0),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+            _row(
+                league_key,
+                2024,
+                "09-05",
+                "A",
+                "B",
+                (1, 1),
+                (0, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2024,
+                "11-18",
+                "C",
+                "A",
+                (0, 2),
+                (0, 1),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+        ]
     rows: list[dict[str, object]] = [
         _row(league_key, 2022, "02-01", "A", "B", (1, 0), (0, 0)),
         _row(league_key, 2022, "03-01", "B", "C", (2, 1), (1, 1)),
@@ -123,7 +194,9 @@ def _league_rows(league_key: str, extra_per_holdout: int = 0) -> list[dict[str, 
     return rows
 
 
-def _write_csv(path: Path, fields: tuple[str, ...], rows: list[dict[str, object]]) -> None:
+def _write_csv(
+    path: Path, fields: tuple[str, ...], rows: list[dict[str, object]]
+) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -144,6 +217,7 @@ def _market_rows(score_rows: list[dict[str, object]]) -> list[dict[str, object]]
         ):
             rows.append(
                 {
+                    "match_id": score["match_id"],
                     "league_key": score["league_key"],
                     "league": score["league"],
                     "season": score["season"],
@@ -219,8 +293,10 @@ def _build_bundle(
         # Synthetic fixtures deliberately use compact seasons. Register their
         # audited schedule totals for this isolated evaluator module so that
         # 2022-2025 are complete while the as-of 2026 cohort remains partial.
-        registered_counts = evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS.setdefault(
-            league_key, {}
+        registered_counts = (
+            evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS.setdefault(
+                league_key, {}
+            )
         )
         for season, count in season_counts.items():
             registered_counts[season] = count + (1 if season == 2026 else 0)
@@ -271,9 +347,7 @@ def _build_bundle(
                 count,
                 "2026-08-03",
             )
-            for season, count in sorted(
-                seasons.items(), key=lambda item: int(item[0])
-            )
+            for season, count in sorted(seasons.items(), key=lambda item: int(item[0]))
         }
         bookmaker_completeness = {
             bookmaker: {
@@ -340,6 +414,9 @@ def _build_bundle(
         "as_of_date": "2026-08-03",
         "season_completeness_policy": dict(
             evaluator.history_importer.SEASON_COMPLETENESS_POLICY
+        ),
+        "administrative_result_exclusion_policy": (
+            evaluator.history_importer._administrative_result_exclusion_policy()
         ),
         "source_timezone": "UTC",
         "kickoff_year_policy": (
@@ -418,15 +495,11 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
         league_promotion_cohorts: list[dict[str, str]] = []
         league_research_shadow_cohorts: list[dict[str, str]] = []
         for split in league["splits"]:
-            model = evaluator._cohort_accumulators(
-                evaluator.MODEL_PAIR_MASS_THRESHOLD
-            )
+            model = evaluator._cohort_accumulators(evaluator.MODEL_PAIR_MASS_THRESHOLD)
             market = evaluator._cohort_accumulators(
                 evaluator.MARKET_PAIR_MASS_THRESHOLD
             )
-            baseline = evaluator._new_accumulator(
-                evaluator.MODEL_PAIR_MASS_THRESHOLD
-            )
+            baseline = evaluator._new_accumulator(evaluator.MODEL_PAIR_MASS_THRESHOLD)
             paired_cohorts = evaluator._new_paired_cohorts()
             paired = paired_cohorts["overall"]
             context_slices = evaluator._new_context_slice_accumulators()
@@ -450,9 +523,7 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
                     forecast["actual_class"],
                     group=league["league_key"],
                 )
-                cohort = (
-                    "league_average_fallback" if used_fallback else "known_teams"
-                )
+                cohort = "league_average_fallback" if used_fallback else "known_teams"
                 evaluator._add_paired_score(
                     paired_cohorts[cohort],
                     forecast["model_probabilities"],
@@ -465,16 +536,13 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
                     format_version=forecast["format_version"],
                     phase_group=forecast["phase_group"],
                     model_probabilities=forecast["model_probabilities"],
-                    baseline_probabilities=forecast[
-                        "empirical_baseline_probabilities"
-                    ],
+                    baseline_probabilities=forecast["empirical_baseline_probabilities"],
                     actual_class=forecast["actual_class"],
                     used_fallback=used_fallback,
                     group=league["league_key"],
                 )
             split["fallback_fixture_count"] = sum(
-                int(item["used_league_average_fallback"])
-                for item in split["forecasts"]
+                int(item["used_league_average_fallback"]) for item in split["forecasts"]
             )
             split["model_only"] = evaluator._finalize_cohorts(model)
             split["league_empirical_frequency_baseline"]["metrics"] = (
@@ -513,9 +581,7 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
                 "league_key": league["league_key"],
                 "split_id": split["split_id"],
             }
-            if split["evaluation_scope"][
-                "component_promotion_evidence_included"
-            ]:
+            if split["evaluation_scope"]["component_promotion_evidence_included"]:
                 league_promotion_accumulators.append(accumulators)
                 league_promotion_cohorts.append(cohort)
                 promotion_eligible_accumulators.append(accumulators)
@@ -560,6 +626,82 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
 
 
 class HtftHoldoutEvaluatorTests(unittest.TestCase):
+    def test_competition_specific_regime_partition_keeps_cups_separate(self):
+        brazil_rows = [
+            {"competition_regime": "national_knockout_cup"},
+            {"competition_regime": "regular"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            brazil_rows, league_key="brazil_cup"
+        )
+        self.assertEqual(included, brazil_rows[:1])
+        self.assertEqual(excluded, brazil_rows[1:])
+
+        nations_rows = [
+            {"competition_regime": "national_team_league_and_knockout"},
+            {"competition_regime": "regular"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            nations_rows, league_key="uefa_nations_league"
+        )
+        self.assertEqual(included, nations_rows[:1])
+        self.assertEqual(excluded, nations_rows[1:])
+
+        ordinary_rows = [
+            {"competition_regime": "regular"},
+            {"competition_regime": "national_knockout_cup"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            ordinary_rows, league_key="brazil_serie_a"
+        )
+        self.assertEqual(included, ordinary_rows[:1])
+        self.assertEqual(excluded, ordinary_rows[1:])
+
+        norway_rows = [
+            {"competition_regime": "regular"},
+            {"competition_regime": "relegation_playoff"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            norway_rows, league_key="norway_eliteserien"
+        )
+        self.assertEqual(included, norway_rows[:1])
+        self.assertEqual(excluded, norway_rows[1:])
+
+    def test_nations_biennial_history_uses_2024_validation_without_fake_2025(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("uefa_nations_league", 0)])
+
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=20,
+                experimental_override=True,
+            )
+
+        league = result["leagues"][0]
+        self.assertEqual(league["league_key"], "uefa_nations_league")
+        by_split = {item["split_id"]: item for item in league["splits"]}
+        validation = by_split["validation_2024"]
+        self.assertEqual(validation["status"], "evaluated")
+        self.assertEqual(validation["training_match_count"], 4)
+        self.assertEqual(validation["test_match_count"], 2)
+        self.assertEqual(
+            validation["training_competition_regime_counts"],
+            {"national_team_league_and_knockout": 4},
+        )
+        self.assertEqual(
+            validation["test_competition_regime_counts"],
+            {"national_team_league_and_knockout": 2},
+        )
+        self.assertLess(
+            validation["training_cutoff_date"], validation["test_date_start"]
+        )
+        for split_id in ("fixed_holdout_2025", "shadow_2026"):
+            self.assertEqual(by_split[split_id]["status"], "not_available")
+            self.assertEqual(by_split[split_id]["test_match_count"], 0)
+
     def setUp(self) -> None:
         self._expected_season_counts = copy.deepcopy(
             evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS
@@ -633,9 +775,7 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             )
             self.assertTrue(scope["partial_test_season"])
             self.assertFalse(scope["complete_test_season_status_verified"])
-            self.assertEqual(
-                scope["evidence_role"], "research_shadow_partial_season"
-            )
+            self.assertEqual(scope["evidence_role"], "research_shadow_partial_season")
             self.assertFalse(scope["component_promotion_evidence_included"])
             self.assertFalse(scope["promotion_ready"])
             promotion_evidence = result["promotion_evidence"]
@@ -651,14 +791,13 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                promotion_evidence["eligible_classification_summary"]["model_only"]
-                ["overall"]["metrics"]["sample_count"],
+                promotion_evidence["eligible_classification_summary"]["model_only"][
+                    "overall"
+                ]["metrics"]["sample_count"],
                 4,
             )
             self.assertFalse(result["formal_htft_eligible"])
-            self.assertFalse(
-                result["complete_prekickoff_nine_way_htft_odds_available"]
-            )
+            self.assertFalse(result["complete_prekickoff_nine_way_htft_odds_available"])
             self.assertFalse(result["ev_roi_evaluation_available"])
             self.assertEqual(
                 result["evaluation_scope"], "nine_class_probability_accuracy_only"
@@ -681,9 +820,7 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             )
 
             all_splits = result["summary"]["all_splits"]
-            total = all_splits["model_only"]["overall"]["metrics"][
-                "sample_count"
-            ]
+            total = all_splits["model_only"]["overall"]["metrics"]["sample_count"]
             slices = all_splits["context_slices"]
             self.assertEqual(
                 set(slices["format_version"]),
@@ -702,8 +839,9 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         item["sample_count"],
-                        item["league_empirical_frequency_baseline"]["metrics"]
-                        ["sample_count"],
+                        item["league_empirical_frequency_baseline"]["metrics"][
+                            "sample_count"
+                        ],
                     )
                     self.assertIn(
                         "nine_class_log_loss",
@@ -839,9 +977,7 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             )
             for split in result["leagues"][0]["splits"]:
                 self.assertTrue(split["strict_cutoff_verified"])
-                self.assertLess(
-                    split["training_cutoff_date"], split["test_date_start"]
-                )
+                self.assertLess(split["training_cutoff_date"], split["test_date_start"])
                 self.assertEqual(split["unknown_team_policy"], "league_average")
                 self.assertGreater(split["fallback_fixture_count"], 0)
                 self.assertGreater(
@@ -876,18 +1012,19 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     sum(
-                        item["support"]
-                        for item in model_metrics["per_class"].values()
+                        item["support"] for item in model_metrics["per_class"].values()
                     ),
                     split["test_match_count"],
                 )
+            self.assertEqual(result["fit_config"]["half_time_half_life_days"], 730.0)
+            self.assertEqual(result["fit_config"]["full_time_half_life_days"], 365.0)
             self.assertEqual(
-                result["fit_config"]["half_time_half_life_days"], 730.0
+                result["fit_config"]["association_half_life_days"],
+                result["fit_config"]["full_time_half_life_days"],
             )
             self.assertEqual(
-                result["fit_config"]["full_time_half_life_days"], 365.0
+                result["fit_config"]["seed_method"], "empirical_association"
             )
-            self.assertEqual(result["fit_config"]["seed_method"], "empirical_association")
             self.assertTrue(output.is_file())
             persisted = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(persisted["evaluation_hash"], result["evaluation_hash"])
@@ -918,19 +1055,20 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 for league in result["leagues"]
             ]
             total = sum(item["sample_count"] for item in league_metrics)
-            weighted_log_loss = sum(
-                item["nine_class_log_loss"] * item["sample_count"]
-                for item in league_metrics
-            ) / total
+            weighted_log_loss = (
+                sum(
+                    item["nine_class_log_loss"] * item["sample_count"]
+                    for item in league_metrics
+                )
+                / total
+            )
             summary = result["summary"]["all_splits"]["model_only"]["overall"]
             self.assertEqual(summary["metrics"]["sample_count"], total)
             self.assertAlmostEqual(
                 summary["metrics"]["nine_class_log_loss"], weighted_log_loss
             )
             weighted_top_two_hits = sum(item["top_two_hits"] for item in league_metrics)
-            self.assertEqual(
-                summary["metrics"]["top_two_hits"], weighted_top_two_hits
-            )
+            self.assertEqual(summary["metrics"]["top_two_hits"], weighted_top_two_hits)
             self.assertAlmostEqual(
                 summary["metrics"]["top_two_accuracy"],
                 weighted_top_two_hits / total,
@@ -953,12 +1091,8 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             policy = result["market_research_policy"]
             self.assertTrue(policy["research_only"])
             self.assertFalse(policy["official_anchor_interface_used"])
-            self.assertEqual(
-                policy["collection_time_status"], "unavailable_in_source"
-            )
-            self.assertEqual(
-                policy["policy"], evaluator.RESEARCH_MARKET_POLICY
-            )
+            self.assertEqual(policy["collection_time_status"], "unavailable_in_source")
+            self.assertEqual(policy["policy"], evaluator.RESEARCH_MARKET_POLICY)
             serialized = json.dumps(result, sort_keys=True)
             self.assertNotIn("captured_at", serialized)
             split = result["leagues"][0]["splits"][0]
@@ -1012,6 +1146,36 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                     bootstrap_repetitions=50,
                 )
 
+    def test_association_half_life_is_fitted_and_not_display_only_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+
+            frozen = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            short_decay = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                association_half_life_days=30.0,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+
+            self.assertEqual(frozen["fit_config"]["association_half_life_days"], 365.0)
+            self.assertEqual(
+                short_decay["fit_config"]["association_half_life_days"], 30.0
+            )
+            self.assertNotEqual(
+                frozen["leagues"][0]["splits"][0]["model_hash"],
+                short_decay["leagues"][0]["splits"][0]["model_hash"],
+            )
+
     def test_promoted_claim_cannot_be_forged_by_rehashing(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1036,6 +1200,31 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             ):
                 evaluator.validate_evaluation(tampered)
 
+    def test_rehashed_nonpositive_association_half_life_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            tampered = copy.deepcopy(result)
+            tampered["fit_config"]["association_half_life_days"] = 0.0
+            tampered["promotion"] = evaluator._promotion_metadata(
+                fit_configuration_matches_promoted=False,
+                bootstrap_configuration_matches_promoted=False,
+            )
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
+
+            with self.assertRaisesRegex(
+                evaluator.HoldoutEvaluationError,
+                "association_half_life_days must be positive",
+            ):
+                evaluator.validate_evaluation(tampered)
+
     def test_source_binding_rejects_rehashed_fake_dataset_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1048,9 +1237,7 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 experimental_override=True,
             )
             tampered = copy.deepcopy(result)
-            tampered["leagues"][0]["score_dataset"]["sha256"] = (
-                "sha256:" + "0" * 64
-            )
+            tampered["leagues"][0]["score_dataset"]["sha256"] = "sha256:" + "0" * 64
             tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
 
             with self.assertRaisesRegex(
@@ -1101,13 +1288,11 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             )
             tampered = copy.deepcopy(result)
             split = tampered["leagues"][0]["splits"][0]
-            known = split[
-                "model_minus_empirical_baseline_by_team_availability"
-            ]["known_teams"]
+            known = split["model_minus_empirical_baseline_by_team_availability"][
+                "known_teams"
+            ]
             known["nine_class_log_loss"]["mean_delta"] = -999.0
-            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(
-                tampered
-            )
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
 
             with self.assertRaisesRegex(
                 evaluator.HoldoutEvaluationError,
@@ -1129,8 +1314,14 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             tampered = copy.deepcopy(result)
             forecast = tampered["leagues"][0]["splits"][0]["forecasts"][0]
             probabilities = forecast["model_probabilities"]
-            first, last = evaluator.htft_model.HTFT_CLASSES[0], evaluator.htft_model.HTFT_CLASSES[-1]
-            probabilities[first], probabilities[last] = probabilities[last], probabilities[first]
+            first, last = (
+                evaluator.htft_model.HTFT_CLASSES[0],
+                evaluator.htft_model.HTFT_CLASSES[-1],
+            )
+            probabilities[first], probabilities[last] = (
+                probabilities[last],
+                probabilities[first],
+            )
             ranked = sorted(
                 evaluator.htft_model.HTFT_CLASSES,
                 key=lambda name: (
@@ -1168,8 +1359,8 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             rows[0]["competition_regime"] = "2026_vision_regional"
             _write_csv(score_path, SCORE_FIELDS, rows)
-            manifest["leagues"][0]["score_dataset"]["sha256"] = (
-                evaluator._file_hash(score_path)
+            manifest["leagues"][0]["score_dataset"]["sha256"] = evaluator._file_hash(
+                score_path
             )
             manifest["leagues"][0]["competition_regimes"]["2022"] = {
                 "2026_vision_regional": 1,
@@ -1189,11 +1380,7 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 for regime, count in sorted(counts.items())
             ]
             manifest["bundle_hash"] = evaluator._canonical_hash(
-                {
-                    key: value
-                    for key, value in manifest.items()
-                    if key != "bundle_hash"
-                }
+                {key: value for key, value in manifest.items() if key != "bundle_hash"}
             )
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1205,9 +1392,12 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 {"dataset_dir": root},
                 {"manifest_path": manifest_path},
             ):
-                with self.subTest(**kwargs), self.assertRaisesRegex(
-                    evaluator.HoldoutEvaluationError,
-                    "semantic validation.*competition_regime",
+                with (
+                    self.subTest(**kwargs),
+                    self.assertRaisesRegex(
+                        evaluator.HoldoutEvaluationError,
+                        "semantic validation.*competition_regime",
+                    ),
                 ):
                     evaluator.evaluate_bundle(
                         **kwargs,
@@ -1227,9 +1417,9 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                 experimental_override=True,
             )
             tampered = copy.deepcopy(result)
-            metrics = tampered["leagues"][0]["splits"][0]["model_only"][
-                "overall"
-            ]["metrics"]
+            metrics = tampered["leagues"][0]["splits"][0]["model_only"]["overall"][
+                "metrics"
+            ]
             metrics["top_two_hits"] += 1
             tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
 

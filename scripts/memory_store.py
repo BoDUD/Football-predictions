@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from copy import deepcopy
-from functools import wraps
-from html.parser import HTMLParser
 import hashlib
 import json
 import math
 import re
 import sys
 import unicodedata
+from contextlib import contextmanager
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+from functools import wraps
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -22,14 +22,66 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
-    from scripts import corner_ranker, htft_ranker, joint_scenario_model
+    from scripts import (
+        corner_ranker,
+        forward_policy,
+        htft_ranker,
+        joint_scenario_model,
+        source_evidence,
+    )
 except ImportError:  # Direct execution from scripts/.
     script_directory = str(Path(__file__).resolve().parent)
     if script_directory not in sys.path:
         sys.path.insert(0, script_directory)
     import corner_ranker  # type: ignore[no-redef]
+    import forward_policy  # type: ignore[no-redef]
     import htft_ranker  # type: ignore[no-redef]
     import joint_scenario_model  # type: ignore[no-redef]
+    import source_evidence  # type: ignore[no-redef]
+
+try:
+    from soccer_predict.domain.probabilities import (
+        effective_settlement_win_probability,
+        matrix_1x2,
+        matrix_settlement_distribution,
+        validate_probability_matrix,
+    )
+    from soccer_predict.domain.settlement import (
+        parse_goal_range_selection,
+        result_code,
+        settle_asian,
+        settle_btts,
+        settle_corner_handicap,
+        settle_corner_total,
+        settle_goal_range,
+        settle_half_time,
+        settle_htft,
+        settle_total,
+        split_line,
+    )
+except ImportError:  # Direct execution from scripts/ without an installed package.
+    project_root = str(Path(__file__).resolve().parent.parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from soccer_predict.domain.probabilities import (  # type: ignore[no-redef]
+        effective_settlement_win_probability,
+        matrix_1x2,
+        matrix_settlement_distribution,
+        validate_probability_matrix,
+    )
+    from soccer_predict.domain.settlement import (  # type: ignore[no-redef]
+        parse_goal_range_selection,
+        result_code,
+        settle_asian,
+        settle_btts,
+        settle_corner_handicap,
+        settle_corner_total,
+        settle_goal_range,
+        settle_half_time,
+        settle_htft,
+        settle_total,
+        split_line,
+    )
 
 
 PRIMARY_MARKETS = (
@@ -112,16 +164,44 @@ PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
 HTFT_OUTCOMES = tuple(f"{half}{full}" for half in "HDA" for full in "HDA")
 OBSERVATION_SCHEMA_VERSION = "candidate-observation/1.0.0"
-CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/2.0.0"
+CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/3.0.0"
+LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/2.0.0"
 CANDIDATE_EVALUATION_ARTIFACT_TYPE = "soccer_candidate_evaluation"
 CANDIDATE_EVALUATION_KIND = "multi_market_candidate_evaluation"
 CANDIDATE_GATE_CATEGORIES = ("integrity", "value", "risk", "release")
+ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING = "source_market_identity_unavailable"
+ACTIVE_UNAVAILABLE_REASON_CORNER_MODEL_MISSING = "canonical_corner_observation_missing"
+ACTIVE_UNAVAILABLE_REASON_DECIMAL_PRICE_MISSING = (
+    "canonical_decimal_price_snapshot_unavailable"
+)
+ACTIVE_UNAVAILABLE_REASON_DECISION_TIME_PRICE_MISSING = (
+    "decision_time_price_snapshot_unavailable"
+)
 CANDIDATE_SETTLEMENT_STATES = (
     "full_win",
     "half_win",
     "push",
     "half_loss",
     "loss",
+)
+PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/1.0.0"
+FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/2.0.0"
+PREVIOUS_FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/1.0.0"
+FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/2.0.0"
+PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/1.0.0"
+FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/2.0.0"
+PREVIOUS_FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
+    "memory-forward-history-ledger-binding/2.0.0"
+)
+FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
+    "memory-forward-history-ledger-binding/3.0.0"
+)
+PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = (
+    "memory-forward-record-receipt/1.0.0"
+)
+FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/2.0.0"
+FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE = (
+    "memory_store_forward_validation_cohort_export"
 )
 JOINT_SCENARIO_AUDIT_SCHEMA_VERSION = "joint-scenario-audit/1.0.0"
 MARKET_EVIDENCE_MAX_AGE_MINUTES_BY_STAGE = {
@@ -296,7 +376,9 @@ def locked_history_transaction(function):
 def save_history(path: Path, history: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(history, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.write_text(
+        json.dumps(history, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     temp.replace(path)
 
 
@@ -350,9 +432,9 @@ def validate_market_evidence_freshness(
     archive_time = parse_aware_datetime(
         str(archive_value or ""), f"{label} archive time"
     ).astimezone(timezone.utc)
-    captured_time = parse_aware_datetime(
-        str(captured_at or ""), label
-    ).astimezone(timezone.utc)
+    captured_time = parse_aware_datetime(str(captured_at or ""), label).astimezone(
+        timezone.utc
+    )
     if captured_time > archive_time:
         raise ValueError(f"{label} cannot be after archive time")
     age = archive_time - captured_time
@@ -454,7 +536,9 @@ def validate_record_time_metadata(
     )
     kickoff = parse_aware_datetime(kickoff_text, "kickoff")
     if source.astimezone(timezone.utc) != user_local.astimezone(timezone.utc):
-        raise ValueError("source_kickoff and user_local_kickoff must be the same instant")
+        raise ValueError(
+            "source_kickoff and user_local_kickoff must be the same instant"
+        )
     if kickoff.astimezone(timezone.utc) != user_local.astimezone(timezone.utc):
         raise ValueError("kickoff must equal user_local_kickoff")
     if (
@@ -470,7 +554,9 @@ def validate_record_time_metadata(
         raise ValueError("New predictions cannot be archived at or after kickoff")
     if getattr(args, "analysis_stage", "initial") == "lineup-check":
         if seconds_to_kickoff > 30 * 60:
-            raise ValueError("A lineup-check archive is allowed only from T-30 until kickoff")
+            raise ValueError(
+                "A lineup-check archive is allowed only from T-30 until kickoff"
+            )
 
     return {
         "page_status": "prematch",
@@ -540,256 +626,6 @@ def competition_key_for_record(record: dict[str, Any]) -> str:
     return league_key_for_record(identity)
 
 
-def split_line(line: float) -> tuple[float, float]:
-    rounded = round(line * 4)
-    if not math.isclose(line * 4, rounded, abs_tol=1e-7):
-        raise ValueError(f"Line must use quarter-goal increments: {line}")
-    if abs(rounded) % 2 == 1:
-        return line - 0.25, line + 0.25
-    return line, line
-
-
-def label_result(value: float) -> str:
-    if math.isclose(value, 1.0):
-        return "win"
-    if math.isclose(value, 0.5):
-        return "half_win"
-    if math.isclose(value, 0.0):
-        return "push"
-    if math.isclose(value, -0.5):
-        return "half_loss"
-    return "loss"
-
-
-def settle_components(values: tuple[float, float]) -> str:
-    score = sum(1.0 if v > 0 else 0.0 if math.isclose(v, 0.0) else -1.0 for v in values) / 2
-    return label_result(score)
-
-
-def settle_asian(pick: dict[str, Any] | None, home: int, away: int) -> str | None:
-    if not pick:
-        return None
-    side = pick["side"]
-    margin = home - away if side == "home" else away - home
-    a, b = split_line(float(pick["line"]))
-    return settle_components((margin + a, margin + b))
-
-
-def settle_total(pick: dict[str, Any] | None, home: int, away: int) -> str | None:
-    if not pick:
-        return None
-    total = home + away
-    a, b = split_line(float(pick["line"]))
-    if pick["side"] == "over":
-        return settle_components((total - a, total - b))
-    return settle_components((a - total, b - total))
-
-
-def parse_goal_range_selection(value: str) -> dict[str, Any]:
-    selection = re.sub(r"\s+", "", str(value or ""))
-    inclusive = re.fullmatch(r"(\d+)-(\d+)", selection)
-    if inclusive:
-        minimum, maximum = (int(part) for part in inclusive.groups())
-        if minimum > maximum:
-            raise ValueError("Goal-range lower bound cannot exceed its upper bound")
-        return {
-            "selection": f"{minimum}-{maximum}",
-            "minimum_goals": minimum,
-            "maximum_goals": maximum,
-        }
-    or_more = re.fullmatch(r"(\d+)\+", selection)
-    if or_more:
-        minimum = int(or_more.group(1))
-        return {
-            "selection": f"{minimum}+",
-            "minimum_goals": minimum,
-            "maximum_goals": None,
-        }
-    raise ValueError("Goal range must be inclusive MIN-MAX or N+, for example 2-3 or 7+")
-
-
-def settle_goal_range(
-    pick: dict[str, Any] | None, home: int, away: int
-) -> str | None:
-    if not pick:
-        return None
-    total = home + away
-    minimum = pick.get("minimum_goals")
-    maximum = pick.get("maximum_goals")
-    if minimum is None:
-        parsed = parse_goal_range_selection(str(pick.get("selection", "")))
-        minimum = parsed["minimum_goals"]
-        maximum = parsed["maximum_goals"]
-    hit = total >= int(minimum) and (
-        maximum is None or total <= int(maximum)
-    )
-    return "win" if hit else "loss"
-
-
-def settle_btts(pick: dict[str, Any] | None, home: int, away: int) -> str | None:
-    if not pick:
-        return None
-    actual = home > 0 and away > 0
-    expected = str(pick.get("side", "")).lower() == "yes"
-    return "win" if actual == expected else "loss"
-
-
-def settle_corner_total(
-    pick: dict[str, Any] | None, home_corners: int, away_corners: int
-) -> str | None:
-    return settle_total(pick, home_corners, away_corners)
-
-
-def settle_corner_handicap(
-    pick: dict[str, Any] | None, home_corners: int, away_corners: int
-) -> str | None:
-    return settle_asian(pick, home_corners, away_corners)
-
-
-def result_code(home: int, away: int) -> str:
-    if home > away:
-        return "H"
-    if home < away:
-        return "A"
-    return "D"
-
-
-def settle_half_time(pick: dict[str, Any] | None, home: int, away: int) -> str | None:
-    if not pick:
-        return None
-    market = pick.get("market")
-    if market == "1x2":
-        expected = {"home": "H", "draw": "D", "away": "A"}.get(pick.get("side"))
-        return "win" if expected == result_code(home, away) else "loss"
-    if market == "asian":
-        return settle_asian(pick, home, away)
-    if market == "total":
-        return settle_total(pick, home, away)
-    return None
-
-
-def settle_htft(picks: list[dict[str, Any]] | None, half_home: int, half_away: int, home: int, away: int) -> list[str]:
-    actual = result_code(half_home, half_away) + result_code(home, away)
-    return ["win" if str(pick.get("selection", "")).upper() == actual else "loss" for pick in (picks or [])]
-
-
-def validate_probability_matrix(value: Any, label: str) -> list[list[float]]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{label} must be a non-empty two-dimensional array")
-    matrix: list[list[float]] = []
-    width: int | None = None
-    for row_index, row in enumerate(value):
-        if not isinstance(row, list) or not row:
-            raise ValueError(f"{label} row {row_index} must be a non-empty array")
-        if width is None:
-            width = len(row)
-        elif len(row) != width:
-            raise ValueError(f"{label} rows must have equal length")
-        converted: list[float] = []
-        for column_index, item in enumerate(row):
-            if isinstance(item, bool):
-                raise ValueError(
-                    f"{label}[{row_index}][{column_index}] must be a finite non-negative number"
-                )
-            try:
-                number = float(item)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"{label}[{row_index}][{column_index}] must be numeric"
-                ) from exc
-            if not math.isfinite(number) or number < 0.0:
-                raise ValueError(
-                    f"{label}[{row_index}][{column_index}] must be finite and non-negative"
-                )
-            converted.append(number)
-        matrix.append(converted)
-    total = sum(sum(row) for row in matrix)
-    if abs(total - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
-        raise ValueError(f"{label} probabilities must sum to 1")
-    return matrix
-
-
-def matrix_1x2(matrix: list[list[float]]) -> dict[str, float]:
-    home = draw = away = 0.0
-    for home_goals, row in enumerate(matrix):
-        for away_goals, probability in enumerate(row):
-            if home_goals > away_goals:
-                home += probability
-            elif home_goals == away_goals:
-                draw += probability
-            else:
-                away += probability
-    return {"home_win": home, "draw": draw, "away_win": away}
-
-
-def matrix_settlement_distribution(
-    matrix: list[list[float]],
-    market: str,
-    pick: dict[str, Any],
-) -> dict[str, float]:
-    values = {
-        "full_win": 0.0,
-        "half_win": 0.0,
-        "push": 0.0,
-        "half_loss": 0.0,
-        "loss": 0.0,
-    }
-    result_to_state = {
-        "win": "full_win",
-        "half_win": "half_win",
-        "push": "push",
-        "half_loss": "half_loss",
-        "loss": "loss",
-    }
-    for home_goals, row in enumerate(matrix):
-        for away_goals, probability in enumerate(row):
-            if market == "asian":
-                result = settle_asian(pick, home_goals, away_goals)
-            elif market == "total":
-                result = settle_total(pick, home_goals, away_goals)
-            elif market == "half_time":
-                result = settle_half_time(pick, home_goals, away_goals)
-            else:
-                raise ValueError(f"Cannot derive settlement distribution for {market}")
-            values[result_to_state[str(result)]] += probability
-    return values
-
-
-def effective_settlement_win_probability(
-    distribution: dict[str, Any], label: str
-) -> float | None:
-    """Return the stake-weighted win probability for five-state markets.
-
-    A half win/loss contributes half a stake, while pushes contribute no active
-    stake.  This is the only probability that is comparable with a two-sided
-    no-vig market probability on quarter/integer Asian-style lines.
-    """
-
-    if not isinstance(distribution, dict) or set(distribution) != set(
-        CANDIDATE_SETTLEMENT_STATES
-    ):
-        raise ValueError(f"{label} must contain exactly the five settlement states")
-    values: dict[str, float] = {}
-    for state in CANDIDATE_SETTLEMENT_STATES:
-        raw = distribution.get(state)
-        if (
-            isinstance(raw, bool)
-            or not isinstance(raw, (int, float))
-            or not math.isfinite(float(raw))
-            or not 0.0 <= float(raw) <= 1.0
-        ):
-            raise ValueError(f"{label}.{state} must be finite and between 0 and 1")
-        values[state] = float(raw)
-    if abs(math.fsum(values.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
-        raise ValueError(f"{label} must sum to 1")
-    win_mass = values["full_win"] + values["half_win"] / 2.0
-    loss_mass = values["loss"] + values["half_loss"] / 2.0
-    active_mass = win_mass + loss_mass
-    if active_mass <= PROBABILITY_AUDIT_TOLERANCE:
-        return None
-    return win_mass / active_mass
-
-
 def validate_probability_close(actual: Any, expected: float, label: str) -> None:
     if actual is None or not math.isfinite(float(actual)):
         raise ValueError(f"{label} is required and must be finite")
@@ -830,7 +666,9 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
         return None
     path = Path(supplied).expanduser()
     if not path.is_absolute():
-        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        base = (
+            Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        )
         path = (base / path).resolve()
     raw = path.read_bytes()
     try:
@@ -840,7 +678,9 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
     if not isinstance(snapshot, dict):
         raise ValueError("score-model JSON must be an object")
     if snapshot.get("artifact_type") != "soccer_score_prediction":
-        raise ValueError("score-model file must have artifact_type=soccer_score_prediction")
+        raise ValueError(
+            "score-model file must have artifact_type=soccer_score_prediction"
+        )
     cli_version = str(getattr(args, "model_version", "") or "").strip()
     file_version = str(snapshot.get("model_version") or "").strip()
     if not file_version:
@@ -849,7 +689,9 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
         raise ValueError("--model-version must match score-model JSON model_version")
     embedded_model_hash = str(snapshot.get("model_hash") or "").strip()
     if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", embedded_model_hash):
-        raise ValueError("score prediction artifact requires a valid embedded model_hash")
+        raise ValueError(
+            "score prediction artifact requires a valid embedded model_hash"
+        )
     score_matrix_payload = snapshot.get("score_matrix")
     if not isinstance(score_matrix_payload, dict):
         raise ValueError("score_matrix must be an object with probabilities")
@@ -943,7 +785,9 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
             raise ValueError("htft_matrix must be an object keyed by HH, HD, ..., AA")
         selections = {a + b for a in "HDA" for b in "HDA"}
         if set(htft) != selections:
-            raise ValueError("htft_matrix must contain exactly the nine HT/FT selections")
+            raise ValueError(
+                "htft_matrix must contain exactly the nine HT/FT selections"
+            )
         converted: dict[str, float] = {}
         for selection in sorted(selections):
             value = htft[selection]
@@ -952,7 +796,9 @@ def load_score_model_provenance(args: argparse.Namespace) -> dict[str, Any] | No
                 or not math.isfinite(float(value))
                 or not 0.0 <= float(value) <= 1.0
             ):
-                raise ValueError(f"htft_matrix {selection} must be finite and between 0 and 1")
+                raise ValueError(
+                    f"htft_matrix {selection} must be finite and between 0 and 1"
+                )
             converted[selection] = float(value)
         if abs(sum(converted.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
             raise ValueError("htft_matrix probabilities must sum to 1")
@@ -977,7 +823,9 @@ def resolve_observation_input_path(
 ) -> Path:
     path = Path(supplied).expanduser()
     if not path.is_absolute():
-        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        base = (
+            Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        )
         path = (base / path).resolve()
     if not path.is_file():
         raise ValueError(f"{label} does not exist: {path}")
@@ -1019,7 +867,9 @@ def canonical_prediction_hash(payload: dict[str, Any]) -> str:
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise ValueError("HT/FT observation model contains non-canonical values") from exc
+        raise ValueError(
+            "HT/FT observation model contains non-canonical values"
+        ) from exc
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
@@ -1033,9 +883,7 @@ class _TitanCompetitionHeaderParser(HTMLParser):
         self.competitions: list[tuple[str, str]] = []
         self.teams: list[tuple[str, str]] = []
 
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.casefold() != "a" or self._capture is not None:
             return
         attributes = {key.casefold(): value or "" for key, value in attrs}
@@ -1104,7 +952,9 @@ def extract_titan_competition_snapshot(
     locator, label = parser.competitions[0]
     competition_id_match = re.search(r"cupmatch_(\d+)\.htm(?:[?#].*)?\Z", locator)
     if competition_id_match is None:
-        raise ValueError("Titan competition header link has no supported competition id")
+        raise ValueError(
+            "Titan competition header link has no supported competition id"
+        )
     header_home = _source_team_name(parser.teams[0][1])
     header_away = _source_team_name(parser.teams[1][1])
     expected_home = _source_team_name(record.get("home_team"))
@@ -1112,7 +962,9 @@ def extract_titan_competition_snapshot(
     if not expected_home or not expected_away:
         raise ValueError("archived fixture teams are missing")
     if header_home != expected_home or header_away != expected_away:
-        raise ValueError("Titan analysis header teams do not match the archived fixture")
+        raise ValueError(
+            "Titan analysis header teams do not match the archived fixture"
+        )
 
     return {
         "source_url": source_url,
@@ -1141,7 +993,9 @@ def fetch_titan_competition_snapshot(
     if source_match is None or source_match.group("match_id") != str(
         record.get("match_id") or ""
     ):
-        raise ValueError("competition verification requires the matching Titan analysis URL")
+        raise ValueError(
+            "competition verification requires the matching Titan analysis URL"
+        )
     request = Request(source_url, headers=TITAN_COMPETITION_FETCH_HEADERS)
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
@@ -1152,7 +1006,9 @@ def fetch_titan_competition_snapshot(
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
         raise ValueError(f"cannot fetch Titan competition evidence: {exc}") from exc
     if response_url != source_url:
-        raise ValueError("Titan competition evidence redirected away from the archived source")
+        raise ValueError(
+            "Titan competition evidence redirected away from the archived source"
+        )
     return extract_titan_competition_snapshot(
         raw_html,
         source_url=source_url,
@@ -1198,7 +1054,9 @@ def build_competition_evidence(
         raise ValueError("competition evidence requires an archived match_id")
     key = str(competition_key or "").strip().casefold()
     if not COMPETITION_KEY_PATTERN.fullmatch(key):
-        raise ValueError("competition_key must use lowercase letters, digits, and underscores")
+        raise ValueError(
+            "competition_key must use lowercase letters, digits, and underscores"
+        )
     label = unicodedata.normalize("NFKC", str(competition_label or "")).strip()
     if not label or len(label) > 32 or not COMPETITION_CJK_PATTERN.search(label):
         raise ValueError("competition_label must be a concise Chinese label")
@@ -1207,16 +1065,26 @@ def build_competition_evidence(
         raise ValueError("competition_id must be a positive Titan competition id")
     registry_entry = COMPETITION_EVIDENCE_REGISTRY.get(key)
     if not isinstance(registry_entry, dict):
-        raise ValueError("competition_key is not registered for source-verified display")
-    if label != registry_entry.get("label") or source_id != registry_entry.get("source_id"):
-        raise ValueError("competition key, Chinese label, and Titan id do not match the registry")
+        raise ValueError(
+            "competition_key is not registered for source-verified display"
+        )
+    if label != registry_entry.get("label") or source_id != registry_entry.get(
+        "source_id"
+    ):
+        raise ValueError(
+            "competition key, Chinese label, and Titan id do not match the registry"
+        )
 
     source_url = str(verification_source or "").strip()
     source_match = COMPETITION_SOURCE_PATTERN.fullmatch(source_url)
     if source_match is None or source_match.group("match_id") != match_id:
-        raise ValueError("competition verification source must be the matching Titan analysis page")
+        raise ValueError(
+            "competition verification source must be the matching Titan analysis page"
+        )
     if source_url != str(record.get("source_url") or "").strip():
-        raise ValueError("competition verification source must match the archived source_url")
+        raise ValueError(
+            "competition verification source must match the archived source_url"
+        )
     snapshot = (
         deepcopy(_source_snapshot)
         if isinstance(_source_snapshot, dict)
@@ -1245,7 +1113,9 @@ def build_competition_evidence(
         snapshot.get("source_url") != source_url
         or snapshot.get("response_url") != source_url
     ):
-        raise ValueError("Titan competition snapshot URL does not match the archived source")
+        raise ValueError(
+            "Titan competition snapshot URL does not match the archived source"
+        )
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(snapshot.get("page_sha256") or "")):
         raise ValueError("Titan competition snapshot page hash is invalid")
     if _source_team_name(header.get("home_team")) != _source_team_name(
@@ -1254,20 +1124,32 @@ def build_competition_evidence(
         record.get("away_team")
     ):
         raise ValueError("Titan competition snapshot teams do not match the fixture")
-    if str(header.get("competition_label") or "") != label or str(
-        header.get("competition_id") or ""
-    ) != source_id:
-        raise ValueError("Titan competition snapshot does not support the supplied competition")
+    if (
+        str(header.get("competition_label") or "") != label
+        or str(header.get("competition_id") or "") != source_id
+    ):
+        raise ValueError(
+            "Titan competition snapshot does not support the supplied competition"
+        )
 
     locator = str(source_locator or "").strip()
     if locator != str(header.get("competition_locator") or ""):
-        raise ValueError("competition source locator does not match the Titan header snapshot")
+        raise ValueError(
+            "competition source locator does not match the Titan header snapshot"
+        )
     if not COMPETITION_LOCATOR_PATTERN.match(locator):
         raise ValueError("competition source locator must be a Titan competition link")
     if re.search(rf"(?<!\d){re.escape(source_id)}(?!\d)", locator) is None:
-        raise ValueError("competition source locator must contain the Titan competition id")
-    if re.fullmatch(str(registry_entry["locator_pattern"]), locator, re.IGNORECASE) is None:
-        raise ValueError("competition source locator does not match the registered Titan link")
+        raise ValueError(
+            "competition source locator must contain the Titan competition id"
+        )
+    if (
+        re.fullmatch(str(registry_entry["locator_pattern"]), locator, re.IGNORECASE)
+        is None
+    ):
+        raise ValueError(
+            "competition source locator does not match the registered Titan link"
+        )
 
     asserted_collected = parse_aware_datetime(
         str(collected_at or ""), "competition evidence collected_at"
@@ -1277,7 +1159,9 @@ def build_competition_evidence(
         "Titan competition snapshot collected_at",
     )
     if abs((asserted_collected - captured).total_seconds()) > 300:
-        raise ValueError("competition collected_at does not match the live page capture")
+        raise ValueError(
+            "competition collected_at does not match the live page capture"
+        )
     if captured > utc_now().astimezone(captured.tzinfo) + timedelta(minutes=5):
         raise ValueError("competition evidence collected_at cannot be in the future")
     kickoff = parse_aware_datetime(
@@ -1341,7 +1225,11 @@ def validated_competition_evidence(
         fixture = evidence.get("fixture")
         competition = evidence.get("competition")
         source = evidence.get("source")
-        if not isinstance(fixture, dict) or not isinstance(competition, dict) or not isinstance(source, dict):
+        if (
+            not isinstance(fixture, dict)
+            or not isinstance(competition, dict)
+            or not isinstance(source, dict)
+        ):
             return None
         if set(fixture) != {"match_id", "home_team", "away_team", "kickoff"}:
             return None
@@ -1374,7 +1262,9 @@ def validated_competition_evidence(
         record_kickoff = parse_aware_datetime(
             str(record.get("kickoff") or ""), "competition evidence record kickoff"
         )
-        if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(timezone.utc):
+        if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+            timezone.utc
+        ):
             return None
         key = str(competition.get("key") or "")
         label = str(competition.get("label") or "")
@@ -1456,7 +1346,9 @@ def calculate_joint_scenario_audit_hash(audit: dict[str, Any]) -> str:
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise ValueError("joint scenario audit must contain finite canonical JSON") from exc
+        raise ValueError(
+            "joint scenario audit must contain finite canonical JSON"
+        ) from exc
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
@@ -1516,10 +1408,7 @@ def _joint_scenario_lineage(snapshot: dict[str, Any]) -> dict[str, Any]:
             market_hash,
             "joint scenario market evidence content_hash",
         )
-    if (
-        lineage["registered_htft_model_hash"]
-        != lineage["htft_prediction_model_hash"]
-    ):
+    if lineage["registered_htft_model_hash"] != lineage["htft_prediction_model_hash"]:
         raise ValueError(
             "joint scenario registered model and HT/FT prediction lineage do not match"
         )
@@ -1593,7 +1482,9 @@ def _validate_joint_scenario_record_bindings(
     for artifact_id_field in ("fixture_id", "match_id"):
         artifact_id = fixture.get(artifact_id_field)
         if artifact_id is not None and str(artifact_id) != fixture_id:
-            raise ValueError("joint scenario artifact fixture_id does not match the archive")
+            raise ValueError(
+                "joint scenario artifact fixture_id does not match the archive"
+            )
     record_fixture_id = record.get("match_id")
     if record_fixture_id is not None and str(record_fixture_id) != fixture_id:
         raise ValueError("joint scenario fixture_id does not match the record")
@@ -1604,7 +1495,9 @@ def _validate_joint_scenario_record_bindings(
             raise ValueError(f"joint scenario fixture {field} binding does not match")
         record_value = record.get(field)
         if record_value is not None and str(record_value) != expected:
-            raise ValueError(f"joint scenario fixture {field} does not match the record")
+            raise ValueError(
+                f"joint scenario fixture {field} does not match the record"
+            )
 
     artifact_kickoff = parse_aware_datetime(
         str(fixture.get("kickoff") or ""), "joint scenario fixture.kickoff"
@@ -1649,7 +1542,9 @@ def _validate_joint_scenario_record_bindings(
         if archived_at.astimezone(timezone.utc) != expected_archive_time.astimezone(
             timezone.utc
         ):
-            raise ValueError("joint scenario archived_at does not match the active version")
+            raise ValueError(
+                "joint scenario archived_at does not match the active version"
+            )
     _validate_joint_market_evidence_freshness(snapshot, context)
 
 
@@ -1727,7 +1622,9 @@ def _joint_scenario_active_version_binding(
 ) -> dict[str, str]:
     stage = str(context.get("analysis_stage") or "").strip()
     if stage not in {"initial", "lineup-check"}:
-        raise ValueError("joint scenario active version requires a valid analysis_stage")
+        raise ValueError(
+            "joint scenario active version requires a valid analysis_stage"
+        )
 
     fixture_id_value = context.get("fixture_id")
     match_id_value = context.get("match_id")
@@ -1756,12 +1653,8 @@ def _joint_scenario_active_version_binding(
         "analysis_stage": stage,
         "version_archived_at": archived_at.isoformat(),
         "fixture_id": fixture_id,
-        "canonical_score_content_hash": context_lineage[
-            "canonical_score_content_hash"
-        ],
-        "htft_prediction_content_hash": context_lineage[
-            "htft_prediction_content_hash"
-        ],
+        "canonical_score_content_hash": context_lineage["canonical_score_content_hash"],
+        "htft_prediction_content_hash": context_lineage["htft_prediction_content_hash"],
         "htft_prediction_hash": context_lineage["htft_prediction_hash"],
         "registered_model_hash": context_lineage["registered_model_hash"],
         "dataset_manifest_hash": context_lineage["dataset_manifest_hash"],
@@ -1844,9 +1737,7 @@ def validated_joint_scenario_audit(
         lineage = _joint_scenario_lineage(snapshot)
         if raw_audit.get("model_lineage") != lineage:
             return None
-        _validate_joint_scenario_record_bindings(
-            record, context, raw_audit, snapshot
-        )
+        _validate_joint_scenario_record_bindings(record, context, raw_audit, snapshot)
         context_lineage = _validate_joint_scenario_input_artifacts(
             context, snapshot, lineage
         )
@@ -1870,9 +1761,7 @@ def load_joint_scenario_audit(
     supplied = str(getattr(args, "joint_scenario_file", "") or "").strip()
     if not supplied:
         return None
-    path, raw, snapshot = load_observation_json(
-        args, supplied, "joint scenario file"
-    )
+    path, raw, snapshot = load_observation_json(args, supplied, "joint scenario file")
     try:
         joint_scenario_model.validate_prediction(snapshot)
     except joint_scenario_model.JointScenarioError as exc:
@@ -1894,7 +1783,9 @@ def load_joint_scenario_audit(
     for artifact_id_field in ("fixture_id", "match_id"):
         artifact_id = fixture.get(artifact_id_field)
         if artifact_id is not None and str(artifact_id) != fixture_id:
-            raise ValueError("joint scenario artifact fixture_id does not match the record")
+            raise ValueError(
+                "joint scenario artifact fixture_id does not match the record"
+            )
     for field in ("home_team", "away_team"):
         if str(fixture.get(field) or "") != str(record.get(field) or ""):
             raise ValueError(f"joint scenario fixture {field} must match the record")
@@ -1983,7 +1874,9 @@ def observation_gate(
     passed: bool,
     reasons: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    normalized_reasons = [str(item).strip() for item in reasons or [] if str(item).strip()]
+    normalized_reasons = [
+        str(item).strip() for item in reasons or [] if str(item).strip()
+    ]
     return {
         "gate": name,
         "passed": bool(passed),
@@ -2039,11 +1932,14 @@ def build_htft_scenario_gates(
         "odds_provenance": observation_gate(
             "odds_provenance",
             isinstance(ranker.get("odds_context"), dict) and not provenance_reasons,
-            provenance_reasons or ["audited pre-kickoff HT/FT odds provenance unavailable"],
+            provenance_reasons
+            or ["audited pre-kickoff HT/FT odds provenance unavailable"],
         ),
         "positive_ev": observation_gate(
             "positive_ev",
-            isinstance(ev, (int, float)) and not isinstance(ev, bool) and float(ev) > 0.0,
+            isinstance(ev, (int, float))
+            and not isinstance(ev, bool)
+            and float(ev) > 0.0,
             ev_reasons or ["positive current EV unavailable"],
         ),
         "positive_edge": observation_gate(
@@ -2107,12 +2003,8 @@ def load_htft_observation_audit(
     args: argparse.Namespace,
     record: dict[str, Any],
 ) -> dict[str, Any] | None:
-    model_file = str(
-        getattr(args, "htft_observation_model_file", "") or ""
-    ).strip()
-    ranker_file = str(
-        getattr(args, "htft_observation_ranker_file", "") or ""
-    ).strip()
+    model_file = str(getattr(args, "htft_observation_model_file", "") or "").strip()
+    ranker_file = str(getattr(args, "htft_observation_ranker_file", "") or "").strip()
     if bool(model_file) != bool(ranker_file):
         raise ValueError(
             "HT/FT observation archival requires both --htft-observation-model-file "
@@ -2186,9 +2078,13 @@ def load_htft_observation_audit(
     if not isinstance(provenance, dict):
         raise ValueError("HT/FT observation model requires provenance metadata")
     if provenance.get("generated_before_kickoff") is not True:
-        raise ValueError("HT/FT observation provenance must prove generation before kickoff")
+        raise ValueError(
+            "HT/FT observation provenance must prove generation before kickoff"
+        )
     if provenance.get("strictly_before_kickoff_utc_date") is not True:
-        raise ValueError("HT/FT observation provenance must prove a strict training cutoff")
+        raise ValueError(
+            "HT/FT observation provenance must prove a strict training cutoff"
+        )
     cutoff_text = str(provenance.get("training_cutoff_date") or "")
     try:
         training_cutoff = date.fromisoformat(cutoff_text)
@@ -2241,7 +2137,9 @@ def load_htft_observation_audit(
             "HT/FT observation ranker league evidence does not match model training"
         )
     if input_audit.get("model_hash") != model_hash:
-        raise ValueError("HT/FT observation ranker model_hash does not match prediction")
+        raise ValueError(
+            "HT/FT observation ranker model_hash does not match prediction"
+        )
     odds_context = input_audit.get("odds_context")
     if odds_context is not None:
         if not isinstance(odds_context, dict):
@@ -2259,7 +2157,9 @@ def load_htft_observation_audit(
     if not isinstance(half_target, dict) or not isinstance(full_target, dict):
         raise ValueError("HT/FT observation marginal_targets must bind both periods")
     if full_target.get("origin") != "model_component":
-        raise ValueError("HT/FT observation full-time marginal must use model_component")
+        raise ValueError(
+            "HT/FT observation full-time marginal must use model_component"
+        )
     anchor_context = input_audit.get("anchor_context")
     half_origin = half_target.get("origin")
     external_anchor_enabled = provenance.get("external_anchor_enabled")
@@ -2373,15 +2273,11 @@ def load_htft_observation_audit(
     else:
         raise ValueError("HT/FT observation half-time marginal origin is unsupported")
     half_probabilities = {
-        half: math.fsum(
-            matrix[f"{half}{full}"] for full in ("H", "D", "A")
-        )
+        half: math.fsum(matrix[f"{half}{full}"] for full in ("H", "D", "A"))
         for half in ("H", "D", "A")
     }
     full_probabilities = {
-        full: math.fsum(
-            matrix[f"{half}{full}"] for half in ("H", "D", "A")
-        )
+        full: math.fsum(matrix[f"{half}{full}"] for half in ("H", "D", "A"))
         for full in ("H", "D", "A")
     }
     try:
@@ -2425,7 +2321,10 @@ def load_htft_observation_audit(
         )
 
     marginal_validation = ranker.get("marginal_validation")
-    if not isinstance(marginal_validation, dict) or marginal_validation.get("passed") is not True:
+    if (
+        not isinstance(marginal_validation, dict)
+        or marginal_validation.get("passed") is not True
+    ):
         raise ValueError("HT/FT observation ranker must pass marginal validation")
     scenarios = ranker.get("scenarios")
     if not isinstance(scenarios, list) or len(scenarios) != 2:
@@ -2434,8 +2333,12 @@ def load_htft_observation_audit(
         HTFT_OUTCOMES,
         key=lambda outcome: (-matrix[outcome], HTFT_OUTCOMES.index(outcome)),
     )[:2]
-    if [str(item.get("selection") or "").upper() for item in scenarios] != expected_top_two:
-        raise ValueError("HT/FT observation scenarios must equal the matrix probability Top 2")
+    if [
+        str(item.get("selection") or "").upper() for item in scenarios
+    ] != expected_top_two:
+        raise ValueError(
+            "HT/FT observation scenarios must equal the matrix probability Top 2"
+        )
     pair_mass = math.fsum(matrix[outcome] for outcome in expected_top_two)
     supplied_pair_mass = ranker.get("pair_probability_mass", ranker.get("pair_mass"))
     if (
@@ -2454,7 +2357,9 @@ def load_htft_observation_audit(
         or not isinstance(formal_count, (int, float))
         or int(formal_count) != 0
     ):
-        raise ValueError("HT/FT observation ranker must preserve the paused market policy")
+        raise ValueError(
+            "HT/FT observation ranker must preserve the paused market policy"
+        )
 
     top_two: list[dict[str, Any]] = []
     for index, scenario in enumerate(scenarios, start=1):
@@ -2465,8 +2370,7 @@ def load_htft_observation_audit(
         if (
             probability is None
             or not math.isfinite(float(probability))
-            or abs(float(probability) - matrix[selection])
-            > PROBABILITY_AUDIT_TOLERANCE
+            or abs(float(probability) - matrix[selection]) > PROBABILITY_AUDIT_TOLERANCE
         ):
             raise ValueError(
                 f"HT/FT observation scenario {selection} must match the model matrix"
@@ -2545,9 +2449,7 @@ def load_htft_observation_audit(
         "top_two": top_two,
         "pair_probability_mass": pair_mass,
         "pair_mass_threshold": ranker.get("pair_mass_threshold"),
-        "pair_mass_threshold_crossed": ranker.get(
-            "pair_mass_threshold_crossed"
-        ),
+        "pair_mass_threshold_crossed": ranker.get("pair_mass_threshold_crossed"),
         "pair_mass_gate_passed": ranker.get("pair_mass_gate_passed"),
         "confidence_status": ranker.get("confidence_status"),
         "league_gate_evidence": deepcopy(ranker.get("league_gate_evidence")),
@@ -2561,12 +2463,12 @@ def load_htft_observation_audit(
     }
 
 
-def resolve_observation_model_dir(
-    args: argparse.Namespace, supplied: str
-) -> Path:
+def resolve_observation_model_dir(args: argparse.Namespace, supplied: str) -> Path:
     path = Path(supplied).expanduser()
     if not path.is_absolute():
-        base = Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        base = (
+            Path(args.base_dir).expanduser().resolve() if args.base_dir else Path.cwd()
+        )
         path = (base / path).resolve()
     if not path.is_dir():
         raise ValueError(f"Corner observation model directory does not exist: {path}")
@@ -2682,7 +2584,9 @@ def build_corner_candidate_gates(
             "deployment_candidate",
             deployment_status == "candidate",
             matching("deployment status is shadow")
-            or [f"registered corner deployment status is {deployment_status or 'missing'}"],
+            or [
+                f"registered corner deployment status is {deployment_status or 'missing'}"
+            ],
         ),
         "upstream_formal_policy": observation_gate(
             "upstream_formal_policy",
@@ -2694,9 +2598,7 @@ def build_corner_candidate_gates(
     return [gates[name] for name in CORNER_OBSERVATION_GATE_ORDER]
 
 
-def corner_observation_probabilities(
-    value: Any, *, label: str
-) -> dict[str, float]:
+def corner_observation_probabilities(value: Any, *, label: str) -> dict[str, float]:
     states = tuple(corner_ranker.SETTLEMENT_STATES)
     if not isinstance(value, dict) or set(value) != set(states):
         raise ValueError(f"{label} must contain exactly the five settlement states")
@@ -2739,10 +2641,10 @@ def load_corner_observation_audit(
     prediction_file = str(
         getattr(args, "corner_observation_prediction_file", "") or ""
     ).strip()
-    ranker_file = str(
-        getattr(args, "corner_observation_ranker_file", "") or ""
-    ).strip()
-    supplied_count = sum(bool(value) for value in (model_dir_text, prediction_file, ranker_file))
+    ranker_file = str(getattr(args, "corner_observation_ranker_file", "") or "").strip()
+    supplied_count = sum(
+        bool(value) for value in (model_dir_text, prediction_file, ranker_file)
+    )
     if supplied_count not in {0, 3}:
         raise ValueError(
             "Corner observation archival requires all three of "
@@ -2809,11 +2711,18 @@ def load_corner_observation_audit(
 
     prediction_fixture = prediction.get("fixture")
     ranking_fixture = ranking.get("fixture")
-    if not isinstance(prediction_fixture, dict) or ranking_fixture != prediction_fixture:
-        raise ValueError("Corner observation prediction and ranking fixtures must match")
+    if (
+        not isinstance(prediction_fixture, dict)
+        or ranking_fixture != prediction_fixture
+    ):
+        raise ValueError(
+            "Corner observation prediction and ranking fixtures must match"
+        )
     for field in ("home_team", "away_team"):
         if str(prediction_fixture.get(field) or "") != str(record.get(field) or ""):
-            raise ValueError(f"Corner observation fixture {field} must match the record")
+            raise ValueError(
+                f"Corner observation fixture {field} must match the record"
+            )
     prediction_kickoff = parse_aware_datetime(
         str(prediction_fixture.get("kickoff") or ""),
         "Corner observation fixture.kickoff",
@@ -2835,7 +2744,9 @@ def load_corner_observation_audit(
         str(record.get("updated_at") or ""), "record updated_at"
     )
     if prediction_time >= record_kickoff or ranking_time >= record_kickoff:
-        raise ValueError("Corner observation artifacts must be generated before kickoff")
+        raise ValueError(
+            "Corner observation artifacts must be generated before kickoff"
+        )
     if prediction_time > ranking_time:
         raise ValueError("Corner observation ranking cannot predate its prediction")
     if prediction_time > archived_at or ranking_time > archived_at:
@@ -2843,7 +2754,9 @@ def load_corner_observation_audit(
     try:
         training_cutoff = date.fromisoformat(str(binding.get("training_cutoff") or ""))
     except ValueError as exc:
-        raise ValueError("Corner observation training_cutoff must be an ISO date") from exc
+        raise ValueError(
+            "Corner observation training_cutoff must be an ISO date"
+        ) from exc
     if training_cutoff >= record_kickoff.date():
         raise ValueError("Corner observation training cutoff must predate kickoff")
 
@@ -2876,7 +2789,10 @@ def load_corner_observation_audit(
             raise ValueError("Corner observation candidate must be an object")
         market = candidate.get("market")
         side = candidate.get("side")
-        if market not in corner_ranker.MARKETS or side not in corner_ranker.MARKET_SIDES[market]:
+        if (
+            market not in corner_ranker.MARKETS
+            or side not in corner_ranker.MARKET_SIDES[market]
+        ):
             raise ValueError("Corner observation candidate market or side is invalid")
         line = candidate.get("line")
         if (
@@ -2890,7 +2806,9 @@ def load_corner_observation_audit(
             or candidate.get("formal_eligible") is not False
             or candidate.get("role") != "observation"
         ):
-            raise ValueError("Corner observation candidates must remain observation-only")
+            raise ValueError(
+                "Corner observation candidates must remain observation-only"
+            )
         probabilities = corner_observation_probabilities(
             candidate.get("settlement_probabilities"),
             label=f"Corner observation candidate {index} probabilities",
@@ -2958,13 +2876,18 @@ def load_corner_observation_audit(
     best_rank = best_raw.get("rank")
     best_matches = [item for item in candidates if item.get("rank") == best_rank]
     if len(best_matches) != 1:
-        raise ValueError("Corner observation best_observation is not a ranked candidate")
+        raise ValueError(
+            "Corner observation best_observation is not a ranked candidate"
+        )
     best_observation = deepcopy(best_matches[0])
     prediction_artifact_sha256 = f"sha256:{hashlib.sha256(prediction_raw).hexdigest()}"
     ranker_artifact_sha256 = f"sha256:{hashlib.sha256(ranker_raw).hexdigest()}"
-    observation_id = "sha256:" + hashlib.sha256(
-        (prediction_artifact_sha256 + ":" + ranker_artifact_sha256).encode("ascii")
-    ).hexdigest()
+    observation_id = (
+        "sha256:"
+        + hashlib.sha256(
+            (prediction_artifact_sha256 + ":" + ranker_artifact_sha256).encode("ascii")
+        ).hexdigest()
+    )
     audit = {
         "schema_version": OBSERVATION_SCHEMA_VERSION,
         "kind": CORNER_OBSERVATION_KIND,
@@ -3034,7 +2957,9 @@ def calculate_candidate_evaluation_audit_hash(audit: dict[str, Any]) -> str:
             allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        raise ValueError("candidate evaluation audit contains non-canonical values") from exc
+        raise ValueError(
+            "candidate evaluation audit contains non-canonical values"
+        ) from exc
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
@@ -3071,10 +2996,14 @@ def _candidate_gate(
     }
 
 
-def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _normalize_candidate_identity(
+    raw: dict[str, Any], *, legacy_read_only: bool = False
+) -> tuple[dict[str, Any], str]:
     market = str(raw.get("market") or "").strip().lower()
     if market not in PRIMARY_MARKETS:
-        raise ValueError(f"candidate evaluation market must be one of {', '.join(PRIMARY_MARKETS)}")
+        raise ValueError(
+            f"candidate evaluation market must be one of {', '.join(PRIMARY_MARKETS)}"
+        )
     candidate: dict[str, Any] = {"market": market}
     if market in {"asian", "total", "corner_total", "corner_handicap"}:
         allowed = {
@@ -3085,7 +3014,11 @@ def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], 
         }[market]
         side = str(raw.get("side") or "").strip().lower()
         line = raw.get("line")
-        if side not in allowed or isinstance(line, bool) or not isinstance(line, (int, float)):
+        if (
+            side not in allowed
+            or isinstance(line, bool)
+            or not isinstance(line, (int, float))
+        ):
             raise ValueError(f"candidate evaluation {market} side or line is invalid")
         if not math.isfinite(float(line)):
             raise ValueError(f"candidate evaluation {market} line must be finite")
@@ -3101,20 +3034,28 @@ def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], 
         }
         side = str(raw.get("side") or "").strip().lower()
         if submarket not in allowed or side not in allowed[submarket]:
-            raise ValueError("candidate evaluation half_time submarket or side is invalid")
+            raise ValueError(
+                "candidate evaluation half_time submarket or side is invalid"
+            )
         line = raw.get("line")
         if submarket == "1x2":
             if line is not None:
-                raise ValueError("candidate evaluation half_time 1x2 cannot carry a line")
+                raise ValueError(
+                    "candidate evaluation half_time 1x2 cannot carry a line"
+                )
         else:
             if isinstance(line, bool) or not isinstance(line, (int, float)):
-                raise ValueError("candidate evaluation half_time asian/total requires a line")
+                raise ValueError(
+                    "candidate evaluation half_time asian/total requires a line"
+                )
             if not math.isfinite(float(line)):
                 raise ValueError("candidate evaluation half_time line must be finite")
             split_line(float(line))
             line = float(line)
         candidate.update({"submarket": submarket, "side": side, "line": line})
-        identity = f"{market}:{submarket}:{side}:{'' if line is None else f'{line:.12g}'}"
+        identity = (
+            f"{market}:{submarket}:{side}:{'' if line is None else f'{line:.12g}'}"
+        )
     elif market == "htft":
         selection = str(raw.get("selection") or "").strip().upper()
         if selection not in HTFT_OUTCOMES:
@@ -3131,7 +3072,71 @@ def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], 
             raise ValueError("candidate evaluation BTTS side must be yes or no")
         candidate["side"] = side
         identity = f"{market}:{side}"
-    candidate["identity"] = identity
+    if legacy_read_only:
+        candidate["identity"] = identity
+        return candidate, identity
+    try:
+        market_identity = source_evidence.canonical_market_identity(
+            raw.get("market_identity"), label="candidate market_identity"
+        )
+    except source_evidence.SourceEvidenceError as exc:
+        raise ValueError("candidate evaluation market_identity is invalid") from exc
+    market_identity_hash = source_evidence.market_identity_hash(market_identity)
+    if raw.get("market_identity_hash") != market_identity_hash:
+        raise ValueError("candidate evaluation market_identity_hash is invalid")
+    if market in {"asian", "total", "corner_total", "corner_handicap"}:
+        expected_family = market
+        expected_period = "full_time"
+        expected_line = float(candidate["line"])
+        if market in {"asian", "corner_handicap"} and candidate["side"] == "away":
+            expected_line = -expected_line
+        reference_outcome = str(candidate["side"])
+    elif market == "half_time":
+        expected_family = str(candidate["submarket"])
+        expected_period = "first_half"
+        expected_line = candidate["line"]
+        if expected_family == "asian" and candidate["side"] == "away":
+            expected_line = -float(expected_line)
+        reference_outcome = {
+            "home": "H",
+            "draw": "D",
+            "away": "A",
+        }.get(str(candidate["side"]), str(candidate["side"]))
+    else:
+        expected_family = market
+        expected_period = "full_time"
+        expected_line = None
+        reference_outcome = str(
+            candidate.get("selection") or candidate.get("side") or ""
+        )
+    if (
+        market_identity["family"] != expected_family
+        or market_identity["period"] != expected_period
+        or market_identity["line"] != expected_line
+        or reference_outcome not in market_identity["price_outcomes"]
+    ):
+        raise ValueError(
+            "candidate evaluation market_identity does not match market/period/line/selection"
+        )
+    if raw.get("settlement_reference_outcome") != reference_outcome:
+        raise ValueError(
+            "candidate evaluation settlement_reference_outcome does not match its selection"
+        )
+    raw_complete_odds = raw.get("complete_market_odds")
+    if isinstance(raw_complete_odds, dict) and set(raw_complete_odds) != set(
+        market_identity["price_outcomes"]
+    ):
+        raise ValueError(
+            "candidate evaluation complete_market_odds do not match price_outcomes"
+        )
+    candidate.update(
+        {
+            "identity": identity,
+            "market_identity": market_identity,
+            "market_identity_hash": market_identity_hash,
+            "settlement_reference_outcome": reference_outcome,
+        }
+    )
     return candidate, identity
 
 
@@ -3139,6 +3144,21 @@ def _candidate_pick(candidate: dict[str, Any]) -> dict[str, Any]:
     pick = deepcopy(candidate)
     if candidate["market"] == "half_time":
         pick["market"] = candidate["submarket"]
+        if candidate["submarket"] == "1x2":
+            aliases = {"H": "home", "D": "draw", "A": "away"}
+            complete_odds = pick.get("complete_market_odds")
+            if isinstance(complete_odds, dict) and set(complete_odds) == set(aliases):
+                pick["complete_market_odds"] = {
+                    aliases[outcome]: price for outcome, price in complete_odds.items()
+                }
+            complete_probabilities = pick.get("complete_market_probabilities")
+            if isinstance(complete_probabilities, dict) and set(
+                complete_probabilities
+            ) == set(aliases):
+                pick["complete_market_probabilities"] = {
+                    aliases[outcome]: probability
+                    for outcome, probability in complete_probabilities.items()
+                }
     return pick
 
 
@@ -3256,7 +3276,9 @@ def _canonical_candidate_distribution(
         }
     else:
         matrix_key = (
-            "half_time_score_marginal" if market == "half_time" else "full_time_score_marginal"
+            "half_time_score_marginal"
+            if market == "half_time"
+            else "full_time_score_marginal"
         )
         matrix_block = snapshot.get(matrix_key)
         if not isinstance(matrix_block, dict):
@@ -3303,10 +3325,16 @@ def _evaluate_candidate(
     observation_id: str,
     index: int,
     generated_at: datetime,
+    *,
+    legacy_read_only: bool = False,
 ) -> dict[str, Any]:
-    candidate, identity = _normalize_candidate_identity(raw)
+    candidate, identity = _normalize_candidate_identity(
+        raw, legacy_read_only=legacy_read_only
+    )
     market = candidate["market"]
-    canonical_distribution, model_binding = _canonical_candidate_distribution(record, candidate)
+    canonical_distribution, model_binding = _canonical_candidate_distribution(
+        record, candidate
+    )
     upstream_generated_at = parse_aware_datetime(
         str(model_binding.get("upstream_generated_at") or ""),
         f"candidate evaluation {identity} upstream generated_at",
@@ -3322,12 +3350,19 @@ def _evaluate_candidate(
         f"candidate evaluation {identity} settlement_probabilities",
     )
     for state in CANDIDATE_SETTLEMENT_STATES:
-        if abs(supplied_distribution[state] - canonical_distribution[state]) > PROBABILITY_AUDIT_TOLERANCE:
+        if (
+            abs(supplied_distribution[state] - canonical_distribution[state])
+            > PROBABILITY_AUDIT_TOLERANCE
+        ):
             raise ValueError(
                 f"candidate evaluation {identity} {state} probability does not match the canonical model"
             )
-    probability = canonical_distribution["full_win"] + canonical_distribution["half_win"]
-    validate_probability_close(raw.get("probability"), probability, f"candidate evaluation {identity}")
+    probability = (
+        canonical_distribution["full_win"] + canonical_distribution["half_win"]
+    )
+    validate_probability_close(
+        raw.get("probability"), probability, f"candidate evaluation {identity}"
+    )
     candidate.update(
         {
             "candidate_id": "sha256:"
@@ -3375,7 +3410,9 @@ def _evaluate_candidate(
     else:
         try:
             collected_time = validate_market_evidence_freshness(
-                record, collected_at, f"candidate evaluation {identity} market_collected_at"
+                record,
+                collected_at,
+                f"candidate evaluation {identity} market_collected_at",
             )
             if collected_time > generated_at.astimezone(timezone.utc):
                 raise ValueError(
@@ -3398,8 +3435,8 @@ def _evaluate_candidate(
     complete_error: str | None = None
     if candidate["market_complete"] and price_error is None:
         try:
-            no_vig_probability, complete_market_probabilities = calculate_complete_market_no_vig(
-                pick, market
+            no_vig_probability, complete_market_probabilities = (
+                calculate_complete_market_no_vig(pick, market)
             )
         except (TypeError, ValueError) as exc:
             complete_error = str(exc)
@@ -3452,16 +3489,25 @@ def _evaluate_candidate(
             calculated_edge = (edge_probability - no_vig_probability) * 100.0
     supplied_market_probability = raw.get("market_probability")
     if supplied_market_probability is not None:
-        if no_vig_probability is None or not math.isfinite(float(supplied_market_probability)):
+        if no_vig_probability is None or not math.isfinite(
+            float(supplied_market_probability)
+        ):
             raise ValueError(
                 f"candidate evaluation {identity} market_probability requires a complete market"
             )
-        if abs(float(supplied_market_probability) - no_vig_probability) > PROBABILITY_AUDIT_TOLERANCE:
-            raise ValueError(f"candidate evaluation {identity} market_probability does not reproduce")
+        if (
+            abs(float(supplied_market_probability) - no_vig_probability)
+            > PROBABILITY_AUDIT_TOLERANCE
+        ):
+            raise ValueError(
+                f"candidate evaluation {identity} market_probability does not reproduce"
+            )
     supplied_edge = raw.get("edge_pp")
     if supplied_edge is not None:
         if calculated_edge is None or not math.isfinite(float(supplied_edge)):
-            raise ValueError(f"candidate evaluation {identity} edge requires a complete market")
+            raise ValueError(
+                f"candidate evaluation {identity} edge requires a complete market"
+            )
         if abs(float(supplied_edge) - calculated_edge) > EDGE_AUDIT_TOLERANCE_PP:
             raise ValueError(f"candidate evaluation {identity} edge does not reproduce")
     gates.append(
@@ -3503,7 +3549,10 @@ def _evaluate_candidate(
     quality_passed = record.get("data_quality") in {"medium", "high"}
     gates.append(
         _candidate_gate(
-            "data_quality", "risk", quality_passed, ["medium_or_high_data_quality_required"]
+            "data_quality",
+            "risk",
+            quality_passed,
+            ["medium_or_high_data_quality_required"],
         )
     )
     signal = candidate["market_signal"]
@@ -3527,7 +3576,10 @@ def _evaluate_candidate(
             and calculated_edge >= ADVERSE_FORMAL_MIN_EDGE_PP
             and firm_count is not None
             and int(float(firm_count)) >= PROVISIONAL_MIN_FIRMS
-            and (evidence.get("lineup_confirmed") or evidence.get("fundamental_supported"))
+            and (
+                evidence.get("lineup_confirmed")
+                or evidence.get("fundamental_supported")
+            )
         )
         if not adverse_passed:
             adverse_reasons.append("adverse_market_safety_thresholds_not_met")
@@ -3545,7 +3597,9 @@ def _evaluate_candidate(
             )
         )
         if not market_specific_passed:
-            market_specific_reasons.append("attacking_or_chance_quality_evidence_required")
+            market_specific_reasons.append(
+                "attacking_or_chance_quality_evidence_required"
+            )
     elif market in CORNER_MARKETS:
         market_specific_passed = bool(evidence.get("corner_profile_supported"))
         if not market_specific_passed:
@@ -3666,7 +3720,9 @@ def _rank_candidate_shadow_selections(
         grouped.setdefault(str(candidate["market"]), []).append(candidate)
     shadow_selections: dict[str, str] = {}
     for market, market_candidates in grouped.items():
-        eligible = [item for item in market_candidates if item["counterfactual_eligible"]]
+        eligible = [
+            item for item in market_candidates if item["counterfactual_eligible"]
+        ]
         for item in eligible:
             item["shadow_confidence"] = confidence_components(record, market, item)
         eligible.sort(
@@ -3691,9 +3747,7 @@ def _candidate_evaluation_record_context(record: dict[str, Any]) -> dict[str, An
         return record
     context = deepcopy(basis)
     context["status"] = "pending"
-    context["updated_at"] = basis.get(
-        "version_archived_at", basis.get("archived_at")
-    )
+    context["updated_at"] = basis.get("version_archived_at", basis.get("archived_at"))
     context["created_at"] = context.get("updated_at")
     return context
 
@@ -3730,9 +3784,7 @@ def _candidate_evaluation_active_version_binding(
     archived_at = parse_aware_datetime(
         str(archived_value or ""), "candidate evaluation active version archived_at"
     ).astimezone(timezone.utc)
-    fixture_id = str(
-        context.get("fixture_id", context.get("match_id")) or ""
-    ).strip()
+    fixture_id = str(context.get("fixture_id", context.get("match_id")) or "").strip()
     if not fixture_id:
         raise ValueError("candidate evaluation active version fixture_id is required")
     model = _candidate_evaluation_model_binding(context)
@@ -3762,13 +3814,174 @@ def _candidate_evaluation_observation_id(
     )
 
 
+def calculate_source_evidence_audit_hash(audit: dict[str, Any]) -> str:
+    payload = deepcopy(audit)
+    payload.pop("audit_hash", None)
+    return canonical_prediction_hash(payload)
+
+
+def load_source_evidence_audit(
+    args: argparse.Namespace, record: dict[str, Any]
+) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "source_evidence_file", "") or "").strip()
+    required = record.get("forward_policy_binding") is not None
+    if not supplied:
+        if required:
+            raise ValueError(
+                "active untouched live-forward cohort requires --source-evidence-file"
+            )
+        return None
+    evidence_path = Path(supplied).resolve()
+    try:
+        evidence = source_evidence.validate_evidence_file(evidence_path)
+    except source_evidence.SourceEvidenceError as exc:
+        raise ValueError("source evidence replay failed") from exc
+    if (
+        required
+        and evidence.get("schema_version") != source_evidence.EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "active untouched live-forward cohort requires canonical source-evidence/2.0.0"
+        )
+    fixture = evidence.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("source evidence fixture is missing")
+    for field in ("match_id", "home_team", "away_team"):
+        if str(fixture.get(field) or "") != str(record.get(field) or ""):
+            raise ValueError(
+                f"source evidence fixture {field} does not match the record"
+            )
+    evidence_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "source evidence kickoff"
+    )
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "record kickoff"
+    )
+    if evidence_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("source evidence kickoff does not match the record")
+    generated_at = parse_aware_datetime(
+        str(evidence.get("generated_at") or ""), "source evidence generated_at"
+    )
+    archived_at = parse_aware_datetime(
+        str(record.get("updated_at") or ""), "source evidence archive time"
+    )
+    if generated_at >= record_kickoff:
+        raise ValueError("source evidence must be generated strictly before kickoff")
+    if generated_at > archived_at:
+        raise ValueError("source evidence cannot be generated after archive time")
+    audit = {
+        "schema_version": evidence["schema_version"],
+        "kind": "replayable_source_evidence",
+        "evidence_file": str(evidence_path),
+        "evidence_hash": evidence["evidence_hash"],
+        "fixture": deepcopy(fixture),
+        "generated_at": generated_at.isoformat(),
+        "bundle": deepcopy(evidence),
+        "raw_sources_replayed": len(evidence.get("sources", [])),
+        "counts_toward_primary_record": False,
+    }
+    if evidence.get("schema_version") == source_evidence.EVIDENCE_SCHEMA_VERSION:
+        audit["evidence_scope"] = "canonical_market_identity_forward_eligible"
+    audit["audit_hash"] = calculate_source_evidence_audit_hash(audit)
+    return audit
+
+
+def validated_source_evidence_audit(record: dict[str, Any]) -> dict[str, Any] | None:
+    basis = record.get("settlement_basis")
+    context = basis if isinstance(basis, dict) else record
+    audit = context.get("source_evidence_audit")
+    if audit is None:
+        return None
+    if not isinstance(audit, dict):
+        return None
+    if (
+        audit.get("schema_version")
+        not in {
+            source_evidence.EVIDENCE_SCHEMA_VERSION,
+            source_evidence.LEGACY_EVIDENCE_SCHEMA_VERSION,
+        }
+        or audit.get("kind") != "replayable_source_evidence"
+        or audit.get("counts_toward_primary_record") is not False
+        or not isinstance(audit.get("bundle"), dict)
+    ):
+        return None
+    if (
+        audit.get("schema_version") == source_evidence.EVIDENCE_SCHEMA_VERSION
+        and audit.get("evidence_scope") != "canonical_market_identity_forward_eligible"
+    ):
+        return None
+    if (
+        audit.get("schema_version") == source_evidence.LEGACY_EVIDENCE_SCHEMA_VERSION
+        and "evidence_scope" in audit
+    ):
+        return None
+    if audit.get("audit_hash") != calculate_source_evidence_audit_hash(audit):
+        return None
+    try:
+        replayed = source_evidence.validate_evidence_file(
+            str(audit.get("evidence_file") or "")
+        )
+    except (source_evidence.SourceEvidenceError, OSError):
+        return None
+    if replayed != audit.get("bundle") or replayed.get("evidence_hash") != audit.get(
+        "evidence_hash"
+    ):
+        return None
+    fixture = replayed.get("fixture")
+    if not isinstance(fixture, dict):
+        return None
+    for field in ("match_id", "home_team", "away_team"):
+        if str(fixture.get(field) or "") != str(context.get(field) or ""):
+            return None
+    try:
+        evidence_kickoff = parse_aware_datetime(
+            str(fixture.get("kickoff") or ""), "source evidence kickoff"
+        )
+        record_kickoff = parse_aware_datetime(
+            str(context.get("kickoff") or ""), "record kickoff"
+        )
+        generated_at = parse_aware_datetime(
+            str(replayed.get("generated_at") or ""), "source evidence generated_at"
+        )
+        archived_value = (
+            context.get("version_archived_at")
+            or context.get("archived_at")
+            or context.get("updated_at")
+            or context.get("created_at")
+        )
+        archived_at = parse_aware_datetime(
+            str(archived_value or ""), "source evidence archive time"
+        )
+    except ValueError:
+        return None
+    if evidence_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        return None
+    if generated_at >= record_kickoff or generated_at > archived_at:
+        return None
+    if audit.get("raw_sources_replayed") != len(replayed.get("sources", [])):
+        return None
+    return audit
+
+
 def load_candidate_evaluation_audit(
     args: argparse.Namespace, record: dict[str, Any]
 ) -> dict[str, Any] | None:
     supplied = str(getattr(args, "candidate_evaluation_file", "") or "").strip()
-    required = bool(getattr(args, "require_candidate_evaluations", False))
+    active_forward_binding = record.get("forward_policy_binding") is not None
+    required = bool(getattr(args, "require_candidate_evaluations", False)) or bool(
+        active_forward_binding
+    )
     if not supplied:
         if required:
+            if active_forward_binding:
+                raise ValueError(
+                    "Active untouched cohorts require a current "
+                    "--candidate-evaluation-file (candidate-evaluation/3.0.0)"
+                )
             raise ValueError(
                 "--require-candidate-evaluations requires --candidate-evaluation-file"
             )
@@ -3782,10 +3995,12 @@ def load_candidate_evaluation_audit(
     ):
         raise ValueError(
             "candidate evaluation file must use soccer_candidate_evaluation "
-            "candidate-evaluation/2.0.0"
+            "candidate-evaluation/3.0.0"
         )
     if payload.get("policy_version") != STRICT_OOS_POLICY_VERSION:
-        raise ValueError("candidate evaluation policy_version does not match the active policy")
+        raise ValueError(
+            "candidate evaluation policy_version does not match the active policy"
+        )
     if payload.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION:
         raise ValueError(
             "candidate evaluation selection_policy_version does not match the active selector"
@@ -3794,17 +4009,29 @@ def load_candidate_evaluation_audit(
     if not isinstance(fixture, dict):
         raise ValueError("candidate evaluation fixture is required")
     if str(fixture.get("match_id") or "") != str(record.get("match_id") or ""):
-        raise ValueError("candidate evaluation fixture match_id does not match the record")
+        raise ValueError(
+            "candidate evaluation fixture match_id does not match the record"
+        )
     if str(fixture.get("home_team") or "") != str(record.get("home_team") or ""):
-        raise ValueError("candidate evaluation fixture home_team does not match the record")
+        raise ValueError(
+            "candidate evaluation fixture home_team does not match the record"
+        )
     if str(fixture.get("away_team") or "") != str(record.get("away_team") or ""):
-        raise ValueError("candidate evaluation fixture away_team does not match the record")
+        raise ValueError(
+            "candidate evaluation fixture away_team does not match the record"
+        )
     fixture_kickoff = parse_aware_datetime(
         str(fixture.get("kickoff") or ""), "candidate evaluation fixture kickoff"
     )
-    record_kickoff = parse_aware_datetime(str(record.get("kickoff") or ""), "record kickoff")
-    if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(timezone.utc):
-        raise ValueError("candidate evaluation fixture kickoff does not match the record")
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "record kickoff"
+    )
+    if fixture_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError(
+            "candidate evaluation fixture kickoff does not match the record"
+        )
     generated_at = parse_aware_datetime(
         str(payload.get("generated_at") or ""), "candidate evaluation generated_at"
     )
@@ -3812,34 +4039,48 @@ def load_candidate_evaluation_audit(
         str(record.get("updated_at") or ""), "candidate evaluation archive time"
     )
     if generated_at >= record_kickoff:
-        raise ValueError("candidate evaluation must be generated strictly before kickoff")
+        raise ValueError(
+            "candidate evaluation must be generated strictly before kickoff"
+        )
     if generated_at > archived_at:
         raise ValueError("candidate evaluation cannot be generated after archive time")
 
     manifest_raw = payload.get("market_manifest")
     if not isinstance(manifest_raw, list) or not manifest_raw:
-        raise ValueError("candidate evaluation market_manifest must be a non-empty list")
+        raise ValueError(
+            "candidate evaluation market_manifest must be a non-empty list"
+        )
     manifest: dict[str, dict[str, Any]] = {}
     for item in manifest_raw:
         if not isinstance(item, dict):
-            raise ValueError("candidate evaluation market_manifest entries must be objects")
+            raise ValueError(
+                "candidate evaluation market_manifest entries must be objects"
+            )
         market = str(item.get("market") or "").strip().lower()
         status = str(item.get("status") or "").strip().lower()
         if market not in PRIMARY_MARKETS or market in manifest:
-            raise ValueError("candidate evaluation market_manifest markets must be unique and supported")
+            raise ValueError(
+                "candidate evaluation market_manifest markets must be unique and supported"
+            )
         if status not in {"evaluated", "unavailable"}:
-            raise ValueError("candidate evaluation manifest status must be evaluated or unavailable")
-        reasons = [
-            str(reason).strip()
-            for reason in item.get("reasons", [])
-            if str(reason).strip()
-        ] if isinstance(item.get("reasons", []), list) else []
+            raise ValueError(
+                "candidate evaluation manifest status must be evaluated or unavailable"
+            )
+        reasons = (
+            [
+                str(reason).strip()
+                for reason in item.get("reasons", [])
+                if str(reason).strip()
+            ]
+            if isinstance(item.get("reasons", []), list)
+            else []
+        )
         if status == "unavailable" and not reasons:
             raise ValueError("unavailable candidate evaluation markets require reasons")
         manifest[market] = {"market": market, "status": status, "reasons": reasons}
     if set(manifest) != set(PRIMARY_MARKETS):
         raise ValueError(
-            "candidate-evaluation/2.0.0 requires every supported market in market_manifest"
+            "candidate-evaluation/3.0.0 requires every supported market in market_manifest"
         )
 
     candidates_raw = payload.get("candidates")
@@ -3853,15 +4094,36 @@ def load_candidate_evaluation_audit(
     )
     candidates: list[dict[str, Any]] = []
     identities: set[str] = set()
+    source_audit = validated_source_evidence_audit(record)
+    source_required = record.get("forward_policy_binding") is not None
+    if source_required and source_audit is None:
+        raise ValueError(
+            "active untouched live-forward cohort requires valid replayable source evidence"
+        )
     for index, raw_candidate in enumerate(candidates_raw, start=1):
         if not isinstance(raw_candidate, dict):
             raise ValueError("candidate evaluation candidates must be objects")
         candidate = _evaluate_candidate(
             record, raw_candidate, observation_id, index, generated_at
         )
+        if source_audit is not None:
+            try:
+                candidate["source_evidence_binding"] = source_evidence.match_candidate(
+                    source_audit["bundle"], raw_candidate
+                )
+            except source_evidence.SourceEvidenceError as exc:
+                raise ValueError(
+                    "candidate evaluation market does not replay from source evidence"
+                ) from exc
+        elif source_required:
+            raise ValueError(
+                "candidate evaluation lacks required replayable source evidence"
+            )
         market = candidate["market"]
         if market not in manifest or manifest[market]["status"] != "evaluated":
-            raise ValueError("candidate evaluation candidate is absent from an evaluated manifest market")
+            raise ValueError(
+                "candidate evaluation candidate is absent from an evaluated manifest market"
+            )
         if candidate["identity"] in identities:
             raise ValueError("candidate evaluation candidate identities must be unique")
         identities.add(candidate["identity"])
@@ -3874,7 +4136,9 @@ def load_candidate_evaluation_audit(
         if entry["status"] == "evaluated" and count == 0:
             raise ValueError(f"evaluated candidate market {market} has no candidates")
         if entry["status"] == "unavailable" and count:
-            raise ValueError(f"unavailable candidate market {market} cannot contain candidates")
+            raise ValueError(
+                f"unavailable candidate market {market} cannot contain candidates"
+            )
         entry["candidate_count"] = count
 
     shadow_selections = _rank_candidate_shadow_selections(record, candidates)
@@ -3912,7 +4176,9 @@ def load_candidate_evaluation_audit(
             "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
             "automatic_release_allowed": False,
         },
-        "market_manifest": [manifest[market] for market in PRIMARY_MARKETS if market in manifest],
+        "market_manifest": [
+            manifest[market] for market in PRIMARY_MARKETS if market in manifest
+        ],
         "candidates": candidates,
         "candidate_count": len(candidates),
         "shadow_selections": shadow_selections,
@@ -3923,6 +4189,12 @@ def load_candidate_evaluation_audit(
             "training_cutoff_before_kickoff": True,
             "canonical_probabilities_reproduced": True,
             "market_values_recalculated": True,
+            "raw_source_evidence_replayed": source_audit is not None,
+            "source_evidence_hash": (
+                source_audit.get("evidence_hash")
+                if isinstance(source_audit, dict)
+                else None
+            ),
         },
     }
     audit["audit_hash"] = calculate_candidate_evaluation_audit_hash(audit)
@@ -3960,12 +4232,16 @@ def validate_score_model_consistency(
     fixture_kickoff = parse_datetime(str(fixture.get("kickoff") or ""))
     record_kickoff = parse_datetime(str(record.get("kickoff") or ""))
     if fixture_kickoff != record_kickoff:
-        raise ValueError("score prediction fixture kickoff must match the record kickoff")
+        raise ValueError(
+            "score prediction fixture kickoff must match the record kickoff"
+        )
     generated_at = parse_datetime(str(provenance.get("generated_at") or ""))
     if generated_at >= record_kickoff:
         raise ValueError("score prediction generated_at must be before record kickoff")
     if generated_at > parse_datetime(str(record.get("updated_at") or "")):
-        raise ValueError("score prediction generated_at cannot be later than archive time")
+        raise ValueError(
+            "score prediction generated_at cannot be later than archive time"
+        )
     derived_1x2 = matrix_1x2(matrix)
     for label, expected in derived_1x2.items():
         validate_probability_close(
@@ -3990,8 +4266,13 @@ def validate_score_model_consistency(
     for rank, (pick, expected_pick) in enumerate(
         zip(archived_scores, ranked_scores[:2]), start=1
     ):
-        if pick.get("score") != expected_pick["score"] or int(pick.get("rank", 0)) != rank:
-            raise ValueError("Archived exact-score picks must equal the score matrix deterministic Top 2")
+        if (
+            pick.get("score") != expected_pick["score"]
+            or int(pick.get("rank", 0)) != rank
+        ):
+            raise ValueError(
+                "Archived exact-score picks must equal the score matrix deterministic Top 2"
+            )
         validate_probability_close(
             pick.get("probability"),
             float(expected_pick["probability"]),
@@ -4128,7 +4409,9 @@ def validate_score_model_consistency(
                 )
                 if result == "win":
                     expected += probability
-        validate_probability_close(pick.get("probability"), expected, f"{market} probability")
+        validate_probability_close(
+            pick.get("probability"), expected, f"{market} probability"
+        )
 
     snapshot = provenance["snapshot"]
     half_pick = record.get("half_time_pick")
@@ -4171,12 +4454,12 @@ def validate_score_model_consistency(
     }
 
 
-def parse_htft_pick(
-    value: str, odds_format: str | None = None
-) -> dict[str, Any]:
+def parse_htft_pick(value: str, odds_format: str | None = None) -> dict[str, Any]:
     parts = [part.strip() for part in value.split(":")]
     if len(parts) != 4:
-        raise ValueError("HT/FT pick must be SELECTION:ODDS:PROBABILITY:EV, for example DD:3.40:0.31:0.054")
+        raise ValueError(
+            "HT/FT pick must be SELECTION:ODDS:PROBABILITY:EV, for example DD:3.40:0.31:0.054"
+        )
     selection = parts[0].upper()
     if selection not in {a + b for a in "HDA" for b in "HDA"}:
         raise ValueError(f"Invalid HT/FT selection: {selection}")
@@ -4223,20 +4506,26 @@ def parse_market_odds_values(
         if len(parts) != 2 or not parts[0]:
             raise ValueError(f"{label} must be LABEL:PRICE")
         outcome = parts[0]
-        normalized_outcome = outcome.upper() if label == "HT/FT market odds" else outcome.lower()
+        normalized_outcome = (
+            outcome.upper() if label == "HT/FT market odds" else outcome.lower()
+        )
         if normalized_outcome in parsed:
             raise ValueError(f"Duplicate {label} outcome: {normalized_outcome}")
         try:
             price = float(parts[1])
         except ValueError as exc:
-            raise ValueError(f"{label} price for {normalized_outcome} must be numeric") from exc
+            raise ValueError(
+                f"{label} price for {normalized_outcome} must be numeric"
+            ) from exc
         if not math.isfinite(price):
             raise ValueError(f"{label} price for {normalized_outcome} must be finite")
         parsed[normalized_outcome] = price
     return parsed
 
 
-def settlement_probability_args(args: argparse.Namespace, prefix: str) -> dict[str, Any]:
+def settlement_probability_args(
+    args: argparse.Namespace, prefix: str
+) -> dict[str, Any]:
     return {
         state: getattr(args, f"{prefix}_{state}_probability", None)
         for state in ("full_win", "half_win", "push", "half_loss", "loss")
@@ -4258,9 +4547,7 @@ def market_audit_args(args: argparse.Namespace, prefix: str) -> dict[str, Any]:
     }
 
 
-def validate_market_collection_times(
-    record: dict[str, Any], current: datetime
-) -> None:
+def validate_market_collection_times(record: dict[str, Any], current: datetime) -> None:
     kickoff = parse_datetime(str(record["kickoff"]))
     current_utc = current.astimezone(timezone.utc)
     for market, pick in formal_picks(record):
@@ -4287,7 +4574,9 @@ def validate_market_collection_times(
 def parse_exact_score_pick(value: str) -> dict[str, Any]:
     parts = [part.strip() for part in value.split(":")]
     if len(parts) != 2:
-        raise ValueError("Exact-score pick must be SCORE:PROBABILITY, for example 2-1:0.126")
+        raise ValueError(
+            "Exact-score pick must be SCORE:PROBABILITY, for example 2-1:0.126"
+        )
     score_parts = parts[0].split("-")
     if len(score_parts) != 2 or not all(part.isdigit() for part in score_parts):
         raise ValueError(f"Invalid exact score: {parts[0]}")
@@ -4302,8 +4591,7 @@ def parse_display_exact_score_pick(value: str) -> dict[str, Any]:
     parts = [part.strip() for part in value.split(":")]
     if len(parts) != 3:
         raise ValueError(
-            "Display exact-score pick must be "
-            "SCORE:PROBABILITY:UNCONDITIONAL_RANK"
+            "Display exact-score pick must be SCORE:PROBABILITY:UNCONDITIONAL_RANK"
         )
     pick = parse_exact_score_pick(":".join(parts[:2]))
     unconditional_rank = int(parts[2])
@@ -4356,9 +4644,7 @@ def build_display_exact_score_picks(
             "Primary-conditioned display exact scores require total side and line"
         )
     line = float(line)
-    event_probability = getattr(
-        args, "display_exact_score_event_probability", None
-    )
+    event_probability = getattr(args, "display_exact_score_event_probability", None)
     if event_probability is None:
         raise ValueError(
             "Primary-conditioned display exact scores require "
@@ -4371,9 +4657,7 @@ def build_display_exact_score_picks(
     for pick in display:
         home, away = (int(part) for part in pick["score"].split("-"))
         total_goals = home + away
-        supports_primary = (
-            total_goals > line if side == "over" else total_goals < line
-        )
+        supports_primary = total_goals > line if side == "over" else total_goals < line
         if not supports_primary:
             raise ValueError(
                 f"Display exact score {pick['score']} does not support "
@@ -4392,9 +4676,7 @@ def build_display_exact_score_picks(
     )
     for rank, pick in enumerate(display, start=1):
         pick["display_rank"] = rank
-        pick["conditional_probability"] = (
-            float(pick["probability"]) / event_probability
-        )
+        pick["conditional_probability"] = float(pick["probability"]) / event_probability
         pick["status"] = "primary_conditioned_scenario"
     return display, {
         "version": "primary-conditioned-v1",
@@ -4438,7 +4720,9 @@ def build_zero_zero_audit(
             raise ValueError("0-0 audit probability must match its exact-score pick")
     else:
         if zero_zero_pick:
-            raise ValueError("0-0 outside the Top-2 cannot replace a higher-ranked pick")
+            raise ValueError(
+                "0-0 outside the Top-2 cannot replace a higher-ranked pick"
+            )
         second_probability = float(exact_score_picks[1]["probability"])
         if probability > second_probability + 1e-4:
             raise ValueError("0-0 probability exceeds the archived second-ranked score")
@@ -4469,7 +4753,9 @@ def build_zero_zero_audit(
 
 
 def find_record(history: list[dict[str, Any]], match_id: str) -> dict[str, Any] | None:
-    return next((item for item in history if str(item.get("match_id")) == str(match_id)), None)
+    return next(
+        (item for item in history if str(item.get("match_id")) == str(match_id)), None
+    )
 
 
 def formal_picks(record: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -4494,12 +4780,16 @@ def formal_picks(record: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 def require_minimum(value: Any, minimum: float, label: str) -> float:
     if value is None:
-        raise ValueError(f"{label} is required by the provisional formal-pick guardrail")
+        raise ValueError(
+            f"{label} is required by the provisional formal-pick guardrail"
+        )
     number = float(value)
     if not math.isfinite(number):
         raise ValueError(f"{label} must be finite")
     if number + 1e-9 < minimum:
-        raise ValueError(f"{label} must be at least {minimum:g}; downgrade the candidate to observation")
+        raise ValueError(
+            f"{label} must be at least {minimum:g}; downgrade the candidate to observation"
+        )
     return number
 
 
@@ -4525,7 +4815,9 @@ def validate_probability_triplet(probabilities: dict[str, Any]) -> None:
             or not math.isfinite(float(value))
             or not 0.0 <= float(value) <= 1.0
         ):
-            raise ValueError(f"1X2 {label} probability must be finite and between 0 and 1")
+            raise ValueError(
+                f"1X2 {label} probability must be finite and between 0 and 1"
+            )
         values.append(float(value))
     if abs(sum(values) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
         raise ValueError("1X2 home/draw/away probabilities must sum to 1")
@@ -4552,9 +4844,7 @@ def effective_edge_pp(
         return float(value)
     if market == "htft":
         if pick.get("role") == "primary":
-            supplied = record.get("guardrail_evidence", {}).get(
-                "primary_htft_edge_pp"
-            )
+            supplied = record.get("guardrail_evidence", {}).get("primary_htft_edge_pp")
             if supplied is not None:
                 return float(supplied)
         return htft_implied_edge_pp(pick)
@@ -4568,9 +4858,7 @@ def effective_firm_count(
     if value is not None:
         return float(value)
     if market == "htft":
-        supplied = record.get("guardrail_evidence", {}).get(
-            "primary_htft_firm_count"
-        )
+        supplied = record.get("guardrail_evidence", {}).get("primary_htft_firm_count")
         return float(supplied) if supplied is not None else None
     return None
 
@@ -4614,7 +4902,9 @@ def validate_basic_formal_pick(
     if market == "total" and (
         pick.get("side") not in {"over", "under"} or pick.get("line") is None
     ):
-        raise ValueError("Total formal pick requires side over/under and a current line")
+        raise ValueError(
+            "Total formal pick requires side over/under and a current line"
+        )
     if market == "half_time" and not pick.get("market"):
         raise ValueError("Half-time formal pick requires a complete market")
     if market == "htft" and not pick.get("selection"):
@@ -4627,7 +4917,9 @@ def validate_basic_formal_pick(
             "or conflicting market signal"
         )
     if signal in ADVERSE_MARKET_SIGNALS:
-        require_minimum(pick.get("ev"), ADVERSE_FORMAL_MIN_EV, f"{market} adverse-signal EV")
+        require_minimum(
+            pick.get("ev"), ADVERSE_FORMAL_MIN_EV, f"{market} adverse-signal EV"
+        )
         require_minimum(
             edge_pp,
             ADVERSE_FORMAL_MIN_EDGE_PP,
@@ -4640,8 +4932,7 @@ def validate_basic_formal_pick(
         )
         evidence = record.get("guardrail_evidence", {})
         if not (
-            evidence.get("lineup_confirmed")
-            or evidence.get("fundamental_supported")
+            evidence.get("lineup_confirmed") or evidence.get("fundamental_supported")
         ):
             raise ValueError(
                 f"{market} adverse-market formal pick requires independent lineup "
@@ -4698,9 +4989,7 @@ def validate_goal_range_outcome_labels(labels: set[str]) -> None:
         raise ValueError("goal_range complete market bands must end with N+")
 
 
-def required_market_outcomes(
-    pick: dict[str, Any], market: str
-) -> tuple[set[str], str]:
+def required_market_outcomes(pick: dict[str, Any], market: str) -> tuple[set[str], str]:
     if market in {"asian", "corner_handicap"}:
         return {"home", "away"}, str(pick.get("side") or "").lower()
     if market in {"total", "corner_total"}:
@@ -4753,7 +5042,9 @@ def calculate_complete_market_no_vig(
                 raise ValueError(f"{market} Hong Kong market odds must be positive")
             raw_implied[outcome] = 1.0 / (1.0 + price)
     if selected not in odds:
-        raise ValueError(f"{market} selected outcome is missing from complete market odds")
+        raise ValueError(
+            f"{market} selected outcome is missing from complete market odds"
+        )
     if abs(float(odds[selected]) - float(pick["odds"])) > ODDS_AUDIT_TOLERANCE:
         raise ValueError(
             f"{market} selected complete-market price must match executable pick.odds"
@@ -4768,9 +5059,14 @@ def calculate_complete_market_no_vig(
     supplied_complete = pick.get("complete_market_probabilities")
     if isinstance(supplied_complete, dict) and supplied_complete:
         if set(supplied_complete) != set(no_vig):
-            raise ValueError(f"{market} supplied complete no-vig probabilities are incomplete")
+            raise ValueError(
+                f"{market} supplied complete no-vig probabilities are incomplete"
+            )
         for outcome, expected in no_vig.items():
-            if abs(float(supplied_complete[outcome]) - expected) > PROBABILITY_AUDIT_TOLERANCE:
+            if (
+                abs(float(supplied_complete[outcome]) - expected)
+                > PROBABILITY_AUDIT_TOLERANCE
+            ):
                 raise ValueError(
                     f"{market} supplied no-vig probability for {outcome} does not match market odds"
                 )
@@ -4824,13 +5120,10 @@ def validate_market_audit_fields(pick: dict[str, Any], market: str) -> float | N
         # distribution has been validated, so half wins/losses are weighted by
         # half a stake instead of being treated as binary outcomes.
         return None
-    expected_edge = (
-        float(pick["probability"]) - calculated_market_probability
-    ) * 100.0
+    expected_edge = (float(pick["probability"]) - calculated_market_probability) * 100.0
     if abs(float(pick["edge_pp"]) - expected_edge) > EDGE_AUDIT_TOLERANCE_PP:
         raise ValueError(
-            f"{market} edge_pp must equal "
-            "(probability - market_probability) * 100"
+            f"{market} edge_pp must equal (probability - market_probability) * 100"
         )
     require_strictly_positive(
         expected_edge,
@@ -4849,9 +5142,7 @@ def validate_five_state_market_edge(pick: dict[str, Any], market: str) -> float:
         raise ValueError(
             f"{market} five-state edge is unavailable when every outcome is a push"
         )
-    expected_edge = (
-        edge_probability - float(pick["market_probability"])
-    ) * 100.0
+    expected_edge = (edge_probability - float(pick["market_probability"])) * 100.0
     if abs(float(pick["edge_pp"]) - expected_edge) > EDGE_AUDIT_TOLERANCE_PP:
         raise ValueError(
             f"{market} edge_pp must use the stake-weighted five-state win probability"
@@ -4986,13 +5277,17 @@ def validate_core_formal_pick(
     validate_complete_market_audit(pick, market)
     if market == "asian":
         if pick.get("side") not in {"home", "away"} or pick.get("line") is None:
-            raise ValueError("Asian formal pick requires side home/away and a current line")
+            raise ValueError(
+                "Asian formal pick requires side home/away and a current line"
+            )
         calculated = validate_settlement_distribution(
             pick, market, line=float(pick["line"])
         )
     elif market == "total":
         if pick.get("side") not in {"over", "under"} or pick.get("line") is None:
-            raise ValueError("Total formal pick requires side over/under and a current line")
+            raise ValueError(
+                "Total formal pick requires side over/under and a current line"
+            )
         calculated = validate_settlement_distribution(
             pick, market, line=float(pick["line"])
         )
@@ -5015,7 +5310,9 @@ def validate_core_formal_pick(
                 pick, market, line=float(pick["line"])
             )
         else:
-            raise ValueError("Half-time formal pick requires a complete 1x2/asian/total market")
+            raise ValueError(
+                "Half-time formal pick requires a complete 1x2/asian/total market"
+            )
     else:
         raise ValueError(f"Unsupported core formal market: {market}")
     validate_five_state_market_edge(pick, market)
@@ -5027,8 +5324,13 @@ def validate_htft_formal_pick(pick: dict[str, Any]) -> None:
     validate_complete_market_audit(pick, market)
     complete_probabilities = pick.get("complete_market_probabilities")
     selections = {a + b for a in "HDA" for b in "HDA"}
-    if not isinstance(complete_probabilities, dict) or set(complete_probabilities) != selections:
-        raise ValueError("HT/FT formal picks require all nine no-vig market probabilities")
+    if (
+        not isinstance(complete_probabilities, dict)
+        or set(complete_probabilities) != selections
+    ):
+        raise ValueError(
+            "HT/FT formal picks require all nine no-vig market probabilities"
+        )
     values = []
     for selection in sorted(selections):
         value = complete_probabilities.get(selection)
@@ -5047,10 +5349,14 @@ def validate_htft_formal_pick(pick: dict[str, Any]) -> None:
     if selection not in selections:
         raise ValueError("HT/FT formal pick requires a valid selection")
     if (
-        abs(float(pick["market_probability"]) - float(complete_probabilities[selection]))
+        abs(
+            float(pick["market_probability"]) - float(complete_probabilities[selection])
+        )
         > PROBABILITY_AUDIT_TOLERANCE
     ):
-        raise ValueError("HT/FT selected market_probability must match the complete market")
+        raise ValueError(
+            "HT/FT selected market_probability must match the complete market"
+        )
     calculated = validate_binary_ev(pick, market)
     require_strictly_positive(calculated, "htft recalculated EV")
 
@@ -5062,9 +5368,7 @@ def validate_new_formal_pick(
 ) -> None:
     evidence = record.get("guardrail_evidence", {})
     if pick.get("market_complete") is not True:
-        raise ValueError(
-            f"{market} formal pick requires explicit market_complete=true"
-        )
+        raise ValueError(f"{market} formal pick requires explicit market_complete=true")
     validate_odds_format(pick, market)
     validate_market_audit_fields(pick, market)
 
@@ -5125,6 +5429,7 @@ def validate_new_formal_pick(
             f"{market} bookmaker count",
         )
 
+
 def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
     """Reject formal picks that do not qualify under the active safe-pool policy."""
     evidence = record.get("guardrail_evidence", {})
@@ -5178,10 +5483,7 @@ def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
                     "Total formal pick requires chance-quality evidence or a confirmed "
                     "attacking configuration; price movement alone is insufficient"
                 )
-        if (
-            market == "asian"
-            and float(pick.get("line", 0.0)) <= DEEP_FAVORITE_LINE
-        ):
+        if market == "asian" and float(pick.get("line", 0.0)) <= DEEP_FAVORITE_LINE:
             if data_quality != "high":
                 raise ValueError(
                     "Asian favorite -0.75 or deeper requires high data quality"
@@ -5214,10 +5516,7 @@ def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
                     "goal-margin/cover distribution"
                 )
             cover_probability = pick.get("cover_probability")
-            if (
-                cover_probability is None
-                or not 0.0 <= float(cover_probability) <= 1.0
-            ):
+            if cover_probability is None or not 0.0 <= float(cover_probability) <= 1.0:
                 raise ValueError(
                     "Asian favorite -0.75 or deeper requires --asian-cover-probability "
                     "between 0 and 1"
@@ -5247,13 +5546,17 @@ def evidence_coverage(
 ) -> float:
     evidence = record.get("guardrail_evidence", {})
     if market in {"total", "goal_range", "btts"}:
-        return 1.0 if (
-            evidence.get("chance_quality_supported")
-            or (
-                evidence.get("lineup_confirmed")
-                and evidence.get("attack_configuration_supported")
+        return (
+            1.0
+            if (
+                evidence.get("chance_quality_supported")
+                or (
+                    evidence.get("lineup_confirmed")
+                    and evidence.get("attack_configuration_supported")
+                )
             )
-        ) else 0.0
+            else 0.0
+        )
     if market in CORNER_MARKETS:
         return 1.0 if evidence.get("corner_profile_supported") else 0.0
     relevant = (
@@ -5327,11 +5630,7 @@ def annotate_confidence_ranking(record: dict[str, Any]) -> None:
     ranked.sort(
         key=lambda item: (
             -float(item[2]["confidence_score"]),
-            -float(
-                item[2]["confidence_components"][
-                    "settlement_safety_probability"
-                ]
-            ),
+            -float(item[2]["confidence_components"]["settlement_safety_probability"]),
             -float(item[2]["confidence_components"]["firm_count"]),
             item[1],
             str(
@@ -5380,12 +5679,15 @@ def same_primary_direction(
     ):
         return False
     if previous_market == "htft":
-        return str(previous.get("selection", "")).upper() == str(
-            current.get("selection", "")
-        ).upper()
+        return (
+            str(previous.get("selection", "")).upper()
+            == str(current.get("selection", "")).upper()
+        )
     if previous_market == "goal_range":
         return previous.get("selection") == current.get("selection")
-    if previous_market == "half_time" and previous.get("market") != current.get("market"):
+    if previous_market == "half_time" and previous.get("market") != current.get(
+        "market"
+    ):
         return False
     return previous.get("side") == current.get("side")
 
@@ -5406,17 +5708,13 @@ def selected_line_worsened(
     if market in {"asian", "corner_handicap"}:
         return new_value < old_value
     if market in {"total", "corner_total"}:
-        return (
-            current.get("side") == "over" and new_value > old_value
-        ) or (
+        return (current.get("side") == "over" and new_value > old_value) or (
             current.get("side") == "under" and new_value < old_value
         )
     if market == "half_time" and current.get("market") in {"asian", "total"}:
         if current.get("market") == "asian":
             return new_value < old_value
-        return (
-            current.get("side") == "over" and new_value > old_value
-        ) or (
+        return (current.get("side") == "over" and new_value > old_value) or (
             current.get("side") == "under" and new_value < old_value
         )
     return False
@@ -5458,13 +5756,16 @@ def build_primary_change(
             "guardrail_passed": True,
         }
     if not existing:
-        raise ValueError("A lineup-check archive requires an existing initial prediction")
+        raise ValueError(
+            "A lineup-check archive requires an existing initial prediction"
+        )
     if previous_identity == current_identity:
         return {
             "status": "maintained",
             "previous": list(previous_identity) if previous_identity else None,
             "current": list(current_identity) if current_identity else None,
-            "reason": str(getattr(args, "primary_change_reason", "") or "").strip() or None,
+            "reason": str(getattr(args, "primary_change_reason", "") or "").strip()
+            or None,
             "previous_current_ev": None,
             "new_current_ev": current_ev,
             "ev_improvement": None,
@@ -5479,7 +5780,9 @@ def build_primary_change(
 
     reason = str(getattr(args, "primary_change_reason", "") or "").strip()
     if not reason:
-        raise ValueError("A changed lineup-check primary requires --primary-change-reason")
+        raise ValueError(
+            "A changed lineup-check primary requires --primary-change-reason"
+        )
 
     previous_market = existing.get("primary_market")
     previous_primary = existing.get("primary_pick")
@@ -5531,17 +5834,13 @@ def build_primary_change(
         if current_ev is not None and previous_ev is not None
         else None
     )
-    previous_confidence = getattr(
-        args, "previous_primary_current_confidence", None
-    )
+    previous_confidence = getattr(args, "previous_primary_current_confidence", None)
     confidence_improvement = (
         current_confidence - float(previous_confidence)
         if current_confidence is not None and previous_confidence is not None
         else None
     )
-    previous_invalidated = bool(
-        getattr(args, "previous_primary_invalidated", False)
-    )
+    previous_invalidated = bool(getattr(args, "previous_primary_invalidated", False))
     if previous_identity is not None and not previous_invalidated:
         if previous_confidence is None:
             raise ValueError(
@@ -5555,8 +5854,7 @@ def build_primary_change(
             )
         if (
             confidence_improvement is None
-            or confidence_improvement + 1e-9
-            < LINEUP_CHANGE_MIN_CONFIDENCE_DELTA
+            or confidence_improvement + 1e-9 < LINEUP_CHANGE_MIN_CONFIDENCE_DELTA
         ):
             raise ValueError(
                 "The new lineup-check primary confidence must exceed the previous "
@@ -5582,9 +5880,7 @@ def build_primary_change(
         "new_current_ev": current_ev,
         "ev_improvement": ev_improvement,
         "previous_current_confidence": (
-            float(previous_confidence)
-            if previous_confidence is not None
-            else None
+            float(previous_confidence) if previous_confidence is not None else None
         ),
         "new_current_confidence": current_confidence,
         "confidence_improvement": confidence_improvement,
@@ -5594,7 +5890,9 @@ def build_primary_change(
     }
 
 
-def pick_identity(market: str | None, pick: dict[str, Any] | None) -> tuple[Any, ...] | None:
+def pick_identity(
+    market: str | None, pick: dict[str, Any] | None
+) -> tuple[Any, ...] | None:
     if not market or not isinstance(pick, dict):
         return None
     if market == "htft":
@@ -5617,14 +5915,23 @@ def resolve_formal_pick(
     picks = [pick for pick in record.get("htft_picks", []) if isinstance(pick, dict)]
     if htft_selection:
         wanted = htft_selection.upper()
-        return next((pick for pick in picks if str(pick.get("selection", "")).upper() == wanted), None)
+        return next(
+            (
+                pick
+                for pick in picks
+                if str(pick.get("selection", "")).upper() == wanted
+            ),
+            None,
+        )
     if len(picks) == 1:
         return picks[0]
     return None
 
 
 def apply_primary_role(
-    record: dict[str, Any], primary_market: str | None, htft_selection: str | None = None
+    record: dict[str, Any],
+    primary_market: str | None,
+    htft_selection: str | None = None,
 ) -> None:
     picks = formal_picks(record)
     for _, pick in picks:
@@ -5632,7 +5939,9 @@ def apply_primary_role(
 
     if primary_market in {None, "none"}:
         if picks:
-            raise ValueError("--primary-market none is valid only when there are no formal picks")
+            raise ValueError(
+                "--primary-market none is valid only when there are no formal picks"
+            )
         record["primary_market"] = None
         record["primary_pick"] = None
         return
@@ -5640,7 +5949,9 @@ def apply_primary_role(
     selected = resolve_formal_pick(record, primary_market, htft_selection)
     if selected is None:
         suffix = f" ({htft_selection})" if htft_selection else ""
-        raise ValueError(f"Primary pick {primary_market}{suffix} is not present among formal picks")
+        raise ValueError(
+            f"Primary pick {primary_market}{suffix} is not present among formal picks"
+        )
     selected["role"] = "primary"
     snapshot = deepcopy(selected)
     # Half-time picks already use ``market`` for their executable submarket
@@ -5659,7 +5970,9 @@ def active_primary_identity(record: dict[str, Any] | None) -> tuple[Any, ...] | 
         return None
     market = record.get("primary_market")
     primary = record.get("primary_pick")
-    return pick_identity(str(market) if market else None, primary if isinstance(primary, dict) else None)
+    return pick_identity(
+        str(market) if market else None, primary if isinstance(primary, dict) else None
+    )
 
 
 def primary_snapshot_for_stats(
@@ -5704,7 +6017,10 @@ def primary_result_from_record(record: dict[str, Any]) -> str | None:
             else record.get("htft_picks", [])
         )
         for result, pick in zip(record.get("htft_results", []), picks):
-            if isinstance(pick, dict) and str(pick.get("selection", "")).upper() == selection:
+            if (
+                isinstance(pick, dict)
+                and str(pick.get("selection", "")).upper() == selection
+            ):
                 return str(result) if result else None
     return None
 
@@ -5726,6 +6042,2150 @@ def primary_result_for_stats(record: dict[str, Any]) -> str | None:
         return None
     result = record.get("primary_result")
     return str(result) if result else primary_result_from_record(record)
+
+
+def _forward_validation_module():
+    try:
+        from scripts import forward_validation
+    except ImportError:  # Direct execution from scripts/.
+        import forward_validation  # type: ignore[no-redef]
+
+    return forward_validation
+
+
+def _forward_market_commitments(ledger_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    schema_version = ledger_payload.get("schema_version")
+    historical = schema_version == "forward-observations/2.0.0"
+    if not historical and schema_version != "forward-observations/3.0.0":
+        raise ValueError("Forward validation ledger schema is unsupported")
+    expected_binding_schema = (
+        forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        if historical
+        else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    )
+    commitments: list[dict[str, Any]] = []
+    for raw in ledger_payload.get("commitments", []):
+        if not isinstance(raw, dict) or not isinstance(
+            raw.get("prediction_payload"), dict
+        ):
+            raise ValueError("Forward validation ledger commitment is invalid")
+        prediction = raw["prediction_payload"]
+        binding = forward_policy.validate_record_binding(
+            raw.get("forward_policy_binding")
+        )
+        if binding is None or binding.get("schema_version") != expected_binding_schema:
+            raise ValueError(
+                "Forward validation ledger commitment has no compatible policy binding"
+            )
+        identity = {
+            "observation_id": str(prediction.get("observation_id") or ""),
+            "prediction_hash": forward_policy._hash_json(prediction),
+            "commitment_hash": require_sha256(
+                raw.get("commitment_hash"), "forward commitment hash"
+            ),
+            "binding_hash": require_sha256(
+                binding.get("binding_hash"), "forward commitment binding hash"
+            ),
+        }
+        if historical:
+            identity["market"] = str(prediction.get("market") or "").lower()
+        else:
+            identity.update(
+                {
+                    "family": str(
+                        prediction.get("market_identity", {}).get("family")
+                        if isinstance(prediction.get("market_identity"), dict)
+                        else ""
+                    ).lower(),
+                    "market_identity_hash": require_sha256(
+                        prediction.get("market_identity_hash"),
+                        "forward market identity hash",
+                    ),
+                }
+            )
+        commitments.append(identity)
+    commitments.sort(
+        key=(
+            (lambda item: (item["market"], item["observation_id"]))
+            if historical
+            else (
+                lambda item: (
+                    item["market_identity_hash"],
+                    item["observation_id"],
+                )
+            )
+        )
+    )
+    if not commitments:
+        raise ValueError("Forward validation ledger contains no market commitments")
+    return commitments
+
+
+def _validate_previous_forward_ledger_read_only(
+    ledger_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Structurally replay the defective v2 ledger for quarantine display only.
+
+    This intentionally is not a formal forward-validation entry point.  It proves that an
+    already archived record still binds its old hashes, policy, cohort, commitments, and pending
+    settlements, while keeping the superseded observation contract out of active writes and
+    statistical evaluation.
+    """
+
+    if ledger_payload.get("schema_version") != "forward-observations/2.0.0":
+        raise ValueError("Historical forward ledger schema is unsupported")
+    try:
+        policy = forward_policy.validate_policy_manifest(
+            ledger_payload.get("policy_manifest") or {}
+        )
+        cohort = forward_policy.validate_cohort(
+            ledger_payload.get("cohort_manifest") or {}
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Historical forward ledger policy/cohort is invalid") from exc
+    if policy.get("schema_version") != forward_policy.PREVIOUS_POLICY_SCHEMA_VERSION:
+        raise ValueError("Historical forward ledger policy schema is incompatible")
+    if cohort.get("schema_version") != forward_policy.LEGACY_COHORT_SCHEMA_VERSION:
+        raise ValueError("Historical forward ledger cohort schema is incompatible")
+    if any(
+        ledger_payload.get(field) != expected
+        for field, expected in (
+            ("cohort_id", cohort.get("cohort_id")),
+            ("policy_id", policy.get("policy_id")),
+            ("policy_hash", policy.get("policy_hash")),
+        )
+    ) or any(
+        cohort.get(field) != policy.get(field) for field in ("policy_id", "policy_hash")
+    ):
+        raise ValueError("Historical forward ledger policy/cohort binding is invalid")
+
+    queue = ledger_payload.get("queue_manifest")
+    if not isinstance(queue, dict):
+        raise ValueError("Historical forward ledger queue is missing")
+    queue_without_hash = deepcopy(queue)
+    supplied_queue_hash = queue_without_hash.pop("queue_hash", None)
+    if (
+        queue.get("schema_version") != "forward-eligibility-queue/1.0.0"
+        or supplied_queue_hash != forward_policy._hash_json(queue_without_hash)
+        or queue.get("cohort_id") != cohort.get("cohort_id")
+        or queue.get("policy_id") != policy.get("policy_id")
+        or queue.get("policy_hash") != policy.get("policy_hash")
+    ):
+        raise ValueError("Historical forward ledger queue binding is invalid")
+    queue_keys = {
+        str(item.get("queue_key") or "")
+        for item in queue.get("entries", [])
+        if isinstance(item, dict)
+    }
+    if not queue_keys or "" in queue_keys:
+        raise ValueError("Historical forward ledger queue entries are invalid")
+
+    commitments = ledger_payload.get("commitments")
+    settlements = ledger_payload.get("settlements")
+    if not isinstance(commitments, list) or not commitments:
+        raise ValueError("Historical forward ledger commitments are missing")
+    if not isinstance(settlements, list):
+        raise ValueError("Historical forward ledger settlements are missing")
+    rows: list[dict[str, Any]] = []
+    commitments_by_observation: dict[str, str] = {}
+    committed_queue_keys: set[str] = set()
+    for raw in commitments:
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version",
+            "prediction_payload",
+            "forward_policy_binding",
+            "commitment_hash",
+        }:
+            raise ValueError("Historical forward ledger commitment is invalid")
+        without_hash = deepcopy(raw)
+        supplied_hash = without_hash.pop("commitment_hash", None)
+        if (
+            raw.get("schema_version") != "forward-observation-commitment/1.0.0"
+            or supplied_hash != forward_policy._hash_json(without_hash)
+        ):
+            raise ValueError("Historical forward ledger commitment hash is invalid")
+        prediction = raw.get("prediction_payload")
+        if not isinstance(prediction, dict):
+            raise ValueError("Historical forward ledger prediction is missing")
+        try:
+            binding = forward_policy.validate_record_binding(
+                raw.get("forward_policy_binding")
+            )
+        except forward_policy.ForwardPolicyError as exc:
+            raise ValueError("Historical forward ledger binding is invalid") from exc
+        prediction_hash = forward_policy._hash_json(prediction)
+        if (
+            binding is None
+            or binding.get("schema_version")
+            != forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+            or binding.get("observation_commitment_hash") != prediction_hash
+            or binding.get("cohort_id") != cohort.get("cohort_id")
+            or binding.get("policy_id") != policy.get("policy_id")
+            or binding.get("policy_hash") != policy.get("policy_hash")
+        ):
+            raise ValueError("Historical forward ledger binding does not replay")
+        observation_id = str(prediction.get("observation_id") or "")
+        queue_key = str(prediction.get("queue_key") or "")
+        if (
+            not observation_id
+            or observation_id in commitments_by_observation
+            or queue_key not in queue_keys
+            or queue_key in committed_queue_keys
+        ):
+            raise ValueError("Historical forward ledger identity is invalid")
+        commitments_by_observation[observation_id] = str(supplied_hash)
+        committed_queue_keys.add(queue_key)
+        rows.append(
+            {
+                "fixture_id": str(prediction.get("fixture_id") or ""),
+                "home_team": prediction.get("home_team"),
+                "away_team": prediction.get("away_team"),
+                "league": prediction.get("league"),
+                "market": prediction.get("market"),
+                "kickoff": prediction.get("kickoff"),
+                "forward_policy_binding": binding,
+                "settlement_status": "pending",
+                "observed_outcome": None,
+            }
+        )
+    if committed_queue_keys != queue_keys:
+        raise ValueError("Historical forward ledger does not cover its frozen queue")
+
+    settled_ids: set[str] = set()
+    for settlement in settlements:
+        if not isinstance(settlement, dict):
+            raise ValueError("Historical forward ledger settlement is invalid")
+        without_hash = deepcopy(settlement)
+        supplied_hash = without_hash.pop("settlement_hash", None)
+        observation_id = str(settlement.get("observation_id") or "")
+        if (
+            settlement.get("schema_version") != "forward-observation-settlement/1.0.0"
+            or supplied_hash != forward_policy._hash_json(without_hash)
+            or observation_id not in commitments_by_observation
+            or observation_id in settled_ids
+            or settlement.get("commitment_hash")
+            != commitments_by_observation[observation_id]
+            or settlement.get("status") != "pending"
+            or settlement.get("observed_outcome") is not None
+            or settlement.get("result_collected_at") is not None
+            or settlement.get("result_source_evidence_hash") is not None
+            or settlement.get("closing_snapshot") is not None
+        ):
+            raise ValueError("Historical forward ledger settlement does not replay")
+        settled_ids.add(observation_id)
+    if settled_ids != set(commitments_by_observation):
+        raise ValueError("Historical forward ledger settlements are incomplete")
+    return {"records": rows, "historical_read_only": True}
+
+
+def validate_forward_validation_ledger_archive(
+    value: Any,
+    *,
+    record: dict[str, Any] | None = None,
+    active_binding: dict[str, Any] | None = None,
+    archived_not_after: datetime | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Forward validation ledger archive is required")
+    archive = deepcopy(value)
+    required = {
+        "schema_version",
+        "fixture_id",
+        "ledger_hash",
+        "ledger_payload",
+        "market_commitments",
+        "archive_hash",
+    }
+    if set(archive) != required:
+        raise ValueError("Forward validation ledger archive fields are incomplete")
+    archive_schema = archive.get("schema_version")
+    if archive_schema not in {
+        PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION,
+        FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION,
+    }:
+        raise ValueError("Forward validation ledger archive schema is unsupported")
+    historical = archive_schema == PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    if historical and (active_binding is not None or archived_not_after is not None):
+        raise ValueError(
+            "Historical forward validation ledgers are read-only and cannot enter "
+            "an active archive write"
+        )
+    supplied_archive_hash = archive.pop("archive_hash", None)
+    if supplied_archive_hash != forward_policy._hash_json(archive):
+        raise ValueError("Forward validation ledger archive hash is invalid")
+    ledger_payload = archive.get("ledger_payload")
+    if not isinstance(ledger_payload, dict):
+        raise ValueError("Forward validation ledger payload is required")
+    if archive.get("ledger_hash") != forward_policy._hash_json(ledger_payload):
+        raise ValueError("Forward validation ledger content hash is invalid")
+    forward_validation = _forward_validation_module()
+    try:
+        if historical:
+            normalized = _validate_previous_forward_ledger_read_only(ledger_payload)
+        else:
+            normalized = forward_validation.validate_prematch_input(ledger_payload)
+    except (forward_validation.ForwardValidationError, ValueError) as exc:
+        raise ValueError("Forward validation ledger cannot be replayed") from exc
+    expected_market_commitments = _forward_market_commitments(ledger_payload)
+    if archive.get("market_commitments") != expected_market_commitments:
+        raise ValueError("Forward validation market commitments do not replay")
+    fixture_id = str(archive.get("fixture_id") or "")
+    rows = normalized.get("records", [])
+    if (
+        not fixture_id
+        or not rows
+        or any(str(row.get("fixture_id") or "") != fixture_id for row in rows)
+    ):
+        raise ValueError("Forward validation ledger must contain exactly one fixture")
+    if record is not None:
+        if fixture_id != str(record.get("match_id") or ""):
+            raise ValueError(
+                "Forward validation ledger fixture does not match the record"
+            )
+        record_kickoff = parse_aware_datetime(
+            str(record.get("kickoff") or ""), "record kickoff"
+        )
+        for row in rows:
+            if (
+                str(row.get("home_team") or "") != str(record.get("home_team") or "")
+                or str(row.get("away_team") or "") != str(record.get("away_team") or "")
+                or str(row.get("league") or "") != str(record.get("league") or "")
+                or parse_aware_datetime(str(row.get("kickoff") or ""), "ledger kickoff")
+                != record_kickoff
+            ):
+                raise ValueError(
+                    "Forward validation ledger fixture metadata does not match"
+                )
+            if (
+                row.get("market") == "1x2"
+                and isinstance(row.get("market_identity"), dict)
+                and row["market_identity"].get("period") == "full_time"
+                and isinstance(row.get("model_probabilities"), dict)
+            ):
+                expected_probabilities = {
+                    "H": record.get("probabilities", {}).get("home_win"),
+                    "D": record.get("probabilities", {}).get("draw"),
+                    "A": record.get("probabilities", {}).get("away_win"),
+                }
+                if any(
+                    expected_probabilities[outcome] is None
+                    or not math.isclose(
+                        float(row["model_probabilities"][outcome]),
+                        float(expected_probabilities[outcome]),
+                        rel_tol=0.0,
+                        abs_tol=PROBABILITY_AUDIT_TOLERANCE,
+                    )
+                    for outcome in ("H", "D", "A")
+                ):
+                    raise ValueError(
+                        "Forward validation 1x2 probabilities do not match the record"
+                    )
+    validated_active = (
+        forward_policy.validate_record_binding(active_binding)
+        if active_binding is not None
+        else None
+    )
+    for row in rows:
+        binding = row.get("forward_policy_binding")
+        if not isinstance(binding, dict):
+            raise ValueError("Forward validation ledger row has no committed binding")
+        expected_binding_schema = (
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+            if historical
+            else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        )
+        if binding.get("schema_version") != expected_binding_schema:
+            raise ValueError(
+                "Forward validation ledger row binding schema is incompatible"
+            )
+        if validated_active is not None and any(
+            binding.get(field) != validated_active.get(field)
+            for field in ("cohort_id", "cohort_hash", "policy_id", "policy_hash")
+        ):
+            raise ValueError("Forward validation ledger is not in the active cohort")
+        if validated_active is not None and binding.get(
+            "provenance_binding"
+        ) != validated_active.get("provenance_binding"):
+            raise ValueError("Forward validation ledger provenance does not match")
+        if archived_not_after is not None:
+            archived = parse_aware_datetime(
+                str(binding.get("archived_at") or ""), "ledger archived_at"
+            )
+            if archived > archived_not_after.astimezone(timezone.utc):
+                raise ValueError("Forward validation ledger was archived in the future")
+    archive["archive_hash"] = supplied_archive_hash
+    return archive
+
+
+def load_forward_validation_ledger_archive(
+    args: argparse.Namespace,
+    record: dict[str, Any],
+    active_binding: dict[str, Any] | None,
+    *,
+    archived_at: datetime,
+) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "forward_validation_ledger", "") or "").strip()
+    if active_binding is None:
+        if supplied:
+            raise ValueError(
+                "--forward-validation-ledger requires an active untouched cohort"
+            )
+        return None
+    if not supplied:
+        raise ValueError(
+            "Active untouched cohorts require --forward-validation-ledger; "
+            "free-form post-hoc commitments are forbidden"
+        )
+    _path, _raw, payload = load_observation_json(
+        args, supplied, "forward validation ledger"
+    )
+    archive: dict[str, Any] = {
+        "schema_version": FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION,
+        "fixture_id": str(record.get("match_id") or ""),
+        "ledger_hash": forward_policy._hash_json(payload),
+        "ledger_payload": payload,
+        "market_commitments": _forward_market_commitments(payload),
+    }
+    archive["archive_hash"] = forward_policy._hash_json(archive)
+    return validate_forward_validation_ledger_archive(
+        archive,
+        record=record,
+        active_binding=active_binding,
+        archived_not_after=archived_at,
+    )
+
+
+def _canonical_candidate_categorical_probabilities(
+    record: dict[str, Any], market_identity: dict[str, Any]
+) -> dict[str, float]:
+    snapshot = validated_joint_scenario_audit(record)
+    if not isinstance(snapshot, dict):
+        raise ValueError(
+            "Categorical forward candidates require the frozen canonical joint model"
+        )
+    family = str(market_identity.get("family") or "")
+    period = str(market_identity.get("period") or "")
+    outcomes = [str(item) for item in market_identity.get("price_outcomes", [])]
+    if family == "htft":
+        raw = snapshot.get("htft_marginal", {}).get("code_probabilities")
+        if not isinstance(raw, dict) or set(raw) != set(outcomes):
+            raise ValueError(
+                "Categorical HT/FT outcome space does not match the joint model"
+            )
+        return {outcome: float(raw[outcome]) for outcome in outcomes}
+
+    matrix_key = (
+        "half_time_score_marginal"
+        if period == "first_half"
+        else "full_time_score_marginal"
+    )
+    matrix_block = snapshot.get(matrix_key)
+    if not isinstance(matrix_block, dict):
+        raise ValueError("Categorical candidate score marginal is unavailable")
+    matrix = validate_probability_matrix(
+        matrix_block.get("probabilities"), "categorical candidate score marginal"
+    )
+    probabilities = {outcome: 0.0 for outcome in outcomes}
+    if family == "1x2" and set(outcomes) == {"H", "D", "A"}:
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                outcome = "H" if home > away else "D" if home == away else "A"
+                probabilities[outcome] += float(probability)
+    elif family == "goal_range":
+        parsed = {outcome: parse_goal_range_selection(outcome) for outcome in outcomes}
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                winners = [
+                    outcome
+                    for outcome, pick in parsed.items()
+                    if settle_goal_range(pick, home, away) == "win"
+                ]
+                if len(winners) != 1:
+                    raise ValueError(
+                        "Categorical goal-range outcomes do not form an exact partition"
+                    )
+                probabilities[winners[0]] += float(probability)
+    elif family == "btts" and {item.lower() for item in outcomes} == {"yes", "no"}:
+        lookup = {outcome.lower(): outcome for outcome in outcomes}
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                outcome = lookup["yes" if home > 0 and away > 0 else "no"]
+                probabilities[outcome] += float(probability)
+    else:
+        raise ValueError(
+            "Candidate-bound categorical semantics are unsupported for this market identity"
+        )
+    total = math.fsum(probabilities.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=PROBABILITY_AUDIT_TOLERANCE):
+        raise ValueError("Categorical candidate probabilities do not sum to one")
+    return probabilities
+
+
+def _candidate_market_for_source_identity(
+    market_identity: dict[str, Any],
+) -> str | None:
+    family = str(market_identity.get("family") or "")
+    period = str(market_identity.get("period") or "")
+    if period == "first_half" and family in {"1x2", "asian", "total"}:
+        return "half_time"
+    if period == "full_time" and family in {
+        "asian",
+        "total",
+        "htft",
+        "goal_range",
+        "btts",
+        "corner_total",
+        "corner_handicap",
+    }:
+        return family
+    return None
+
+
+def _corner_identity_has_canonical_model(
+    record: dict[str, Any], market_identity: dict[str, Any]
+) -> bool:
+    """Return whether every quoted corner side has a replayable model candidate."""
+
+    market = _candidate_market_for_source_identity(market_identity)
+    if market not in CORNER_MARKETS:
+        return False
+    raw_line = market_identity.get("line")
+    if raw_line is None:
+        return False
+    for outcome in market_identity.get("price_outcomes", []):
+        side = str(outcome)
+        line = float(raw_line)
+        if market == "corner_handicap" and side == "away":
+            line = -line
+        if (
+            _matching_corner_candidate(
+                record, {"market": market, "side": side, "line": line}
+            )
+            is None
+        ):
+            return False
+    return True
+
+
+def _verified_source_identity_unavailable_reasons(
+    record: dict[str, Any],
+    market_identity: dict[str, Any],
+    snapshots: list[dict[str, Any]],
+    prediction: dict[str, Any],
+    *,
+    same_time_tolerance_minutes: float,
+) -> list[str]:
+    """Derive, rather than trust, why a source-visible identity is unavailable."""
+
+    market = _candidate_market_for_source_identity(market_identity)
+    if market in FOOTBALL_MODEL_MARKETS:
+        model_available = validated_joint_scenario_audit(record) is not None
+    elif market in CORNER_MARKETS:
+        model_available = _corner_identity_has_canonical_model(record, market_identity)
+    else:
+        model_available = False
+    if not model_available:
+        if market in CORNER_MARKETS:
+            return [ACTIVE_UNAVAILABLE_REASON_CORNER_MODEL_MISSING]
+        raise ValueError(
+            "Source-visible football identity has no replayable canonical model"
+        )
+
+    decimal_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if isinstance(snapshot, dict) and snapshot.get("odds_format") == "decimal"
+    ]
+    if not decimal_snapshots:
+        return [ACTIVE_UNAVAILABLE_REASON_DECIMAL_PRICE_MISSING]
+
+    prediction_generated_at = parse_aware_datetime(
+        str(prediction.get("generated_at") or ""),
+        "source-visible unavailable prediction generated_at",
+    ).astimezone(timezone.utc)
+    same_time_snapshots = []
+    for snapshot in decimal_snapshots:
+        collected_at = parse_aware_datetime(
+            str(snapshot.get("collected_at") or ""),
+            "source-visible market collected_at",
+        ).astimezone(timezone.utc)
+        if (
+            abs((collected_at - prediction_generated_at).total_seconds()) / 60.0
+            <= same_time_tolerance_minutes
+        ):
+            same_time_snapshots.append(snapshot)
+    if not same_time_snapshots:
+        return [ACTIVE_UNAVAILABLE_REASON_DECISION_TIME_PRICE_MISSING]
+    return []
+
+
+def _candidate_matches_formal_pick(
+    candidate: dict[str, Any], market: str, pick: dict[str, Any]
+) -> bool:
+    if candidate.get("market") != market:
+        return False
+    if market == "htft":
+        return (
+            str(candidate.get("selection") or "").upper()
+            == str(pick.get("selection") or "").upper()
+        )
+    if market == "goal_range":
+        return candidate.get("selection") == pick.get("selection")
+    if market == "half_time":
+        if candidate.get("submarket") != pick.get("market") or candidate.get(
+            "side"
+        ) != pick.get("side"):
+            return False
+    elif candidate.get("side") != pick.get("side"):
+        return False
+    candidate_line = candidate.get("line")
+    pick_line = pick.get("line")
+    if candidate_line is None or pick_line is None:
+        return candidate_line is pick_line
+    return math.isclose(
+        float(candidate_line), float(pick_line), rel_tol=0.0, abs_tol=1e-12
+    )
+
+
+def _same_numeric_mapping(
+    left: Any, right: Any, *, tolerance: float = PROBABILITY_AUDIT_TOLERANCE
+) -> bool:
+    if (
+        not isinstance(left, dict)
+        or not isinstance(right, dict)
+        or set(left) != set(right)
+    ):
+        return False
+    try:
+        return all(
+            math.isclose(
+                float(left[key]),
+                float(right[key]),
+                rel_tol=0.0,
+                abs_tol=tolerance,
+            )
+            for key in left
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_active_formal_pick_binding(
+    record: dict[str, Any],
+    audit: dict[str, Any],
+    predictions_by_hash: dict[str, dict[str, Any]],
+) -> None:
+    """Keep every official pick on the exact candidate/source/ledger chain."""
+
+    candidates = [
+        candidate
+        for candidate in audit.get("candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    bound_candidate_ids: set[str] = set()
+    for market, pick in formal_picks(record):
+        matches = [
+            candidate
+            for candidate in candidates
+            if _candidate_matches_formal_pick(candidate, market, pick)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Active formal {market} pick must match exactly one evaluated candidate"
+            )
+        candidate = matches[0]
+        if (
+            candidate.get("formal_eligible") is not True
+            or candidate.get("shadow_selected") is not True
+        ):
+            raise ValueError(
+                f"Active formal {market} pick is not the frozen formal-eligible selection"
+            )
+        bound_candidate_ids.add(str(candidate.get("candidate_id") or ""))
+        identity_hash = require_sha256(
+            candidate.get("market_identity_hash"),
+            f"active formal {market} candidate identity hash",
+        )
+        prediction = predictions_by_hash.get(identity_hash)
+        execution = (
+            prediction.get("execution_entry") if isinstance(prediction, dict) else None
+        )
+        if (
+            not isinstance(prediction, dict)
+            or prediction.get("status") != "predicted"
+            or not isinstance(execution, dict)
+            or execution.get("selection")
+            != candidate.get("settlement_reference_outcome")
+        ):
+            raise ValueError(
+                f"Active formal {market} pick does not match the predicted ledger selection"
+            )
+
+        source_binding = candidate.get("source_evidence_binding")
+        if not isinstance(source_binding, dict):
+            raise ValueError(f"Active formal {market} pick has no source binding")
+        if (
+            pick.get("odds_format") != source_binding.get("odds_format")
+            or pick.get("price_basis") != source_binding.get("price_basis")
+            or str(pick.get("market_source") or "")
+            != str(source_binding.get("source_url") or "")
+            or parse_aware_datetime(
+                str(pick.get("market_collected_at") or ""),
+                f"active formal {market} market_collected_at",
+            ).astimezone(timezone.utc)
+            != parse_aware_datetime(
+                str(source_binding.get("collected_at") or ""),
+                f"active formal {market} source collected_at",
+            ).astimezone(timezone.utc)
+            or int(float(pick.get("firm_count")))
+            != int(source_binding.get("firm_count"))
+            or not _same_numeric_mapping(
+                pick.get("complete_market_odds"),
+                source_binding.get("prices"),
+                tolerance=5e-7,
+            )
+            or not math.isclose(
+                float(pick.get("odds")),
+                float(candidate.get("odds")),
+                rel_tol=0.0,
+                abs_tol=ODDS_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("probability")),
+                float(candidate.get("probability")),
+                rel_tol=0.0,
+                abs_tol=PROBABILITY_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("ev")),
+                float(candidate.get("ev")),
+                rel_tol=0.0,
+                abs_tol=EV_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("edge_pp")),
+                float(candidate.get("edge_pp")),
+                rel_tol=0.0,
+                abs_tol=EDGE_AUDIT_TOLERANCE_PP,
+            )
+            or pick.get("market_signal") != candidate.get("market_signal")
+            or pick.get("confidence_components") != candidate.get("shadow_confidence")
+            or not math.isclose(
+                float(pick.get("confidence_score")),
+                float((candidate.get("shadow_confidence") or {}).get("score")),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(
+                f"Active formal {market} pick does not match its frozen candidate source/price/model"
+            )
+        candidate_distribution = candidate.get("settlement_probabilities")
+        pick_distribution = pick.get("settlement_probabilities")
+        if isinstance(pick_distribution, dict) and not _same_numeric_mapping(
+            pick_distribution, candidate_distribution
+        ):
+            raise ValueError(
+                f"Active formal {market} pick settlement model does not match its candidate"
+            )
+
+    expected_candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in candidates
+        if candidate.get("formal_eligible") is True
+        and candidate.get("shadow_selected") is True
+    }
+    if bound_candidate_ids != expected_candidate_ids:
+        missing = sorted(expected_candidate_ids - bound_candidate_ids)
+        extra = sorted(bound_candidate_ids - expected_candidate_ids)
+        raise ValueError(
+            "Frozen formal-eligible selected candidates and official formal picks must "
+            f"match exactly (missing={missing}, extra={extra})"
+        )
+
+
+def validate_active_candidate_evaluation_ledger_binding(
+    record: dict[str, Any], ledger_archive: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind the complete candidate denominator to the frozen forward queue.
+
+    ``candidate-evaluation/3`` records the eight family-level denominator, including
+    families for which no concrete line was available.  The forward queue, by contrast,
+    can only contain concrete canonical market identities.  An active record therefore
+    needs exactly one current candidate audit; every evaluated concrete identity must be
+    present in the queue exactly once, while unavailable families remain explicitly
+    represented by the committed candidate manifest rather than by an invented line.
+    """
+
+    audits = [
+        item
+        for item in record.get("candidate_audits", [])
+        if isinstance(item, dict) and item.get("kind") == CANDIDATE_EVALUATION_KIND
+    ]
+    if len(audits) != 1:
+        raise ValueError(
+            "Active untouched cohorts require exactly one current candidate evaluation audit"
+        )
+    audit = audits[0]
+    if (
+        audit.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or not validated_candidate_evaluation_audit(audit, record)
+    ):
+        raise ValueError(
+            "Active untouched cohort candidate evaluation audit is invalid or historical"
+        )
+
+    manifest = audit.get("market_manifest")
+    if not isinstance(manifest, list) or {
+        str(item.get("market") or "") for item in manifest if isinstance(item, dict)
+    } != set(PRIMARY_MARKETS):
+        raise ValueError(
+            "Active untouched cohort candidate evaluation must cover all eight markets"
+        )
+
+    payload = ledger_archive.get("ledger_payload")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "forward-observations/3.0.0"
+    ):
+        raise ValueError(
+            "Active candidate evaluations require a current forward-observations/3.0.0 ledger"
+        )
+    queue = payload.get("queue_manifest")
+    raw_entries = queue.get("entries") if isinstance(queue, dict) else None
+    raw_commitments = payload.get("commitments")
+    if not isinstance(raw_entries, list) or not isinstance(raw_commitments, list):
+        raise ValueError("Active forward candidate queue or commitments are missing")
+    candidate_generated_at = parse_aware_datetime(
+        str(audit.get("artifact", {}).get("generated_at") or ""),
+        "candidate evaluation generated_at",
+    )
+    queue_frozen_at = parse_aware_datetime(
+        str(queue.get("frozen_at") or ""), "candidate evaluation queue frozen_at"
+    )
+    if queue_frozen_at.astimezone(timezone.utc) > candidate_generated_at.astimezone(
+        timezone.utc
+    ):
+        raise ValueError(
+            "Candidate evaluation cannot precede its frozen eligibility queue"
+        )
+
+    candidate_groups: dict[str, list[dict[str, Any]]] = {}
+    for candidate in audit.get("candidates", []):
+        if not isinstance(candidate, dict):
+            raise ValueError(
+                "Active candidate evaluation contains an invalid candidate"
+            )
+        identity_hash = require_sha256(
+            candidate.get("market_identity_hash"),
+            "candidate evaluation market identity hash",
+        )
+        candidate_groups.setdefault(identity_hash, []).append(candidate)
+
+    representatives: dict[str, dict[str, Any]] = {}
+    expected_statuses: dict[str, str] = {}
+    for identity_hash, candidates in candidate_groups.items():
+        identities = [candidate.get("market_identity") for candidate in candidates]
+        if any(identity != identities[0] for identity in identities[1:]):
+            raise ValueError(
+                "Candidate selections sharing an identity hash disagree on canonical identity"
+            )
+        selected = [
+            candidate
+            for candidate in candidates
+            if candidate.get("shadow_selected") is True
+        ]
+        if len(selected) > 1:
+            raise ValueError(
+                "One exact market identity cannot have multiple predicted dispositions"
+            )
+        representatives[identity_hash] = (
+            selected[0]
+            if selected
+            else min(candidates, key=lambda item: str(item.get("candidate_id") or ""))
+        )
+        expected_statuses[identity_hash] = "predicted" if selected else "abstained"
+
+    source_audit = validated_source_evidence_audit(record)
+    source_bundle = (
+        source_audit.get("bundle") if isinstance(source_audit, dict) else None
+    )
+    market_index = (
+        source_bundle.get("market_index") if isinstance(source_bundle, dict) else None
+    )
+    if not isinstance(market_index, dict):
+        raise ValueError(
+            "Active candidate denominator requires replayable canonical source evidence"
+        )
+    source_bundle_generated_at = parse_aware_datetime(
+        str(source_bundle.get("generated_at") or ""),
+        "active source evidence generated_at",
+    )
+    if source_bundle_generated_at.astimezone(
+        timezone.utc
+    ) > candidate_generated_at.astimezone(timezone.utc):
+        raise ValueError(
+            "Candidate evaluation cannot bind source evidence collected after its "
+            "generated_at"
+        )
+    source_identities: dict[str, dict[str, Any]] = {}
+    source_hashes_by_candidate_market: dict[str, set[str]] = {
+        market: set() for market in PRIMARY_MARKETS
+    }
+    for identity_hash, snapshots in market_index.items():
+        if not isinstance(snapshots, list) or not snapshots:
+            raise ValueError("Active source evidence market index is invalid")
+        identity = snapshots[0].get("market_identity")
+        if not isinstance(identity, dict) or any(
+            not isinstance(snapshot, dict)
+            or snapshot.get("market_identity") != identity
+            or snapshot.get("market_identity_hash") != identity_hash
+            for snapshot in snapshots
+        ):
+            raise ValueError("Active source evidence market identity does not replay")
+        candidate_market = _candidate_market_for_source_identity(identity)
+        if candidate_market is None:
+            continue
+        source_identities[str(identity_hash)] = identity
+        source_hashes_by_candidate_market[candidate_market].add(str(identity_hash))
+
+    manifest_by_market = {
+        str(item["market"]): item for item in manifest if isinstance(item, dict)
+    }
+    predictions_by_hash: dict[str, dict[str, Any]] = {}
+    for raw_commitment in raw_commitments:
+        prediction = (
+            raw_commitment.get("prediction_payload")
+            if isinstance(raw_commitment, dict)
+            else None
+        )
+        if not isinstance(prediction, dict):
+            raise ValueError("Active forward commitment has no prediction payload")
+        identity_hash = require_sha256(
+            prediction.get("market_identity_hash"),
+            "forward commitment market identity hash",
+        )
+        if identity_hash in predictions_by_hash:
+            raise ValueError(
+                "Active forward commitments duplicate an exact market identity"
+            )
+        predictions_by_hash[identity_hash] = prediction
+
+    raw_protocol = (
+        payload.get("policy_manifest", {})
+        .get("policy", {})
+        .get("validation_protocol", {})
+    )
+    try:
+        same_time_tolerance_minutes = float(raw_protocol["same_time_tolerance_minutes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Active forward policy has no frozen same-time price tolerance"
+        ) from exc
+    unavailable_source_hashes: set[str] = set()
+    for market in PRIMARY_MARKETS:
+        source_hashes = source_hashes_by_candidate_market[market]
+        candidate_hashes_for_market = {
+            identity_hash
+            for identity_hash, candidates in candidate_groups.items()
+            if any(candidate.get("market") == market for candidate in candidates)
+        }
+        if manifest_by_market[market].get("status") == "evaluated":
+            if source_hashes != candidate_hashes_for_market:
+                missing = sorted(source_hashes - candidate_hashes_for_market)
+                extra = sorted(candidate_hashes_for_market - source_hashes)
+                raise ValueError(
+                    "Candidate evaluation does not exactly cover source-visible identities "
+                    f"for {market} (missing={missing}, extra={extra})"
+                )
+            for identity_hash in source_hashes:
+                expected_outcomes = set(
+                    source_identities[identity_hash].get("price_outcomes", [])
+                )
+                candidate_outcomes = {
+                    str(candidate.get("settlement_reference_outcome") or "")
+                    for candidate in candidate_groups[identity_hash]
+                }
+                if candidate_outcomes != expected_outcomes or len(
+                    candidate_groups[identity_hash]
+                ) != len(expected_outcomes):
+                    missing = sorted(expected_outcomes - candidate_outcomes)
+                    extra = sorted(candidate_outcomes - expected_outcomes)
+                    raise ValueError(
+                        "Candidate evaluation does not cover every quoted price outcome "
+                        f"for {identity_hash} (missing={missing}, extra={extra})"
+                    )
+        else:
+            if candidate_hashes_for_market:
+                raise ValueError(
+                    f"Unavailable candidate market {market} cannot contain candidates"
+                )
+            if not source_hashes:
+                expected_reasons = [ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING]
+            else:
+                derived_reasons: set[str] = set()
+                for identity_hash in source_hashes:
+                    prediction = predictions_by_hash.get(identity_hash)
+                    if not isinstance(prediction, dict):
+                        prediction = {
+                            "generated_at": candidate_generated_at.isoformat()
+                        }
+                    reasons = _verified_source_identity_unavailable_reasons(
+                        record,
+                        source_identities[identity_hash],
+                        list(market_index[identity_hash]),
+                        prediction,
+                        same_time_tolerance_minutes=same_time_tolerance_minutes,
+                    )
+                    if not reasons:
+                        raise ValueError(
+                            "Source-visible market with a replayable canonical model and "
+                            "decision-time price must be evaluated"
+                        )
+                    derived_reasons.update(reasons)
+                expected_reasons = sorted(derived_reasons)
+            if manifest_by_market[market].get("reasons") != expected_reasons:
+                raise ValueError(
+                    f"Unavailable candidate market {market} reasons do not match "
+                    "verified source/model conditions"
+                )
+            unavailable_source_hashes.update(source_hashes)
+
+    entries_by_hash: dict[str, dict[str, Any]] = {}
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError("Active forward queue contains an invalid entry")
+        identity_hash = require_sha256(
+            raw_entry.get("market_identity_hash"), "forward queue market identity hash"
+        )
+        if identity_hash in entries_by_hash:
+            raise ValueError("Active forward queue duplicates an exact market identity")
+        entries_by_hash[identity_hash] = raw_entry
+
+    candidate_hashes = set(candidate_groups)
+    queue_hashes = set(entries_by_hash)
+    all_manifest_unavailable = not candidate_hashes and all(
+        isinstance(item, dict) and item.get("status") == "unavailable"
+        for item in manifest
+    )
+    sentinel_identity = {
+        "family": "1x2",
+        "period": "full_time",
+        "line": None,
+        "price_outcomes": ["H", "D", "A"],
+    }
+    sentinel_hash = source_evidence.market_identity_hash(sentinel_identity)
+    use_sentinel = all_manifest_unavailable and not unavailable_source_hashes
+    expected_queue_hashes = candidate_hashes | unavailable_source_hashes
+    if use_sentinel:
+        if queue_hashes != {sentinel_hash}:
+            raise ValueError(
+                "An all-unavailable candidate manifest requires exactly one canonical "
+                "fixture-denominator sentinel"
+            )
+    elif expected_queue_hashes != queue_hashes:
+        missing = sorted(expected_queue_hashes - queue_hashes)
+        extra = sorted(queue_hashes - expected_queue_hashes)
+        raise ValueError(
+            "Active forward queue does not exactly cover evaluated and unavailable "
+            "source-visible identities "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    expected_prediction_hashes = (
+        {sentinel_hash} if use_sentinel else expected_queue_hashes
+    )
+    if set(predictions_by_hash) != expected_prediction_hashes:
+        raise ValueError(
+            "Active forward commitments do not exactly cover evaluated candidate identities"
+        )
+
+    if use_sentinel:
+        sentinel_entry = entries_by_hash[sentinel_hash]
+        sentinel_prediction = predictions_by_hash[sentinel_hash]
+        source_rows = (
+            source_bundle.get("sources") if isinstance(source_bundle, dict) else None
+        )
+        if (
+            not isinstance(source_bundle, dict)
+            or source_bundle.get("market_index") != {}
+            or not isinstance(source_rows, list)
+            or not source_rows
+            or any(
+                not isinstance(source_row, dict)
+                or not isinstance(source_row.get("parsed"), dict)
+                or source_row["parsed"].get("availability_status") != "unavailable"
+                for source_row in source_rows
+            )
+        ):
+            raise ValueError(
+                "All-unavailable candidate manifests require replayable source evidence "
+                "with no available market snapshots"
+            )
+        sentinel_generated_at = parse_aware_datetime(
+            str(sentinel_prediction.get("generated_at") or ""),
+            "fixture denominator sentinel generated_at",
+        )
+        expected_reasons = [
+            f"{item['market']}:{reason}"
+            for item in manifest
+            if isinstance(item, dict)
+            for reason in item.get("reasons", [])
+        ]
+        if (
+            sentinel_entry.get("market_identity") != sentinel_identity
+            or sentinel_prediction.get("market_identity") != sentinel_identity
+            or sentinel_prediction.get("status") != "unavailable"
+            or sentinel_prediction.get("settlement_reference_outcome") is not None
+            or sentinel_prediction.get("unavailable_reasons") != expected_reasons
+            or candidate_generated_at.astimezone(timezone.utc)
+            > sentinel_generated_at.astimezone(timezone.utc)
+        ):
+            raise ValueError(
+                "All-unavailable fixture denominator sentinel does not bind the eight-market manifest"
+            )
+        _validate_active_formal_pick_binding(record, audit, predictions_by_hash)
+        return {
+            "candidate_evaluation_audit_hash": audit["audit_hash"],
+            "evaluated_identity_count": 0,
+            "evaluated_market_count": 0,
+            "unavailable_market_count": len(PRIMARY_MARKETS),
+            "fixture_denominator_sentinel": sentinel_hash,
+        }
+
+    for identity_hash in unavailable_source_hashes:
+        identity = source_identities[identity_hash]
+        entry = entries_by_hash[identity_hash]
+        prediction = predictions_by_hash[identity_hash]
+        candidate_market = _candidate_market_for_source_identity(identity)
+        manifest_entry = manifest_by_market.get(str(candidate_market))
+        prediction_generated_at = parse_aware_datetime(
+            str(prediction.get("generated_at") or ""),
+            "unavailable forward identity generated_at",
+        )
+        if (
+            entry.get("market_identity") != identity
+            or prediction.get("market_identity") != identity
+            or prediction.get("status") != "unavailable"
+            or prediction.get("settlement_reference_outcome") is not None
+            or not isinstance(manifest_entry, dict)
+            or manifest_entry.get("status") != "unavailable"
+            or prediction.get("unavailable_reasons") != manifest_entry.get("reasons")
+            or candidate_generated_at.astimezone(timezone.utc)
+            > prediction_generated_at.astimezone(timezone.utc)
+        ):
+            raise ValueError(
+                "Unavailable forward identity does not bind its source-visible market manifest"
+            )
+
+    market_schemas = payload.get("market_schemas")
+    if not isinstance(market_schemas, dict):
+        raise ValueError("Active forward market schemas are missing")
+    for identity_hash, candidates in candidate_groups.items():
+        candidate = representatives[identity_hash]
+        entry = entries_by_hash[identity_hash]
+        prediction = predictions_by_hash[identity_hash]
+        if entry.get("market_identity") != candidate.get(
+            "market_identity"
+        ) or prediction.get("market_identity") != candidate.get("market_identity"):
+            raise ValueError(
+                "Active forward queue identity does not match its evaluated candidate"
+            )
+
+        expected_status = expected_statuses[identity_hash]
+        if prediction.get("status") != expected_status:
+            raise ValueError(
+                "Active forward commitment status does not match the candidate disposition"
+            )
+        family = str(candidate.get("market_identity", {}).get("family") or "")
+        semantics = market_schemas.get(family, {}).get("settlement_semantics")
+        model_probabilities = prediction.get("model_probabilities")
+        if not isinstance(model_probabilities, dict):
+            raise ValueError("Modeled candidate commitment probabilities are missing")
+        if semantics == "five_state_return":
+            if prediction.get("settlement_reference_outcome") != candidate.get(
+                "settlement_reference_outcome"
+            ):
+                raise ValueError(
+                    "Active forward commitment selection does not match the evaluated candidate"
+                )
+            expected_probabilities = candidate.get("settlement_probabilities")
+        elif semantics == "categorical":
+            if prediction.get("settlement_reference_outcome") is not None:
+                raise ValueError(
+                    "Categorical candidate commitments cannot carry a settlement reference"
+                )
+            execution = prediction.get("execution_entry")
+            if isinstance(execution, dict) and execution.get(
+                "selection"
+            ) != candidate.get("settlement_reference_outcome"):
+                raise ValueError(
+                    "Predicted categorical commitment does not bind the selected candidate outcome"
+                )
+            expected_probabilities = _canonical_candidate_categorical_probabilities(
+                record, candidate["market_identity"]
+            )
+        else:
+            raise ValueError("Candidate-bound forward market semantics are unsupported")
+        if (
+            not isinstance(expected_probabilities, dict)
+            or set(model_probabilities) != set(expected_probabilities)
+            or any(
+                not math.isclose(
+                    float(model_probabilities[outcome]),
+                    float(expected_probabilities[outcome]),
+                    rel_tol=0.0,
+                    abs_tol=PROBABILITY_AUDIT_TOLERANCE,
+                )
+                for outcome in model_probabilities
+            )
+        ):
+            raise ValueError(
+                "Active forward model probabilities do not match the frozen candidate model"
+            )
+        prediction_generated_at = parse_aware_datetime(
+            str(prediction.get("generated_at") or ""),
+            "forward candidate commitment generated_at",
+        )
+        if candidate_generated_at.astimezone(
+            timezone.utc
+        ) > prediction_generated_at.astimezone(timezone.utc):
+            raise ValueError(
+                "Forward commitment cannot precede its candidate evaluation disposition"
+            )
+
+        source_binding = candidate.get("source_evidence_binding")
+        bookmaker = prediction.get("bookmaker_snapshot")
+        if not isinstance(source_binding, dict) or not isinstance(bookmaker, dict):
+            raise ValueError(
+                "Active candidate and forward commitment require the same source snapshot"
+            )
+        if any(
+            source_binding.get(candidate_field) != bookmaker.get(ledger_field)
+            for candidate_field, ledger_field in (
+                ("evidence_hash", "source_evidence_hash"),
+                ("source_url", "source_url"),
+                ("collected_at", "collected_at"),
+                ("price_basis", "price_basis"),
+                ("odds_format", "odds_format"),
+                ("firm_count", "firm_count"),
+            )
+        ):
+            raise ValueError(
+                "Active candidate and forward commitment source snapshots do not match"
+            )
+        if any(
+            other.get("source_evidence_binding") != source_binding
+            for other in candidates
+        ):
+            raise ValueError(
+                "Selections sharing one exact identity must use the same frozen source snapshot"
+            )
+        candidate_prices = source_binding.get("prices")
+        ledger_prices = bookmaker.get("complete_market_odds")
+        if (
+            not isinstance(candidate_prices, dict)
+            or not isinstance(ledger_prices, dict)
+            or set(candidate_prices) != set(ledger_prices)
+            or any(
+                not math.isclose(
+                    float(candidate_prices[outcome]),
+                    float(ledger_prices[outcome]),
+                    rel_tol=0.0,
+                    abs_tol=5e-7,
+                )
+                for outcome in candidate_prices
+            )
+        ):
+            raise ValueError(
+                "Active candidate and forward commitment prices do not match"
+            )
+
+    _validate_active_formal_pick_binding(record, audit, predictions_by_hash)
+    return {
+        "candidate_evaluation_audit_hash": audit["audit_hash"],
+        "evaluated_identity_count": len(candidate_groups),
+        "evaluated_market_count": sum(
+            item.get("status") == "evaluated"
+            for item in manifest
+            if isinstance(item, dict)
+        ),
+        "unavailable_market_count": sum(
+            item.get("status") == "unavailable"
+            for item in manifest
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def _canonical_forward_record_prediction_payload(
+    record: dict[str, Any],
+    ledger_archive: dict[str, Any],
+    provenance_binding: dict[str, Any],
+    *,
+    schema_version: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": schema_version,
+        "archived_at": str(record.get("updated_at") or record.get("created_at") or ""),
+        "analysis_stage": str(record.get("analysis_stage") or "initial"),
+        "fixture": {
+            "match_id": str(record.get("match_id") or ""),
+            "league": record.get("league"),
+            "kickoff": record.get("kickoff"),
+            "home_team": record.get("home_team"),
+            "away_team": record.get("away_team"),
+        },
+        "model_outputs": {
+            "probabilities": deepcopy(record.get("probabilities")),
+            "predicted_score": record.get("predicted_score"),
+            "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
+            "asian_pick": deepcopy(record.get("asian_pick")),
+            "total_pick": deepcopy(record.get("total_pick")),
+            "half_time_pick": deepcopy(record.get("half_time_pick")),
+            "htft_picks": deepcopy(record.get("htft_picks", [])),
+            "goal_range_pick": deepcopy(record.get("goal_range_pick")),
+            "btts_pick": deepcopy(record.get("btts_pick")),
+            "corner_total_pick": deepcopy(record.get("corner_total_pick")),
+            "corner_handicap_pick": deepcopy(record.get("corner_handicap_pick")),
+            "primary_market": record.get("primary_market"),
+            "primary_pick": deepcopy(record.get("primary_pick")),
+            "candidate_audits": deepcopy(record.get("candidate_audits", [])),
+            "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
+            "score_model_provenance": deepcopy(record.get("score_model_provenance")),
+            "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
+            "evaluation_eligibility": deepcopy(record.get("evaluation_eligibility")),
+            "market_status": deepcopy(record.get("market_status")),
+        },
+        "ledger": {
+            "ledger_hash": ledger_archive["ledger_hash"],
+            "archive_hash": ledger_archive["archive_hash"],
+            "market_commitments": deepcopy(ledger_archive["market_commitments"]),
+        },
+        "provenance_binding": deepcopy(provenance_binding),
+    }
+
+
+def canonical_forward_record_prediction_payload(
+    record: dict[str, Any],
+    ledger_archive: dict[str, Any],
+    provenance_binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Build only the current prediction commitment payload.
+
+    Previous schemas are reconstructed internally for immutable replay and are never exposed
+    through the active builder.
+    """
+
+    return _canonical_forward_record_prediction_payload(
+        record,
+        ledger_archive,
+        provenance_binding,
+        schema_version=FORWARD_RECORD_PREDICTION_SCHEMA_VERSION,
+    )
+
+
+def build_forward_record_prediction_commitment(
+    record: dict[str, Any],
+    ledger_archive: dict[str, Any],
+    base_binding: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    validated_base = forward_policy.validate_record_binding(base_binding)
+    if (
+        validated_base is None
+        or validated_base.get("schema_version")
+        != forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "Active cohort record requires a provenance-complete base binding"
+        )
+    payload = canonical_forward_record_prediction_payload(
+        record, ledger_archive, validated_base["provenance_binding"]
+    )
+    prediction_hash = forward_policy._hash_json(payload)
+    committed_binding = forward_policy.bind_observation_commitment(
+        validated_base, prediction_hash
+    )
+    commitment: dict[str, Any] = {
+        "schema_version": FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION,
+        "prediction_payload": payload,
+        "prediction_hash": prediction_hash,
+        "forward_policy_binding": committed_binding,
+    }
+    commitment["commitment_hash"] = forward_policy._hash_json(commitment)
+    return commitment, committed_binding
+
+
+def validate_forward_record_prediction_commitment(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw = record.get("forward_prediction_commitment")
+    binding_raw = record.get("forward_policy_binding")
+    if raw is None and binding_raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("Forward-bound record has no prediction commitment")
+    value = deepcopy(raw)
+    required = {
+        "schema_version",
+        "prediction_payload",
+        "prediction_hash",
+        "forward_policy_binding",
+        "commitment_hash",
+    }
+    if set(value) != required:
+        raise ValueError("Forward record commitment fields are incomplete")
+    commitment_schema = value.get("schema_version")
+    if commitment_schema not in {
+        PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION,
+        FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION,
+    }:
+        raise ValueError("Forward record commitment schema is unsupported")
+    historical = commitment_schema == PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION
+    supplied_hash = value.pop("commitment_hash", None)
+    if supplied_hash != forward_policy._hash_json(value):
+        raise ValueError("Forward record commitment hash is invalid")
+    ledger = validate_forward_validation_ledger_archive(
+        record.get("forward_validation_ledger"), record=record
+    )
+    expected_ledger_schema = (
+        PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+        if historical
+        else FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    )
+    if ledger.get("schema_version") != expected_ledger_schema:
+        raise ValueError("Forward record commitment and ledger schemas do not match")
+    if not historical:
+        validate_active_candidate_evaluation_ledger_binding(record, ledger)
+    try:
+        binding = forward_policy.validate_record_binding(
+            value.get("forward_policy_binding")
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward record commitment binding is invalid") from exc
+    expected_binding_schema = (
+        forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        if historical
+        else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    )
+    if (
+        binding is None
+        or binding.get("schema_version") != expected_binding_schema
+        or binding != binding_raw
+    ):
+        raise ValueError("Forward record does not preserve its committed binding")
+    expected_payload = _canonical_forward_record_prediction_payload(
+        record,
+        ledger,
+        binding["provenance_binding"],
+        schema_version=(
+            PREVIOUS_FORWARD_RECORD_PREDICTION_SCHEMA_VERSION
+            if historical
+            else FORWARD_RECORD_PREDICTION_SCHEMA_VERSION
+        ),
+    )
+    expected_prediction_hash = forward_policy._hash_json(expected_payload)
+    if (
+        value.get("prediction_payload") != expected_payload
+        or value.get("prediction_hash") != expected_prediction_hash
+        or binding.get("observation_commitment_hash") != expected_prediction_hash
+    ):
+        raise ValueError("Forward record prediction no longer matches its commitment")
+    expected_archive_hash = forward_policy._hash_json(
+        snapshot_payload(revision_snapshot(record))
+    )
+    if record.get("archive_version_hash") != expected_archive_hash:
+        raise ValueError(
+            "Forward record archive hash no longer matches its committed binding"
+        )
+    value["commitment_hash"] = supplied_hash
+    return value
+
+
+def _forward_observed_settlement_state(
+    record: dict[str, Any], prediction: dict[str, Any], schema: dict[str, Any]
+) -> str | None:
+    final = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("final_score") or "")
+    )
+    if final is None:
+        return None
+    home, away = (int(final.group(1)), int(final.group(2)))
+    full_code = "H" if home > away else "A" if away > home else "D"
+    raw_states = schema.get("settlement_states")
+    if not isinstance(raw_states, list):
+        return None
+    settlement_states = set(raw_states)
+    identity = prediction.get("market_identity")
+    if not isinstance(identity, dict):
+        return None
+    family = str(identity.get("family") or "")
+    period = str(identity.get("period") or "")
+    semantics = str(schema.get("settlement_semantics") or "")
+    half = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("half_time_score") or "")
+    )
+    if period == "first_half":
+        if half is None:
+            return None
+        score_home, score_away = int(half.group(1)), int(half.group(2))
+    else:
+        score_home, score_away = home, away
+    if semantics == "five_state_return":
+        reference = str(prediction.get("settlement_reference_outcome") or "")
+        line = identity.get("line")
+        if reference not in identity.get("price_outcomes", []) or line is None:
+            return None
+        if family in {"asian", "corner_handicap"}:
+            pick_line = float(line) if reference == "home" else -float(line)
+            pick = {"side": reference, "line": pick_line}
+            if family == "corner_handicap":
+                home_corners = record.get("home_corners")
+                away_corners = record.get("away_corners")
+                if home_corners is None or away_corners is None:
+                    return None
+                observed = settle_corner_handicap(
+                    pick, int(home_corners), int(away_corners)
+                )
+            else:
+                observed = settle_asian(pick, score_home, score_away)
+        elif family in {"total", "corner_total"}:
+            pick = {"side": reference, "line": float(line)}
+            if family == "corner_total":
+                home_corners = record.get("home_corners")
+                away_corners = record.get("away_corners")
+                if home_corners is None or away_corners is None:
+                    return None
+                observed = settle_corner_total(
+                    pick, int(home_corners), int(away_corners)
+                )
+            else:
+                observed = settle_total(pick, score_home, score_away)
+        else:
+            return None
+        normalized = "full_win" if observed == "win" else observed
+        return normalized if normalized in settlement_states else None
+    if settlement_states == {"H", "D", "A"}:
+        return result_code(score_home, score_away)
+    if family == "htft" and half is not None:
+        half_home, half_away = int(half.group(1)), int(half.group(2))
+        half_code = (
+            "H" if half_home > half_away else "A" if half_away > half_home else "D"
+        )
+        candidate = f"{half_code}{full_code}"
+        return candidate if candidate in settlement_states else None
+    if family == "goal_range":
+        total_goals = score_home + score_away
+        matches: list[str] = []
+        for state in raw_states:
+            try:
+                parsed = parse_goal_range_selection(str(state))
+            except ValueError:
+                return None
+            minimum = int(parsed["minimum_goals"])
+            maximum = parsed["maximum_goals"]
+            if total_goals >= minimum and (
+                maximum is None or total_goals <= int(maximum)
+            ):
+                matches.append(str(state))
+        return matches[0] if len(matches) == 1 else None
+    actual_score = f"{home}-{away}"
+    if actual_score in settlement_states:
+        return actual_score
+    if settlement_states in ({"yes", "no"}, {"Y", "N"}):
+        yes = home > 0 and away > 0
+        return (
+            ("yes" if yes else "no")
+            if "yes" in settlement_states
+            else ("Y" if yes else "N")
+        )
+    return None
+
+
+def _previous_forward_observed_outcome(
+    record: dict[str, Any], market: str, outcomes: list[str]
+) -> str | None:
+    """Replay the v2 observation outcome contract without upgrading it."""
+
+    final = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("final_score") or "")
+    )
+    if final is None:
+        return None
+    home, away = (int(final.group(1)), int(final.group(2)))
+    full_code = "H" if home > away else "A" if away > home else "D"
+    outcome_set = set(outcomes)
+    if outcome_set == {"H", "D", "A"}:
+        return full_code
+    half = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("half_time_score") or "")
+    )
+    if market == "htft" and half is not None:
+        half_home, half_away = int(half.group(1)), int(half.group(2))
+        half_code = (
+            "H" if half_home > half_away else "A" if half_away > half_home else "D"
+        )
+        candidate = f"{half_code}{full_code}"
+        return candidate if candidate in outcome_set else None
+    actual_score = f"{home}-{away}"
+    if actual_score in outcome_set:
+        return actual_score
+    if outcome_set in ({"yes", "no"}, {"Y", "N"}):
+        yes = home > 0 and away > 0
+        return (
+            ("yes" if yes else "no") if "yes" in outcome_set else ("Y" if yes else "N")
+        )
+    return None
+
+
+def _forward_validation_micro_ledger_for_record(
+    record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Replay one archived micro-ledger and append only verified post-match settlement.
+
+    The queue, probabilities, baselines and commitment objects are copied byte-for-byte
+    from the pre-match archive.  This function never reconstructs them from reviewed data.
+    """
+
+    commitment = validate_forward_record_prediction_commitment(record)
+    if commitment is None:
+        raise ValueError("Record has no replayable forward prediction commitment")
+    ledger_archive = validate_forward_validation_ledger_archive(
+        record.get("forward_validation_ledger"), record=record
+    )
+    payload = deepcopy(ledger_archive["ledger_payload"])
+    historical = (
+        ledger_archive.get("schema_version")
+        == PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    )
+    if cohort_closure is not None:
+        payload["cohort_closure"] = deepcopy(cohort_closure)
+    if record.get("status") == "reviewed":
+        verification = record.get("result_verification")
+        if not isinstance(verification, dict):
+            raise ValueError("Reviewed forward record has no result verification")
+        predictions = {
+            item["prediction_payload"]["observation_id"]: item["prediction_payload"]
+            for item in payload.get("commitments", [])
+        }
+        schemas = payload.get("market_schemas", {})
+        for settlement in payload.get("settlements", []):
+            observation_id = str(settlement.get("observation_id") or "")
+            prediction = predictions.get(observation_id)
+            if not isinstance(prediction, dict):
+                raise ValueError("Forward settlement has no archived prediction")
+            if historical:
+                market = str(prediction.get("market") or "")
+                schema = schemas.get(market, {})
+                outcomes = schema.get("outcomes") if isinstance(schema, dict) else None
+                if not isinstance(outcomes, list):
+                    raise ValueError("Forward market schema outcomes are unavailable")
+                observed = _previous_forward_observed_outcome(
+                    record, market, list(outcomes)
+                )
+            else:
+                raw_identity = prediction.get("market_identity")
+                family = (
+                    str(raw_identity.get("family") or "")
+                    if isinstance(raw_identity, dict)
+                    else ""
+                )
+                schema = schemas.get(family, {})
+                if not isinstance(schema, dict) or not isinstance(
+                    schema.get("settlement_states"), list
+                ):
+                    raise ValueError(
+                        "Forward market schema settlement states are unavailable"
+                    )
+                observed = _forward_observed_settlement_state(
+                    record, prediction, schema
+                )
+            if observed is None:
+                continue
+            settlement.update(
+                {
+                    "status": "settled",
+                    (
+                        "observed_outcome"
+                        if historical
+                        else "observed_settlement_state"
+                    ): observed,
+                    "result_collected_at": verification.get("collected_at"),
+                    "result_source_evidence_hash": forward_policy._hash_json(
+                        {
+                            "fixture_id": record.get("match_id"),
+                            "source": verification.get("source"),
+                            "collected_at": verification.get("collected_at"),
+                            "final_score": record.get("final_score"),
+                            "half_time_score": record.get("half_time_score"),
+                        }
+                    ),
+                }
+            )
+            settlement.pop("settlement_hash", None)
+            settlement["settlement_hash"] = forward_policy._hash_json(settlement)
+    return payload
+
+
+def _forward_history_record_receipt(
+    record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build one self-contained receipt only after replaying the stored record chain."""
+
+    commitment = validate_forward_record_prediction_commitment(record)
+    if commitment is None:
+        raise ValueError("Record has no replayable forward prediction commitment")
+    ledger_archive = validate_forward_validation_ledger_archive(
+        record.get("forward_validation_ledger"), record=record
+    )
+    ledger_payload = _forward_validation_micro_ledger_for_record(
+        record, cohort_closure=cohort_closure
+    )
+    prediction_payload = commitment.get("prediction_payload")
+    binding = commitment.get("forward_policy_binding")
+    if not isinstance(prediction_payload, dict) or not isinstance(binding, dict):
+        raise ValueError("Forward record commitment is incomplete")
+    archived_at = str(prediction_payload.get("archived_at") or "")
+    if parse_aware_datetime(
+        archived_at, "forward record archived_at"
+    ) != parse_aware_datetime(
+        str(binding.get("archived_at") or ""), "forward binding archived_at"
+    ):
+        raise ValueError(
+            "Forward record archived_at does not match its committed binding"
+        )
+    archive_version_hash = require_sha256(
+        record.get("archive_version_hash"), "forward archive version hash"
+    )
+    snapshot = snapshot_payload(revision_snapshot(record))
+    if forward_policy._hash_json(snapshot) != archive_version_hash:
+        raise ValueError("Forward record archive snapshot does not replay")
+    market_commitments = _forward_market_commitments(ledger_archive["ledger_payload"])
+    historical = (
+        commitment.get("schema_version")
+        == PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": (
+            PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+            if historical
+            else FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+        ),
+        "fixture_id": str(record.get("match_id") or ""),
+        "record_archived_at": archived_at,
+        "archive_version_hash": archive_version_hash,
+        "record_commitment_hash": require_sha256(
+            commitment.get("commitment_hash"), "forward record commitment hash"
+        ),
+        "record_binding_hash": require_sha256(
+            binding.get("binding_hash"), "forward record binding hash"
+        ),
+        "prematch_ledger_hash": require_sha256(
+            ledger_archive.get("ledger_hash"), "forward pre-match ledger hash"
+        ),
+        "ledger_payload_hash": forward_policy._hash_json(ledger_payload),
+        "market_commitments": market_commitments,
+        "ledger_payload": ledger_payload,
+        "archive_snapshot_payload": snapshot,
+    }
+    if not receipt["fixture_id"]:
+        raise ValueError("Forward history receipt fixture_id is missing")
+    receipt["receipt_hash"] = forward_policy._hash_json(receipt)
+    return receipt
+
+
+def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, str]:
+    return {
+        "fixture_id": str(receipt.get("fixture_id") or ""),
+        "archive_version_hash": require_sha256(
+            receipt.get("archive_version_hash"), "forward archive version hash"
+        ),
+        "record_commitment_hash": require_sha256(
+            receipt.get("record_commitment_hash"), "forward record commitment hash"
+        ),
+        "record_binding_hash": require_sha256(
+            receipt.get("record_binding_hash"), "forward record binding hash"
+        ),
+        "prematch_ledger_hash": require_sha256(
+            receipt.get("prematch_ledger_hash"), "forward pre-match ledger hash"
+        ),
+    }
+
+
+def forward_record_manifest_for_records(
+    records: list[dict[str, Any]], *, cohort_manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the complete canonical record index used to close one cohort."""
+
+    try:
+        cohort = forward_policy.validate_cohort(cohort_manifest)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward record manifest cohort is invalid") from exc
+    receipts = [_forward_history_record_receipt(record) for record in records]
+    if any(
+        receipt.get("schema_version") != FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+        for receipt in receipts
+    ):
+        raise ValueError(
+            "Historical forward records are read-only and cannot create a new cohort closure"
+        )
+    receipts.sort(key=lambda item: str(item["fixture_id"]))
+    entries = [_record_manifest_entry_from_receipt(receipt) for receipt in receipts]
+    fixture_ids = [entry["fixture_id"] for entry in entries]
+    if len(set(fixture_ids)) != len(fixture_ids):
+        raise ValueError("Forward record manifest contains duplicate fixture records")
+    for receipt in receipts:
+        ledger = receipt["ledger_payload"]
+        if (
+            ledger.get("cohort_id") != cohort["cohort_id"]
+            or ledger.get("policy_id") != cohort["policy_id"]
+            or ledger.get("policy_hash") != cohort["policy_hash"]
+            or ledger.get("cohort_manifest") != cohort
+        ):
+            raise ValueError(
+                "Forward record manifest cannot mix records from another cohort or policy"
+            )
+    manifest: dict[str, Any] = {
+        "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "soccer_untouched_live_forward_record_manifest",
+        "cohort_id": cohort["cohort_id"],
+        "cohort_hash": cohort["cohort_hash"],
+        "policy_id": cohort["policy_id"],
+        "policy_hash": cohort["policy_hash"],
+        "record_count": len(entries),
+        "records": entries,
+    }
+    manifest["manifest_hash"] = forward_policy._hash_json(manifest)
+    try:
+        return forward_policy.validate_record_manifest(manifest, cohort=cohort)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward record manifest is invalid") from exc
+
+
+def forward_validation_input_for_records(
+    records: list[dict[str, Any]], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Export one canonical cohort envelope from independently committed records."""
+
+    if not records:
+        raise ValueError("Forward cohort export requires at least one record")
+    if cohort_closure is None:
+        raise ValueError(
+            "Formal forward cohort export requires a closed cohort record manifest"
+        )
+    try:
+        closure = forward_policy.validate_closure(
+            cohort_closure, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort closure is invalid") from exc
+    receipts = [
+        _forward_history_record_receipt(record, cohort_closure=closure)
+        for record in records
+    ]
+    receipts.sort(key=lambda item: str(item["fixture_id"]))
+    fixture_ids = [str(item["fixture_id"]) for item in receipts]
+    if len(set(fixture_ids)) != len(fixture_ids):
+        raise ValueError("Forward cohort export contains duplicate fixture records")
+    receipt_schemas = {str(item.get("schema_version") or "") for item in receipts}
+    if len(receipt_schemas) != 1:
+        raise ValueError(
+            "Forward cohort export cannot mix historical and current records"
+        )
+    historical = receipt_schemas == {
+        PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+    }
+    if not historical and receipt_schemas != {
+        FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+    }:
+        raise ValueError("Forward cohort export receipt schema is unsupported")
+    if historical:
+        raise ValueError(
+            "Historical forward-observations/2.0.0 records are defect-quarantined "
+            "and cannot enter formal validation export"
+        )
+
+    first_ledger = receipts[0]["ledger_payload"]
+    policy = deepcopy(first_ledger.get("policy_manifest"))
+    cohort = deepcopy(first_ledger.get("cohort_manifest"))
+    if not isinstance(policy, dict) or not isinstance(cohort, dict):
+        raise ValueError("Forward cohort export policy/cohort is missing")
+    try:
+        closure = forward_policy.validate_closure(
+            closure, cohort=cohort, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError(
+            "Forward cohort closure does not bind the archived cohort"
+        ) from exc
+    cohort_id = str(first_ledger.get("cohort_id") or "")
+    policy_id = str(first_ledger.get("policy_id") or "")
+    policy_hash = require_sha256(
+        first_ledger.get("policy_hash"), "forward cohort policy hash"
+    )
+    for receipt in receipts:
+        ledger = receipt["ledger_payload"]
+        if (
+            ledger.get("cohort_id") != cohort_id
+            or ledger.get("policy_id") != policy_id
+            or ledger.get("policy_hash") != policy_hash
+            or ledger.get("policy_manifest") != policy
+            or ledger.get("cohort_manifest") != cohort
+            or ledger.get("cohort_closure") != closure
+        ):
+            raise ValueError(
+                "Forward cohort export cannot mix policies, cohorts, or closures"
+            )
+
+    receipt_manifest_entries = [
+        _record_manifest_entry_from_receipt(receipt) for receipt in receipts
+    ]
+    if receipt_manifest_entries != closure["record_manifest"]["records"]:
+        raise ValueError(
+            "Forward cohort receipts do not exactly cover the closed record manifest"
+        )
+
+    history_binding: dict[str, Any] = {
+        "schema_version": (
+            PREVIOUS_FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+            if historical
+            else FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+        ),
+        "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
+        "cohort_id": cohort_id,
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "fixture_ids": fixture_ids,
+        "receipts": receipts,
+    }
+    history_binding["binding_hash"] = forward_policy._hash_json(history_binding)
+    return {
+        "schema_version": (
+            "forward-observations/2.0.0" if historical else "forward-observations/3.0.0"
+        ),
+        "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
+        "cohort_id": cohort_id,
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "policy_manifest": policy,
+        "cohort_manifest": cohort,
+        "cohort_closure": deepcopy(closure),
+        "history_ledger_binding": history_binding,
+    }
+
+
+def forward_validation_input_for_record(
+    record: dict[str, Any], *, cohort_closure: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Compatibility wrapper returning a one-record canonical cohort envelope."""
+
+    return forward_validation_input_for_records([record], cohort_closure=cohort_closure)
+
+
+def _raw_forward_policy_binding(record: dict[str, Any]) -> dict[str, Any] | None:
+    basis = record.get("settlement_basis")
+    if isinstance(basis, dict) and isinstance(
+        basis.get("forward_policy_binding"), dict
+    ):
+        return basis["forward_policy_binding"]
+    binding = record.get("forward_policy_binding")
+    return binding if isinstance(binding, dict) else None
+
+
+def _load_immutable_forward_cohort(
+    base_dir: str | Path, cohort_id: str
+) -> dict[str, Any]:
+    cohort_path = forward_policy.cohort_manifest_path(base_dir, cohort_id)
+    try:
+        raw = json.loads(cohort_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Forward cohort manifest is unavailable or invalid: {cohort_path}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise ValueError("Forward cohort manifest must be a JSON object")
+    try:
+        return forward_policy.validate_cohort(raw)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort manifest is invalid") from exc
+
+
+def _all_forward_records_for_cohort(
+    history: list[dict[str, Any]], cohort_id: str
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for record in history:
+        binding = _raw_forward_policy_binding(record)
+        if binding is None:
+            continue
+        if str(binding.get("cohort_id") or "") == cohort_id:
+            selected.append(record)
+    return selected
+
+
+def _write_json_atomically(output: str | Path, payload: dict[str, Any]) -> Path:
+    path = Path(output).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _write_forward_record_manifest_once(
+    output: str | Path,
+    manifest: dict[str, Any],
+    *,
+    cohort: dict[str, Any],
+) -> Path:
+    """Create the close manifest once, or accept an identical crash-retry."""
+
+    path = Path(output).resolve()
+    if not path.exists():
+        return _write_json_atomically(path, manifest)
+    try:
+        existing_raw = json.loads(path.read_text(encoding="utf-8"))
+        existing = forward_policy.validate_record_manifest(existing_raw, cohort=cohort)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        forward_policy.ForwardPolicyError,
+    ) as exc:
+        raise ValueError(
+            "Existing forward record manifest is invalid; refusing crash recovery"
+        ) from exc
+    if existing != manifest:
+        raise ValueError(
+            "Existing forward record manifest differs; refusing crash recovery"
+        )
+    return path
+
+
+@locked_history_transaction
+def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    """Write the complete record index for one immutable cohort from history."""
+
+    cohort_id = str(args.cohort_id or "").strip()
+    if not cohort_id:
+        raise ValueError("--cohort-id is required")
+    history = load_history(data_path(args.base_dir))
+    cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
+    selected = _all_forward_records_for_cohort(history, cohort_id)
+    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    output = _write_json_atomically(args.output, manifest)
+    return {
+        "ok": True,
+        "path": str(output),
+        "cohort_id": cohort_id,
+        "fixture_ids": [entry["fixture_id"] for entry in manifest["records"]],
+        "record_count": manifest["record_count"],
+        "manifest_hash": manifest["manifest_hash"],
+    }
+
+
+@locked_history_transaction
+def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
+    """Atomically snapshot all cohort records and close the active policy boundary."""
+
+    cohort_id = str(args.cohort_id or "").strip()
+    if not cohort_id:
+        raise ValueError("--cohort-id is required")
+    history = load_history(data_path(args.base_dir))
+    cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
+    selected = _all_forward_records_for_cohort(history, cohort_id)
+    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    requested_output = str(getattr(args, "record_manifest_output", "") or "").strip()
+    manifest_output = (
+        Path(requested_output).resolve()
+        if requested_output
+        else forward_policy.cohort_directory(args.base_dir)
+        / f"{cohort_id}-record-manifest.json"
+    )
+    manifest_path = _write_forward_record_manifest_once(
+        manifest_output, manifest, cohort=cohort
+    )
+    try:
+        closure_path, closure = forward_policy.close_cohort(
+            base_dir=args.base_dir,
+            record_manifest=manifest,
+            closed_at=getattr(args, "closed_at", None),
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort could not be closed") from exc
+    return {
+        "ok": True,
+        "cohort_id": cohort_id,
+        "record_manifest_path": str(manifest_path),
+        "record_count": manifest["record_count"],
+        "manifest_hash": manifest["manifest_hash"],
+        "closure_path": str(closure_path),
+        "closure_hash": closure["closure_hash"],
+    }
+
+
+@locked_history_transaction
+def cmd_export_forward_validation(args: argparse.Namespace) -> dict[str, Any]:
+    """Export a canonical multi-record cohort envelope from archived history only."""
+
+    history_file = data_path(args.base_dir)
+    history = load_history(history_file)
+    requested_cohort = str(args.cohort_id or "").strip()
+    if not requested_cohort:
+        raise ValueError("--cohort-id is required")
+    if getattr(args, "match_id", None):
+        raise ValueError(
+            "--match-id is not supported for formal validation; export the complete cohort"
+        )
+    selected = _all_forward_records_for_cohort(history, requested_cohort)
+
+    if not selected:
+        raise ValueError("Forward cohort export selected no archived records")
+    selected_cohorts = {
+        str((_raw_forward_policy_binding(record) or {}).get("cohort_id") or "")
+        for record in selected
+    }
+    if "" in selected_cohorts or len(selected_cohorts) != 1:
+        raise ValueError(
+            "Forward cohort export records do not share one cohort binding"
+        )
+    selected_cohort = next(iter(selected_cohorts))
+    if requested_cohort and selected_cohort != requested_cohort:
+        raise ValueError("Selected records do not match --cohort-id")
+
+    closure_file = str(args.cohort_closure_file or "").strip()
+    if not closure_file:
+        raise ValueError("--cohort-closure-file is required for formal validation")
+    try:
+        loaded_closure = json.loads(Path(closure_file).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("--cohort-closure-file is unavailable or invalid") from exc
+    if not isinstance(loaded_closure, dict):
+        raise ValueError("--cohort-closure-file must contain a JSON object")
+    cohort = _load_immutable_forward_cohort(args.base_dir, requested_cohort)
+    try:
+        closure = forward_policy.validate_closure(
+            loaded_closure, cohort=cohort, require_record_manifest=True
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("--cohort-closure-file is invalid") from exc
+    if closure["cohort_id"] != requested_cohort:
+        raise ValueError("Cohort closure does not match --cohort-id")
+
+    payload = forward_validation_input_for_records(selected, cohort_closure=closure)
+    output = _write_json_atomically(args.output, payload)
+    history_binding = payload["history_ledger_binding"]
+    return {
+        "ok": True,
+        "path": str(output),
+        "cohort_id": selected_cohort,
+        "fixture_ids": history_binding["fixture_ids"],
+        "receipt_count": len(history_binding["receipts"]),
+        "binding_hash": history_binding["binding_hash"],
+    }
 
 
 def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
@@ -5769,6 +8229,7 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "corner_handicap_pick": record.get("corner_handicap_pick"),
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
+        "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
@@ -5776,6 +8237,12 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "evaluation_eligibility": record.get("evaluation_eligibility"),
         "strict_oos_policy_version": record.get("strict_oos_policy_version"),
         "market_status": record.get("market_status"),
+        "forward_policy_binding": deepcopy(record.get("forward_policy_binding")),
+        "forward_validation_ledger": deepcopy(record.get("forward_validation_ledger")),
+        "forward_prediction_commitment": deepcopy(
+            record.get("forward_prediction_commitment")
+        ),
+        "archive_version_hash": record.get("archive_version_hash"),
         "primary_market": record.get("primary_market"),
         "primary_pick": record.get("primary_pick"),
         "primary_change": record.get("primary_change"),
@@ -5788,7 +8255,9 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
     if stage not in {"initial", "lineup-check"}:
         raise ValueError(f"Unsupported active analysis stage for settlement: {stage}")
     if record.get("lineup_rechecked_at") and stage != "lineup-check":
-        raise ValueError("Lineup recheck exists but the active record is not the lineup-check version")
+        raise ValueError(
+            "Lineup recheck exists but the active record is not the lineup-check version"
+        )
     return {
         "policy": "latest_active_prematch_version",
         "grading_scope": "primary_only",
@@ -5812,6 +8281,12 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "score_model_provenance": deepcopy(record.get("score_model_provenance")),
         "evaluation_eligibility": deepcopy(record.get("evaluation_eligibility")),
         "strict_oos_policy_version": record.get("strict_oos_policy_version"),
+        "forward_policy_binding": deepcopy(record.get("forward_policy_binding")),
+        "forward_validation_ledger": deepcopy(record.get("forward_validation_ledger")),
+        "forward_prediction_commitment": deepcopy(
+            record.get("forward_prediction_commitment")
+        ),
+        "archive_version_hash": record.get("archive_version_hash"),
         "primary_market": record.get("primary_market"),
         "primary_pick": deepcopy(record.get("primary_pick")),
         "formal_picks": {
@@ -5826,15 +8301,14 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         },
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
+        "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
         "display_predicted_score": record.get("display_predicted_score"),
         "display_exact_score_picks": deepcopy(
             record.get("display_exact_score_picks", [])
         ),
-        "display_exact_score_basis": deepcopy(
-            record.get("display_exact_score_basis")
-        ),
+        "display_exact_score_basis": deepcopy(record.get("display_exact_score_basis")),
         "zero_zero_audit": deepcopy(record.get("zero_zero_audit")),
         "revision_count": len(record.get("revisions", [])),
     }
@@ -5843,6 +8317,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
 def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     payload = deepcopy(snapshot)
     payload.pop("archived_at", None)
+    payload.pop("archive_version_hash", None)
     for audit in payload.get("candidate_audits", []):
         if isinstance(audit, dict):
             audit.pop("archived_at", None)
@@ -5859,7 +8334,9 @@ def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
 @locked_history_transaction
 def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     if bool(getattr(args, "force", False)):
-        raise ValueError("--force is disabled; archived prediction versions are immutable")
+        raise ValueError(
+            "--force is disabled; archived prediction versions are immutable"
+        )
     path = data_path(args.base_dir)
     history = load_history(path)
     existing = find_record(history, args.match_id)
@@ -5869,8 +8346,15 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     current = utc_now()
     time_metadata = validate_record_time_metadata(args, current)
     timestamp = current.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    base_forward_binding = forward_policy.load_active_binding(
+        base_dir=args.base_dir or Path.cwd(),
+        repo_root=Path(__file__).resolve().parents[1],
+        archived_at=timestamp,
+    )
     revisions = list(existing.get("revisions", [])) if existing else []
-    exact_score_picks = [parse_exact_score_pick(value) for value in (args.exact_score_pick or [])]
+    exact_score_picks = [
+        parse_exact_score_pick(value) for value in (args.exact_score_pick or [])
+    ]
     if len(exact_score_picks) != 2:
         raise ValueError("Record requires exactly two --exact-score-pick values")
     if len({pick["score"] for pick in exact_score_picks}) != 2:
@@ -5887,7 +8371,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         pick["rank"] = rank
         pick["status"] = "scenario_only"
     if str(args.predicted_score).strip() != exact_score_picks[0]["score"]:
-        raise ValueError("--predicted-score must equal the highest-probability exact-score pick")
+        raise ValueError(
+            "--predicted-score must equal the highest-probability exact-score pick"
+        )
     zero_zero_audit = build_zero_zero_audit(args, exact_score_picks)
     display_exact_score_picks, display_exact_score_basis = (
         build_display_exact_score_picks(args, exact_score_picks)
@@ -5919,15 +8405,17 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "zero_zero_audit": zero_zero_audit,
         "recommendation": args.recommendation,
         "source_url": args.source_url,
-        "competition_evidence": deepcopy(existing.get("competition_evidence")) if existing else None,
-        "metadata_revisions": deepcopy(existing.get("metadata_revisions", [])) if existing else [],
+        "competition_evidence": deepcopy(existing.get("competition_evidence"))
+        if existing
+        else None,
+        "metadata_revisions": deepcopy(existing.get("metadata_revisions", []))
+        if existing
+        else [],
         "notes": args.notes,
         "data_quality": args.data_quality,
         "guardrail_evidence": {
             "lineup_confirmed": bool(getattr(args, "lineup_confirmed", False)),
-            "fundamental_supported": bool(
-                getattr(args, "fundamental_evidence", False)
-            ),
+            "fundamental_supported": bool(getattr(args, "fundamental_evidence", False)),
             "chance_quality_supported": bool(
                 getattr(args, "chance_quality_evidence", False)
             ),
@@ -5943,12 +8431,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "injury_evidence_status": getattr(
                 args, "injury_evidence_status", "not_used"
             ),
-            "primary_htft_edge_pp": getattr(
-                args, "primary_htft_edge_pp", None
-            ),
-            "primary_htft_firm_count": getattr(
-                args, "primary_htft_firm_count", None
-            ),
+            "primary_htft_edge_pp": getattr(args, "primary_htft_edge_pp", None),
+            "primary_htft_firm_count": getattr(args, "primary_htft_firm_count", None),
         },
         "probabilities": {
             "home_win": args.home_win_probability,
@@ -5957,7 +8441,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         },
         "created_at": existing.get("created_at", timestamp) if existing else timestamp,
         "updated_at": timestamp,
-        "lineup_rechecked_at": timestamp if args.analysis_stage == "lineup-check" else (existing.get("lineup_rechecked_at") if existing else None),
+        "lineup_rechecked_at": timestamp
+        if args.analysis_stage == "lineup-check"
+        else (existing.get("lineup_rechecked_at") if existing else None),
         "revisions": revisions,
         "asian_pick": None,
         "total_pick": None,
@@ -5969,8 +8455,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "corner_handicap_pick": None,
         "candidate_audits": [],
         "joint_scenario_audit": None,
+        "source_evidence_audit": None,
         "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
+        "forward_policy_binding": base_forward_binding,
     }
     competition_values = {
         "competition_key": getattr(args, "competition_key", None),
@@ -5992,7 +8480,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             existing.get("competition_evidence") if isinstance(existing, dict) else None
         )
         previous_evidence = (
-            validated_competition_evidence(existing) if isinstance(existing, dict) else None
+            validated_competition_evidence(existing)
+            if isinstance(existing, dict)
+            else None
         )
         if existing_raw_evidence is not None and previous_evidence is None:
             raise ValueError("existing competition evidence is invalid")
@@ -6003,7 +8493,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             or previous_evidence.get("source", {}).get("locator")
             != supplied_evidence.get("source", {}).get("locator")
         ):
-            raise ValueError("lineup-check competition evidence conflicts with the initial archive")
+            raise ValueError(
+                "lineup-check competition evidence conflicts with the initial archive"
+            )
         # A legitimate kickoff correction changes the fixture binding, so the
         # freshly fetched evidence must replace (not reuse) the initial copy.
         record["competition_evidence"] = supplied_evidence
@@ -6015,8 +8507,14 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 "--competition-* evidence for this version"
             )
         record["competition_evidence"] = inherited_evidence
-    if record.get("competition_evidence") is not None and validated_competition_evidence(record) is None:
-        raise ValueError("competition evidence is invalid for the incoming archived version")
+    if (
+        record.get("competition_evidence") is not None
+        and validated_competition_evidence(record) is None
+    ):
+        raise ValueError(
+            "competition evidence is invalid for the incoming archived version"
+        )
+    record["source_evidence_audit"] = load_source_evidence_audit(args, record)
     htft_observation = load_htft_observation_audit(args, record)
     if htft_observation is not None:
         record["candidate_audits"].append(htft_observation)
@@ -6061,7 +8559,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         if args.half_market == "1x2" and args.half_side not in {"home", "draw", "away"}:
             raise ValueError("Half-time 1X2 requires --half-side home, draw, or away")
         if args.half_market == "asian" and args.half_side not in {"home", "away"}:
-            raise ValueError("Half-time Asian handicap requires --half-side home or away")
+            raise ValueError(
+                "Half-time Asian handicap requires --half-side home or away"
+            )
         if args.half_market == "total" and args.half_side not in {"over", "under"}:
             raise ValueError("Half-time total requires --half-side over or under")
         if args.half_market in {"asian", "total"} and args.half_line is None:
@@ -6114,17 +8614,14 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     "price_basis": getattr(args, "htft_price_basis", None),
                     "firm_count": getattr(args, "htft_firm_count", None),
-                    "market_signal": getattr(
-                        args, "htft_market_signal", "unknown"
-                    ),
+                    "market_signal": getattr(args, "htft_market_signal", "unknown"),
                     "edge_pp": htft_edge_values.get(selection),
                     "complete_market_odds": deepcopy(htft_market_odds),
                 }
             )
             if pick["edge_pp"] is None and pick.get("market_probability") is not None:
                 pick["edge_pp"] = (
-                    float(pick["probability"])
-                    - float(pick["market_probability"])
+                    float(pick["probability"]) - float(pick["market_probability"])
                 ) * 100.0
     if getattr(args, "goal_range_selection", None):
         record["goal_range_pick"] = {
@@ -6136,12 +8633,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "edge_pp": getattr(args, "goal_range_edge_pp", None),
             "firm_count": getattr(args, "goal_range_firm_count", None),
             "market_signal": getattr(args, "goal_range_market_signal", "unknown"),
-            "market_complete": bool(
-                getattr(args, "goal_range_market_complete", False)
-            ),
-            "market_probability": getattr(
-                args, "goal_range_market_probability", None
-            ),
+            "market_complete": bool(getattr(args, "goal_range_market_complete", False)),
+            "market_probability": getattr(args, "goal_range_market_probability", None),
             "market_source": getattr(args, "goal_range_market_source", None),
             "market_collected_at": getattr(
                 args, "goal_range_market_collected_at", None
@@ -6162,14 +8655,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "edge_pp": getattr(args, "btts_edge_pp", None),
             "firm_count": getattr(args, "btts_firm_count", None),
             "market_signal": getattr(args, "btts_market_signal", "unknown"),
-            "market_complete": bool(
-                getattr(args, "btts_market_complete", False)
-            ),
+            "market_complete": bool(getattr(args, "btts_market_complete", False)),
             "market_probability": getattr(args, "btts_market_probability", None),
             "market_source": getattr(args, "btts_market_source", None),
-            "market_collected_at": getattr(
-                args, "btts_market_collected_at", None
-            ),
+            "market_collected_at": getattr(args, "btts_market_collected_at", None),
             "price_basis": getattr(args, "btts_price_basis", None),
             "complete_market_odds": parse_market_odds_values(
                 getattr(args, "btts_market_odds", None),
@@ -6203,16 +8692,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 "corner_total market odds",
             ),
             "settlement_probabilities": {
-                "full_win": getattr(
-                    args, "corner_total_full_win_probability", None
-                ),
-                "half_win": getattr(
-                    args, "corner_total_half_win_probability", None
-                ),
+                "full_win": getattr(args, "corner_total_full_win_probability", None),
+                "half_win": getattr(args, "corner_total_half_win_probability", None),
                 "push": getattr(args, "corner_total_push_probability", None),
-                "half_loss": getattr(
-                    args, "corner_total_half_loss_probability", None
-                ),
+                "half_loss": getattr(args, "corner_total_half_loss_probability", None),
                 "loss": getattr(args, "corner_total_loss_probability", None),
             },
         }
@@ -6226,18 +8709,14 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "ev": getattr(args, "corner_handicap_ev", None),
             "edge_pp": getattr(args, "corner_handicap_edge_pp", None),
             "firm_count": getattr(args, "corner_handicap_firm_count", None),
-            "market_signal": getattr(
-                args, "corner_handicap_market_signal", "unknown"
-            ),
+            "market_signal": getattr(args, "corner_handicap_market_signal", "unknown"),
             "market_complete": bool(
                 getattr(args, "corner_handicap_market_complete", False)
             ),
             "market_probability": getattr(
                 args, "corner_handicap_market_probability", None
             ),
-            "market_source": getattr(
-                args, "corner_handicap_market_source", None
-            ),
+            "market_source": getattr(args, "corner_handicap_market_source", None),
             "market_collected_at": getattr(
                 args, "corner_handicap_market_collected_at", None
             ),
@@ -6247,21 +8726,13 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
                 "corner_handicap market odds",
             ),
             "settlement_probabilities": {
-                "full_win": getattr(
-                    args, "corner_handicap_full_win_probability", None
-                ),
-                "half_win": getattr(
-                    args, "corner_handicap_half_win_probability", None
-                ),
-                "push": getattr(
-                    args, "corner_handicap_push_probability", None
-                ),
+                "full_win": getattr(args, "corner_handicap_full_win_probability", None),
+                "half_win": getattr(args, "corner_handicap_half_win_probability", None),
+                "push": getattr(args, "corner_handicap_push_probability", None),
                 "half_loss": getattr(
                     args, "corner_handicap_half_loss_probability", None
                 ),
-                "loss": getattr(
-                    args, "corner_handicap_loss_probability", None
-                ),
+                "loss": getattr(args, "corner_handicap_loss_probability", None),
             },
         }
 
@@ -6283,12 +8754,11 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     if getattr(args, "primary_htft_edge_pp", None) is not None:
         if record.get("primary_market") != "htft":
-            raise ValueError("--primary-htft-edge-pp is valid only for an HT/FT primary")
+            raise ValueError(
+                "--primary-htft-edge-pp is valid only for an HT/FT primary"
+            )
         expected = float(record["primary_pick"]["edge_pp"])
-        if (
-            abs(float(args.primary_htft_edge_pp) - expected)
-            > EDGE_AUDIT_TOLERANCE_PP
-        ):
+        if abs(float(args.primary_htft_edge_pp) - expected) > EDGE_AUDIT_TOLERANCE_PP:
             raise ValueError(
                 "primary HT/FT edge_pp does not match the complete no-vig market"
             )
@@ -6300,6 +8770,26 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     validate_primary_is_rank_one(record)
     record["primary_change"] = build_primary_change(record, existing, args)
+
+    ledger_archive = load_forward_validation_ledger_archive(
+        args,
+        record,
+        base_forward_binding,
+        archived_at=current,
+    )
+    if base_forward_binding is not None:
+        assert ledger_archive is not None
+        validate_active_candidate_evaluation_ledger_binding(record, ledger_archive)
+        commitment, committed_binding = build_forward_record_prediction_commitment(
+            record, ledger_archive, base_forward_binding
+        )
+        record["forward_validation_ledger"] = ledger_archive
+        record["forward_prediction_commitment"] = commitment
+        record["forward_policy_binding"] = committed_binding
+        record["archive_version_hash"] = forward_policy._hash_json(
+            snapshot_payload(revision_snapshot(record))
+        )
+        validate_forward_record_prediction_commitment(record)
 
     if existing:
         previous_snapshot = revision_snapshot(existing)
@@ -6317,7 +8807,9 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Prediction archive is immutable; only the transition initial -> lineup-check is allowed"
             )
-        if not revisions or snapshot_payload(revisions[-1]) != snapshot_payload(previous_snapshot):
+        if not revisions or snapshot_payload(revisions[-1]) != snapshot_payload(
+            previous_snapshot
+        ):
             revisions.append(previous_snapshot)
         record["revisions"] = revisions
         history[history.index(existing)] = record
@@ -6373,7 +8865,9 @@ def cmd_migrate_primary(args: argparse.Namespace) -> dict[str, Any]:
         if record.get("status") == "reviewed":
             record["primary_result"] = primary_result_from_record(record)
         if record.get("revisions", []) != revisions_before:
-            raise ValueError(f"Migration unexpectedly modified revisions for match {match_id}")
+            raise ValueError(
+                f"Migration unexpectedly modified revisions for match {match_id}"
+            )
         changed.append(match_id)
 
     if args.write:
@@ -6424,7 +8918,9 @@ def cmd_attach_competition_evidence(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError(f"No archived match found: {args.match_id}")
     if record.get("mode") != "prematch" or record.get("status") != "pending":
-        raise ValueError("competition evidence can be attached only to a pending prematch archive")
+        raise ValueError(
+            "competition evidence can be attached only to a pending prematch archive"
+        )
 
     revisions_before = deepcopy(record.get("revisions", []))
     settlement_before = deepcopy(record.get("settlement_basis"))
@@ -6443,9 +8939,13 @@ def cmd_attach_competition_evidence(args: argparse.Namespace) -> dict[str, Any]:
     existing_raw = record.get("competition_evidence")
     existing = validated_competition_evidence(record)
     legacy_replaced = False
-    if existing_raw is not None and existing is None and (
-        not isinstance(existing_raw, dict)
-        or existing_raw.get("schema_version") != "titan-fixture-competition/1.0.0"
+    if (
+        existing_raw is not None
+        and existing is None
+        and (
+            not isinstance(existing_raw, dict)
+            or existing_raw.get("schema_version") != "titan-fixture-competition/1.0.0"
+        )
     ):
         raise ValueError("Archived competition evidence is invalid")
     if isinstance(existing_raw, dict) and existing is None:
@@ -6483,7 +8983,9 @@ def cmd_attach_competition_evidence(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     if record.get("revisions", []) != revisions_before:
-        raise ValueError("Competition evidence unexpectedly modified prediction revisions")
+        raise ValueError(
+            "Competition evidence unexpectedly modified prediction revisions"
+        )
     if record.get("settlement_basis") != settlement_before:
         raise ValueError("Competition evidence unexpectedly modified settlement data")
     archive_hash_after = canonical_prediction_hash(
@@ -6599,9 +9101,7 @@ def cmd_migrate_learning_scopes(args: argparse.Namespace) -> dict[str, Any]:
         _, primary = primary_snapshot_for_stats(record)
         counts_toward_primary_record = isinstance(primary, dict)
         learning_scope = (
-            "primary"
-            if counts_toward_primary_record
-            else "no_primary_observation"
+            "primary" if counts_toward_primary_record else "no_primary_observation"
         )
         learning_sample = {
             "eligible": True,
@@ -6618,9 +9118,7 @@ def cmd_migrate_learning_scopes(args: argparse.Namespace) -> dict[str, Any]:
             record.update(expected)
             basis = record.get("settlement_basis")
             if isinstance(basis, dict):
-                basis["counts_toward_primary_record"] = (
-                    counts_toward_primary_record
-                )
+                basis["counts_toward_primary_record"] = counts_toward_primary_record
             changed.append(str(record.get("match_id")))
         if record.get("revisions", []) != revisions_before:
             raise ValueError(
@@ -6731,7 +9229,8 @@ def settle_candidate_observations(
                     "candidate_id": candidate.get("candidate_id"),
                     "market": market,
                     "settlement_result": settlement_result,
-                    "counterfactual_eligible": candidate.get("counterfactual_eligible") is True,
+                    "counterfactual_eligible": candidate.get("counterfactual_eligible")
+                    is True,
                     "formal_eligible": candidate.get("formal_eligible") is True,
                     "shadow_selected": candidate.get("shadow_selected") is True,
                     "counts_toward_primary_record": False,
@@ -6740,7 +9239,9 @@ def settle_candidate_observations(
                 candidate_results.append(item)
                 if item["shadow_selected"]:
                     shadow_results[str(market)] = settlement_result
-            graded = sum(item["settlement_result"] is not None for item in candidate_results)
+            graded = sum(
+                item["settlement_result"] is not None for item in candidate_results
+            )
             if graded == len(candidate_results) and candidate_results:
                 status = "graded_observation"
             elif graded:
@@ -6764,9 +9265,7 @@ def settle_candidate_observations(
             continue
         if audit.get("kind") == CORNER_OBSERVATION_KIND:
             candidates = [
-                item
-                for item in audit.get("candidates", [])
-                if isinstance(item, dict)
+                item for item in audit.get("candidates", []) if isinstance(item, dict)
             ]
             best = audit.get("best_observation")
             best_candidate_id = (
@@ -6819,9 +9318,7 @@ def settle_candidate_observations(
                     )
                 else:
                     continue
-                settlement_result = (
-                    "full_win" if raw_result == "win" else raw_result
-                )
+                settlement_result = "full_win" if raw_result == "win" else raw_result
                 is_best = candidate.get("candidate_id") == best_candidate_id
                 if is_best:
                     best_result = settlement_result
@@ -6870,11 +9367,7 @@ def settle_candidate_observations(
             continue
         matrix = validate_htft_matrix(audit.get("matrix"), "archived HT/FT matrix")
         actual = result_code(half_home, half_away) + result_code(home, away)
-        top_two = [
-            item
-            for item in audit.get("top_two", [])
-            if isinstance(item, dict)
-        ]
+        top_two = [item for item in audit.get("top_two", []) if isinstance(item, dict)]
         selections = [str(item.get("selection") or "").upper() for item in top_two]
         actual_probability = matrix[actual]
         diagnostics.append(
@@ -6888,10 +9381,7 @@ def settle_candidate_observations(
                 "top1_hit": bool(selections and selections[0] == actual),
                 "top2_hit": actual in selections[:2],
                 "nine_class_brier": math.fsum(
-                    (
-                        matrix[outcome] - (1.0 if outcome == actual else 0.0)
-                    )
-                    ** 2
+                    (matrix[outcome] - (1.0 if outcome == actual else 0.0)) ** 2
                     for outcome in HTFT_OUTCOMES
                 ),
                 "nine_class_log_loss": -math.log(
@@ -6941,14 +9431,14 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     if not args.key_learning.strip():
-        raise ValueError("Review requires a concise non-empty --key-learning grounded in the verified result")
+        raise ValueError(
+            "Review requires a concise non-empty --key-learning grounded in the verified result"
+        )
 
     home, away = int(args.home_score), int(args.away_score)
     if home < 0 or away < 0:
         raise ValueError("Verified final scores cannot be negative")
-    verification_source = str(
-        getattr(args, "verification_source", "") or ""
-    ).strip()
+    verification_source = str(getattr(args, "verification_source", "") or "").strip()
     if not verification_source:
         raise ValueError("Review requires --verification-source")
     verification_collected_text = str(
@@ -6967,6 +9457,48 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     ):
         raise ValueError("verification_collected_at must be at or after kickoff")
     settlement_basis = settlement_basis_for_record(record)
+    if settlement_basis.get("forward_policy_binding") is not None:
+        try:
+            validated_review_binding = forward_policy.validate_record_binding(
+                settlement_basis["forward_policy_binding"]
+            )
+        except forward_policy.ForwardPolicyError as exc:
+            raise ValueError(
+                "Review refused: frozen forward-policy binding is invalid"
+            ) from exc
+        if validated_review_binding is not None and validated_review_binding.get(
+            "schema_version"
+        ) in {
+            forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+            forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        }:
+            try:
+                validate_forward_record_prediction_commitment(record)
+            except ValueError as exc:
+                raise ValueError(
+                    "Review refused: frozen forward prediction commitment is invalid"
+                ) from exc
+        if validated_review_binding is not None and validated_review_binding.get(
+            "schema_version"
+        ) in {
+            forward_policy.PREVIOUS_PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        }:
+            try:
+                validate_forward_record_prediction_commitment(record)
+            except ValueError as exc:
+                raise ValueError(
+                    "Review refused: historical forward prediction commitment is invalid"
+                ) from exc
+    if settlement_basis.get("forward_policy_binding") is not None:
+        if validated_source_evidence_audit(settlement_basis) is None:
+            raise ValueError(
+                "Review refused: forward-bound records require replayable archived source evidence"
+            )
+    elif settlement_basis.get("source_evidence_audit") is not None and (
+        validated_source_evidence_audit(settlement_basis) is None
+    ):
+        raise ValueError("Review refused: archived source evidence cannot be replayed")
     primary_market = settlement_basis.get("primary_market")
     home_corners_arg = getattr(args, "home_corners", None)
     away_corners_arg = getattr(args, "away_corners", None)
@@ -7019,7 +9551,9 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             "Half-time score verification requires both --half-home-score and --half-away-score"
         )
-    half_scores_available = args.half_home_score is not None and args.half_away_score is not None
+    half_scores_available = (
+        args.half_home_score is not None and args.half_away_score is not None
+    )
     half_home = int(args.half_home_score) if half_scores_available else None
     half_away = int(args.half_away_score) if half_scores_available else None
     if half_scores_available and (half_home < 0 or half_away < 0):
@@ -7039,9 +9573,7 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         primary_market and isinstance(primary_pick, dict)
     )
     learning_scope = (
-        "primary"
-        if counts_toward_primary_record
-        else "no_primary_observation"
+        "primary" if counts_toward_primary_record else "no_primary_observation"
     )
     primary_result = None
     if isinstance(primary_pick, dict):
@@ -7090,57 +9622,63 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
     )
     settlement_basis["primary_result"] = primary_result
     settlement_basis["counts_toward_primary_record"] = counts_toward_primary_record
-    settlement_basis["observation_diagnostics"] = deepcopy(
-        observation_diagnostics
-    )
-    record.update({
-        "status": "reviewed",
-        "reviewed_at": now_iso(),
-        "result_verification": {
-            "verified_finished": True,
-            "source": verification_source,
-            "collected_at": verification_collected.isoformat(),
-        },
-        "final_score": f"{home}-{away}",
-        "score_exact": predicted_exact,
-        "exact_score_hit_rank": exact_score_hit_rank,
-        "exact_score_any_hit": exact_score_hit_rank in {1, 2},
-        "display_score_exact": display_predicted_exact,
-        "display_exact_score_hit_rank": display_exact_score_hit_rank,
-        "display_exact_score_any_hit": display_exact_score_hit_rank in {1, 2},
-        "asian_result": primary_result if primary_market == "asian" else None,
-        "total_result": primary_result if primary_market == "total" else None,
-        "half_time_score": f"{half_home}-{half_away}" if half_scores_available else None,
-        "half_time_result": primary_result if primary_market == "half_time" else None,
-        "htft_results": [],
-        "goal_range_result": primary_result if primary_market == "goal_range" else None,
-        "btts_result": primary_result if primary_market == "btts" else None,
-        "corner_total_result": (
-            primary_result if primary_market == "corner_total" else None
-        ),
-        "corner_handicap_result": (
-            primary_result if primary_market == "corner_handicap" else None
-        ),
-        "corner_score": (
-            f"{home_corners}-{away_corners}" if corners_available else None
-        ),
-        "home_corners": home_corners,
-        "away_corners": away_corners,
-        "primary_result": primary_result,
-        "observation_diagnostics": observation_diagnostics,
-        "key_learning": args.key_learning,
-        "learning_scope": learning_scope,
-        "counts_toward_primary_record": counts_toward_primary_record,
-        "learning_sample": {
-            "eligible": True,
-            "scope": learning_scope,
-            "counts_toward_primary_record": counts_toward_primary_record,
+    settlement_basis["observation_diagnostics"] = deepcopy(observation_diagnostics)
+    record.update(
+        {
+            "status": "reviewed",
+            "reviewed_at": now_iso(),
+            "result_verification": {
+                "verified_finished": True,
+                "source": verification_source,
+                "collected_at": verification_collected.isoformat(),
+            },
+            "final_score": f"{home}-{away}",
+            "score_exact": predicted_exact,
+            "exact_score_hit_rank": exact_score_hit_rank,
+            "exact_score_any_hit": exact_score_hit_rank in {1, 2},
+            "display_score_exact": display_predicted_exact,
+            "display_exact_score_hit_rank": display_exact_score_hit_rank,
+            "display_exact_score_any_hit": display_exact_score_hit_rank in {1, 2},
+            "asian_result": primary_result if primary_market == "asian" else None,
+            "total_result": primary_result if primary_market == "total" else None,
+            "half_time_score": f"{half_home}-{half_away}"
+            if half_scores_available
+            else None,
+            "half_time_result": primary_result
+            if primary_market == "half_time"
+            else None,
+            "htft_results": [],
+            "goal_range_result": primary_result
+            if primary_market == "goal_range"
+            else None,
+            "btts_result": primary_result if primary_market == "btts" else None,
+            "corner_total_result": (
+                primary_result if primary_market == "corner_total" else None
+            ),
+            "corner_handicap_result": (
+                primary_result if primary_market == "corner_handicap" else None
+            ),
+            "corner_score": (
+                f"{home_corners}-{away_corners}" if corners_available else None
+            ),
+            "home_corners": home_corners,
+            "away_corners": away_corners,
+            "primary_result": primary_result,
+            "observation_diagnostics": observation_diagnostics,
             "key_learning": args.key_learning,
-        },
-        "league_key": league_key_for_record(record),
-        "competition_key": competition_key_for_record(record),
-        "settlement_basis": settlement_basis,
-    })
+            "learning_scope": learning_scope,
+            "counts_toward_primary_record": counts_toward_primary_record,
+            "learning_sample": {
+                "eligible": True,
+                "scope": learning_scope,
+                "counts_toward_primary_record": counts_toward_primary_record,
+                "key_learning": args.key_learning,
+            },
+            "league_key": league_key_for_record(record),
+            "competition_key": competition_key_for_record(record),
+            "settlement_basis": settlement_basis,
+        }
+    )
     warnings = []
     save_history(path, history)
     stats = calculate_stats(history)
@@ -7189,21 +9727,31 @@ def probability_calibration_block(
     positive_observations: list[tuple[float, float]] = []
     for result, pick in pairs:
         distribution = pick.get("settlement_probabilities")
-        if isinstance(distribution, dict) and all(state in distribution for state in states):
+        if isinstance(distribution, dict) and all(
+            state in distribution for state in states
+        ):
             try:
                 probabilities = {state: float(distribution[state]) for state in states}
             except (TypeError, ValueError):
                 probabilities = {}
             if (
                 probabilities
-                and all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in probabilities.values())
-                and abs(sum(probabilities.values()) - 1.0) <= PROBABILITY_AUDIT_TOLERANCE
+                and all(
+                    math.isfinite(value) and 0.0 <= value <= 1.0
+                    for value in probabilities.values()
+                )
+                and abs(sum(probabilities.values()) - 1.0)
+                <= PROBABILITY_AUDIT_TOLERANCE
                 and result in actual_state
             ):
                 observed_state = actual_state[result]
                 multiclass_briers.append(
                     sum(
-                        (probabilities[state] - (1.0 if state == observed_state else 0.0)) ** 2
+                        (
+                            probabilities[state]
+                            - (1.0 if state == observed_state else 0.0)
+                        )
+                        ** 2
                         for state in states
                     )
                     / len(states)
@@ -7211,9 +9759,14 @@ def probability_calibration_block(
                 multiclass_log_losses.append(
                     -math.log(max(probabilities[observed_state], 1e-15))
                 )
-                positive_probability = probabilities["full_win"] + probabilities["half_win"]
+                positive_probability = (
+                    probabilities["full_win"] + probabilities["half_win"]
+                )
                 positive_observations.append(
-                    (positive_probability, 1.0 if result in {"win", "half_win"} else 0.0)
+                    (
+                        positive_probability,
+                        1.0 if result in {"win", "half_win"} else 0.0,
+                    )
                 )
                 continue
         value = pick.get("probability")
@@ -7240,11 +9793,18 @@ def probability_calibration_block(
             "five_state_samples": 0,
             "legacy_binary_samples": 0,
         }
-    average = sum(value for value, _ in positive_observations) / len(positive_observations)
-    observed_rate = sum(value for _, value in positive_observations) / len(positive_observations)
+    average = sum(value for value, _ in positive_observations) / len(
+        positive_observations
+    )
+    observed_rate = sum(value for _, value in positive_observations) / len(
+        positive_observations
+    )
     gap = average - observed_rate
     legacy_brier = (
-        sum((probability - observed) ** 2 for probability, observed in binary_observations)
+        sum(
+            (probability - observed) ** 2
+            for probability, observed in binary_observations
+        )
         / len(binary_observations)
         if binary_observations
         else None
@@ -7283,13 +9843,13 @@ def probability_calibration_block(
         ),
         "five_state_samples": len(multiclass_briers),
         "legacy_binary_samples": len(binary_observations),
-        "legacy_binary_brier": round(legacy_brier, 4) if legacy_brier is not None else None,
+        "legacy_binary_brier": round(legacy_brier, 4)
+        if legacy_brier is not None
+        else None,
     }
 
 
-def settlement_profit(
-    result: str, odds: Any, odds_format: Any = None
-) -> float | None:
+def settlement_profit(result: str, odds: Any, odds_format: Any = None) -> float | None:
     if odds is None:
         return None
     price = float(odds)
@@ -7311,34 +9871,50 @@ def performance_block(
     calculate_money: bool = True,
 ) -> dict[str, Any]:
     block = rate_block([result for result, _ in pairs])
-    archived_evs = [float(pick["ev"]) for _, pick in pairs if pick.get("ev") is not None]
+    archived_evs = [
+        float(pick["ev"]) for _, pick in pairs if pick.get("ev") is not None
+    ]
     if calculate_money:
         profits = [
-            settlement_profit(
-                result, pick.get("odds"), pick.get("odds_format")
-            )
+            settlement_profit(result, pick.get("odds"), pick.get("odds_format"))
             for result, pick in pairs
         ]
         settled_profits = [value for value in profits if value is not None]
-        block.update({
-            "monetary_scope": "primary_only",
-            "stake_units": len(settled_profits),
-            "profit_units": round(sum(settled_profits), 4),
-            "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
-        })
+        block.update(
+            {
+                "monetary_scope": "primary_only",
+                "stake_units": len(settled_profits),
+                "profit_units": round(sum(settled_profits), 4),
+                "roi": round(sum(settled_profits) / len(settled_profits), 4)
+                if settled_profits
+                else None,
+            }
+        )
     else:
-        block.update({
-            "monetary_scope": "not_tracked",
-            "stake_units": None,
-            "profit_units": None,
-            "roi": None,
-        })
-    block["avg_archived_ev"] = round(sum(archived_evs) / len(archived_evs), 4) if archived_evs else None
+        block.update(
+            {
+                "monetary_scope": "not_tracked",
+                "stake_units": None,
+                "profit_units": None,
+                "roi": None,
+            }
+        )
+    block["avg_archived_ev"] = (
+        round(sum(archived_evs) / len(archived_evs), 4) if archived_evs else None
+    )
     block["probability_calibration"] = probability_calibration_block(pairs)
     signals: dict[str, dict[str, Any]] = {}
-    for signal in sorted({str(pick.get("market_signal", "unknown")) for _, pick in pairs}):
-        subset = [(result, pick) for result, pick in pairs if str(pick.get("market_signal", "unknown")) == signal]
-        signals[signal] = performance_block_without_signals(subset, calculate_money=calculate_money)
+    for signal in sorted(
+        {str(pick.get("market_signal", "unknown")) for _, pick in pairs}
+    ):
+        subset = [
+            (result, pick)
+            for result, pick in pairs
+            if str(pick.get("market_signal", "unknown")) == signal
+        ]
+        signals[signal] = performance_block_without_signals(
+            subset, calculate_money=calculate_money
+        )
     block["by_market_signal"] = signals
     return block
 
@@ -7351,25 +9927,29 @@ def performance_block_without_signals(
     block = rate_block([result for result, _ in pairs])
     if calculate_money:
         profits = [
-            settlement_profit(
-                result, pick.get("odds"), pick.get("odds_format")
-            )
+            settlement_profit(result, pick.get("odds"), pick.get("odds_format"))
             for result, pick in pairs
         ]
         settled_profits = [value for value in profits if value is not None]
-        block.update({
-            "monetary_scope": "primary_only",
-            "stake_units": len(settled_profits),
-            "profit_units": round(sum(settled_profits), 4),
-            "roi": round(sum(settled_profits) / len(settled_profits), 4) if settled_profits else None,
-        })
+        block.update(
+            {
+                "monetary_scope": "primary_only",
+                "stake_units": len(settled_profits),
+                "profit_units": round(sum(settled_profits), 4),
+                "roi": round(sum(settled_profits) / len(settled_profits), 4)
+                if settled_profits
+                else None,
+            }
+        )
     else:
-        block.update({
-            "monetary_scope": "not_tracked",
-            "stake_units": None,
-            "profit_units": None,
-            "roi": None,
-        })
+        block.update(
+            {
+                "monetary_scope": "not_tracked",
+                "stake_units": None,
+                "profit_units": None,
+                "roi": None,
+            }
+        )
     block["probability_calibration"] = probability_calibration_block(pairs)
     return block
 
@@ -7389,6 +9969,121 @@ def is_strict_forward_oos_record(record: dict[str, Any]) -> bool:
     return False
 
 
+def forward_policy_binding_for_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a self-consistent committed binding, including historical replay."""
+
+    basis = record.get("settlement_basis")
+    binding = (
+        basis.get("forward_policy_binding")
+        if isinstance(basis, dict)
+        else record.get("forward_policy_binding")
+    )
+    try:
+        validated = forward_policy.validate_record_binding(binding)
+        if validated is None or validated.get("schema_version") not in {
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+            forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        }:
+            return None
+        validate_forward_record_prediction_commitment(record)
+        return validated
+    except (forward_policy.ForwardPolicyError, ValueError):
+        return None
+
+
+def untouched_live_forward_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep a truly frozen confirmation cohort separate from generic strict-OOS data."""
+
+    bound_records = [
+        (record, forward_policy_binding_for_record(record))
+        for record in records
+        if is_strict_forward_oos_record(record)
+    ]
+    historical = [
+        (record, binding)
+        for record, binding in bound_records
+        if binding is not None
+        and binding.get("schema_version")
+        == forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    ]
+    eligible = [
+        record
+        for record, binding in bound_records
+        if binding is not None
+        and binding.get("schema_version")
+        == forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        and validated_source_evidence_audit(record) is not None
+    ]
+    cohorts: dict[str, dict[str, Any]] = {}
+    for record in eligible:
+        binding = forward_policy_binding_for_record(record)
+        assert binding is not None
+        cohort_id = str(binding["cohort_id"])
+        block = cohorts.setdefault(
+            cohort_id,
+            {
+                "cohort_id": cohort_id,
+                "cohort_starts_at": binding["cohort_starts_at"],
+                "policy_id": binding["policy_id"],
+                "policy_hash": binding["policy_hash"],
+                "records": [],
+            },
+        )
+        if (
+            block["policy_id"] != binding["policy_id"]
+            or block["policy_hash"] != binding["policy_hash"]
+        ):
+            raise ValueError(
+                f"untouched cohort {cohort_id} contains more than one frozen policy"
+            )
+        block["records"].append(record)
+    rendered: dict[str, Any] = {}
+    for cohort_id, block in cohorts.items():
+        cohort_records = block.pop("records")
+        selection = selection_policy_block(cohort_records)
+        proper_scores = one_x_two_metrics(cohort_records)
+        primary = performance_block(primary_pairs(cohort_records))
+        blockers = [
+            "same_time_bookmaker_no_vig_comparison_not_yet_demonstrated",
+            "clustered_confidence_interval_not_yet_demonstrated",
+            "executable_price_slippage_and_clv_not_yet_demonstrated",
+        ]
+        rendered[cohort_id] = {
+            **block,
+            "reviewed_matches": len(cohort_records),
+            "primary": primary,
+            "primary_by_market": primary_market_performance(cohort_records),
+            "selection_policy": selection,
+            "one_x_two_metrics": proper_scores,
+            "baseline_status": {
+                "historical_frequency": "available_in_component_evaluations",
+                "independent_ht_x_ft": "available_in_component_evaluations",
+                "simple_poisson_dixon_coles": "available_in_component_evaluations",
+                "same_time_bookmaker_no_vig": "required_not_yet_demonstrated",
+                "closing_line_and_clv": "required_not_yet_demonstrated",
+            },
+            "promotion_eligible": False,
+            "promotion_blockers": blockers,
+        }
+    return {
+        "evaluation_scope": "untouched_live_forward_frozen_policy",
+        "reviewed_matches": len(eligible),
+        "cohort_count": len(rendered),
+        "cohorts": rendered,
+        "historical_quarantine": {
+            "record_count": len(historical),
+            "cohort_ids": sorted(
+                {str(binding["cohort_id"]) for _record, binding in historical}
+            ),
+            "reason": "forward_observations_v2_defective_historical_read_only",
+            "formal_export_eligible": False,
+            "promotion_evidence_eligible": False,
+        },
+        "promotion_is_manual": True,
+        "no_claim_without_same_time_bookmaker_baseline": True,
+    }
+
+
 def strict_forward_exclusion_reason(record: dict[str, Any]) -> str | None:
     if is_strict_forward_oos_record(record):
         return None
@@ -7403,7 +10098,10 @@ def strict_forward_exclusion_reason(record: dict[str, Any]) -> str | None:
     if record.get("legacy") or record.get("backfill"):
         return "legacy_or_backfill"
     primary_change = record.get("primary_change")
-    if isinstance(primary_change, dict) and primary_change.get("status") == "backfilled":
+    if (
+        isinstance(primary_change, dict)
+        and primary_change.get("status") == "backfilled"
+    ):
         return "legacy_primary_backfill"
     return "legacy_schema_missing_explicit_eligibility"
 
@@ -7461,9 +10159,7 @@ def primary_market_performance(records: list[dict[str, Any]]) -> dict[str, Any]:
         "goal_range": performance_block(goal_range),
         "btts": performance_block(btts),
         "corner_total": performance_block(corner_total),
-        "corner_handicap": performance_block(
-            corner_handicap
-        ),
+        "corner_handicap": performance_block(corner_handicap),
         "combined": performance_block(combined),
     }
 
@@ -7492,8 +10188,7 @@ def exact_score_diagnostics(
 
     top1 = sum((rank_for(r) == 1) or exact_for(r) for r in model_records)
     top2 = sum(
-        (rank_for(r) in {1, 2})
-        or (rank_for(r) is None and exact_for(r))
+        (rank_for(r) in {1, 2}) or (rank_for(r) is None and exact_for(r))
         for r in model_records
     )
     excluded = len(strict_records) - len(model_records)
@@ -7501,9 +10196,7 @@ def exact_score_diagnostics(
         "samples": len(model_records),
         "excluded": excluded,
         "excluded_reasons": (
-            {"missing_validated_score_model_provenance": excluded}
-            if excluded
-            else {}
+            {"missing_validated_score_model_provenance": excluded} if excluded else {}
         ),
         "top1_hits": top1,
         "top1_rate": round(top1 / len(model_records), 4) if model_records else None,
@@ -7522,13 +10215,9 @@ def learning_scope_for_record(record: dict[str, Any]) -> str:
 
 def learning_sample_summary(records: list[dict[str, Any]]) -> dict[str, int]:
     samples = [
-        record
-        for record in records
-        if str(record.get("key_learning", "")).strip()
+        record for record in records if str(record.get("key_learning", "")).strip()
     ]
-    primary = sum(
-        learning_scope_for_record(record) == "primary" for record in samples
-    )
+    primary = sum(learning_scope_for_record(record) == "primary" for record in samples)
     no_primary = sum(
         learning_scope_for_record(record) == "no_primary_observation"
         for record in samples
@@ -7650,13 +10339,8 @@ def one_x_two_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         ):
             exclude("invalid_1x2_probabilities")
             continue
-        probabilities = {
-            label: float(raw_probabilities[label]) for label in labels
-        }
-        if (
-            abs(math.fsum(probabilities.values()) - 1.0)
-            > PROBABILITY_AUDIT_TOLERANCE
-        ):
+        probabilities = {label: float(raw_probabilities[label]) for label in labels}
+        if abs(math.fsum(probabilities.values()) - 1.0) > PROBABILITY_AUDIT_TOLERANCE:
             exclude("non_normalized_1x2_probabilities")
             continue
 
@@ -7670,10 +10354,7 @@ def one_x_two_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         )
         brier_scores.append(
             math.fsum(
-                (
-                    probabilities[label] - (1.0 if label == actual else 0.0)
-                )
-                ** 2
+                (probabilities[label] - (1.0 if label == actual else 0.0)) ** 2
                 for label in labels
             )
         )
@@ -7715,7 +10396,11 @@ def frozen_candidate_audits(record: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(basis, dict) and "candidate_audits" in basis
         else record.get("candidate_audits", [])
     )
-    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    return (
+        [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, list)
+        else []
+    )
 
 
 def frozen_observation_diagnostics(
@@ -7727,7 +10412,11 @@ def frozen_observation_diagnostics(
         if isinstance(basis, dict) and "observation_diagnostics" in basis
         else record.get("observation_diagnostics", [])
     )
-    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    return (
+        [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, list)
+        else []
+    )
 
 
 def _replay_candidate_evaluation_audit(
@@ -7744,9 +10433,16 @@ def _replay_candidate_evaluation_audit(
         calculated_source_hash = calculate_candidate_evaluation_source_hash(source)
         if artifact.get("source_payload_hash") != calculated_source_hash:
             return False
+        source_schema = source.get("schema_version")
         if (
             source.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
-            or source.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+            or source_schema
+            not in {
+                CANDIDATE_EVALUATION_SCHEMA_VERSION,
+                LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            }
+            or audit.get("schema_version") != source_schema
+            or artifact.get("schema_version") != source_schema
             or source.get("policy_version") != STRICT_OOS_POLICY_VERSION
             or source.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION
         ):
@@ -7785,19 +10481,14 @@ def _replay_candidate_evaluation_audit(
             str(active_binding["version_archived_at"]),
             "candidate evaluation frozen archive time",
         )
-        if (
-            generated_at >= context_kickoff
-            or generated_at.astimezone(timezone.utc)
-            > archived_at.astimezone(timezone.utc)
-        ):
+        if generated_at >= context_kickoff or generated_at.astimezone(
+            timezone.utc
+        ) > archived_at.astimezone(timezone.utc):
             return False
-        if (
-            parse_aware_datetime(
-                str(audit.get("archived_at") or ""),
-                "candidate evaluation archived_at",
-            ).astimezone(timezone.utc)
-            != archived_at.astimezone(timezone.utc)
-        ):
+        if parse_aware_datetime(
+            str(audit.get("archived_at") or ""),
+            "candidate evaluation archived_at",
+        ).astimezone(timezone.utc) != archived_at.astimezone(timezone.utc):
             return False
         if artifact.get("generated_at") != generated_at.isoformat():
             return False
@@ -7817,11 +10508,7 @@ def _replay_candidate_evaluation_audit(
                 return False
             raw_reasons = raw_entry.get("reasons", [])
             reasons = (
-                [
-                    str(reason).strip()
-                    for reason in raw_reasons
-                    if str(reason).strip()
-                ]
+                [str(reason).strip() for reason in raw_reasons if str(reason).strip()]
                 if isinstance(raw_reasons, list)
                 else []
             )
@@ -7843,6 +10530,10 @@ def _replay_candidate_evaluation_audit(
         replayed: list[dict[str, Any]] = []
         identities: set[str] = set()
         grouped: dict[str, list[dict[str, Any]]] = {}
+        source_audit = validated_source_evidence_audit(context)
+        source_required = context.get("forward_policy_binding") is not None
+        if source_required and source_audit is None:
+            return False
         for index, raw_candidate in enumerate(raw_candidates, start=1):
             if not isinstance(raw_candidate, dict):
                 return False
@@ -7852,7 +10543,16 @@ def _replay_candidate_evaluation_audit(
                 expected_observation_id,
                 index,
                 generated_at,
+                legacy_read_only=(
+                    source_schema == LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION
+                ),
             )
+            if source_audit is not None:
+                candidate["source_evidence_binding"] = source_evidence.match_candidate(
+                    source_audit["bundle"], raw_candidate
+                )
+            elif source_required:
+                return False
             market = str(candidate["market"])
             if manifest[market]["status"] != "evaluated":
                 return False
@@ -7889,6 +10589,12 @@ def _replay_candidate_evaluation_audit(
             "training_cutoff_before_kickoff": True,
             "canonical_probabilities_reproduced": True,
             "market_values_recalculated": True,
+            "raw_source_evidence_replayed": source_audit is not None,
+            "source_evidence_hash": (
+                source_audit.get("evidence_hash")
+                if isinstance(source_audit, dict)
+                else None
+            ),
         }
         return bool(
             audit.get("fixture") == expected_fixture
@@ -7909,7 +10615,11 @@ def validated_candidate_evaluation_audit(
     audit: dict[str, Any], record: dict[str, Any] | None = None
 ) -> bool:
     if (
-        audit.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        audit.get("schema_version")
+        not in {
+            CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        }
         or audit.get("kind") != CANDIDATE_EVALUATION_KIND
         or audit.get("status") != "observation_only"
         or audit.get("counts_toward_primary_record") is not False
@@ -7986,7 +10696,7 @@ def validated_candidate_evaluation_audit(
     source_payload_hash = str(artifact.get("source_payload_hash") or "")
     if (
         artifact.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
-        or artifact.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or artifact.get("schema_version") != audit.get("schema_version")
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_sha256)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw_artifact_sha256)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", observation_id)
@@ -8034,9 +10744,12 @@ def validated_candidate_evaluation_audit(
             or not identity
         ):
             return False
-        expected_id = "sha256:" + hashlib.sha256(
-            f"{observation_id}:{source_index}:{identity}".encode("utf-8")
-        ).hexdigest()
+        expected_id = (
+            "sha256:"
+            + hashlib.sha256(
+                f"{observation_id}:{source_index}:{identity}".encode("utf-8")
+            ).hexdigest()
+        )
         candidate_id = str(candidate.get("candidate_id") or "")
         if candidate_id != expected_id or candidate_id in ids:
             return False
@@ -8051,9 +10764,7 @@ def validated_candidate_evaluation_audit(
             return False
         if (
             not math.isfinite(probability)
-            or abs(
-                probability - distribution["full_win"] - distribution["half_win"]
-            )
+            or abs(probability - distribution["full_win"] - distribution["half_win"])
             > PROBABILITY_AUDIT_TOLERANCE
         ):
             return False
@@ -8131,10 +10842,21 @@ def validated_candidate_evaluation_audit(
     return _replay_candidate_evaluation_audit(audit, record)
 
 
+def candidate_evaluation_evidence_scope(audit: dict[str, Any]) -> str:
+    if audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION:
+        return "canonical_market_identity_forward_eligible"
+    if audit.get("schema_version") == LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION:
+        return "legacy_read_only_quarantined"
+    return "unsupported"
+
+
 def validated_observation_audit(
     audit: dict[str, Any], record: dict[str, Any] | None = None
 ) -> bool:
-    if audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION:
+    if audit.get("schema_version") in {
+        CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+    }:
         return validated_candidate_evaluation_audit(audit, record)
     if (
         audit.get("schema_version") != OBSERVATION_SCHEMA_VERSION
@@ -8199,13 +10921,14 @@ def validated_observation_audit(
             return False
         if audit.get("audit_hash") != calculated_audit_hash:
             return False
-        expected_observation_id = "sha256:" + hashlib.sha256(
-            (
-                str(model["artifact_sha256"])
-                + ":"
-                + str(ranker["artifact_sha256"])
-            ).encode("ascii")
-        ).hexdigest()
+        expected_observation_id = (
+            "sha256:"
+            + hashlib.sha256(
+                (
+                    str(model["artifact_sha256"]) + ":" + str(ranker["artifact_sha256"])
+                ).encode("ascii")
+            ).hexdigest()
+        )
         if audit.get("observation_id") != expected_observation_id:
             return False
         lineage_fields = {
@@ -8230,9 +10953,7 @@ def validated_observation_audit(
             "backtest_hash",
             "lineage_hash",
         ):
-            if not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", str(lineage.get(key) or "")
-            ):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(lineage.get(key) or "")):
                 return False
         if (
             model.get("prediction_hash") != lineage.get("prediction_hash")
@@ -8300,16 +11021,15 @@ def validated_observation_audit(
                 return False
             ranks.append(rank)
             candidate_id = str(candidate.get("candidate_id") or "")
-            expected_candidate_id = "sha256:" + hashlib.sha256(
-                (
-                    f"{ranking_hash}:{index}:{market}:{side}:"
-                    f"{float(line):.12g}"
-                ).encode("utf-8")
-            ).hexdigest()
-            if (
-                candidate_id != expected_candidate_id
-                or candidate_id in candidate_ids
-            ):
+            expected_candidate_id = (
+                "sha256:"
+                + hashlib.sha256(
+                    (
+                        f"{ranking_hash}:{index}:{market}:{side}:{float(line):.12g}"
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            if candidate_id != expected_candidate_id or candidate_id in candidate_ids:
                 return False
             candidate_ids.add(candidate_id)
             gates = candidate.get("gates")
@@ -8340,7 +11060,9 @@ def validated_observation_audit(
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(model.get(key) or "")):
             return False
     try:
-        matrix = validate_htft_matrix(audit.get("matrix"), "archived observation matrix")
+        matrix = validate_htft_matrix(
+            audit.get("matrix"), "archived observation matrix"
+        )
     except ValueError:
         return False
     matrix_bytes = json.dumps(
@@ -8561,9 +11283,7 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
                         block["_corner_ungraded_candidates"] += len(candidates)
                         continue
                     results_by_id = {
-                        str(item.get("candidate_id")): item.get(
-                            "settlement_result"
-                        )
+                        str(item.get("candidate_id")): item.get("settlement_result")
                         for item in diagnostic.get("candidate_results", [])
                         if isinstance(item, dict) and item.get("candidate_id")
                     }
@@ -8581,13 +11301,14 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
             block = market_block(market)
             block["observation_records"] += 1
             candidates = [
-                item
-                for item in audit.get("top_two", [])
-                if isinstance(item, dict)
+                item for item in audit.get("top_two", []) if isinstance(item, dict)
             ]
             block["candidate_count"] += len(candidates)
             add_candidate_gates(block, candidates)
-            if not isinstance(diagnostic, dict) or diagnostic.get("status") != "graded_observation":
+            if (
+                not isinstance(diagnostic, dict)
+                or diagnostic.get("status") != "graded_observation"
+            ):
                 block["_ungraded"] += 1
                 continue
             block["_top1_hits"].append(bool(diagnostic.get("top1_hit")))
@@ -8611,9 +11332,7 @@ def observation_gate_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
         block["gate_funnel"] = {
             name: {
                 **values,
-                "failure_reasons": dict(
-                    sorted(values["failure_reasons"].items())
-                ),
+                "failure_reasons": dict(sorted(values["failure_reasons"].items())),
             }
             for name, values in sorted(block["gate_funnel"].items())
         }
@@ -8667,9 +11386,7 @@ def shadow_selection_by_market(records: list[dict[str, Any]]) -> dict[str, Any]:
             "shadow_selected": 0,
             "graded_shadow_selections": 0,
             "ungraded_shadow_selections": 0,
-            "settlement_results": {
-                state: 0 for state in CANDIDATE_SETTLEMENT_STATES
-            },
+            "settlement_results": {state: 0 for state in CANDIDATE_SETTLEMENT_STATES},
             "counts_toward_primary_record": False,
             "monetary_scope": "none",
         }
@@ -8772,7 +11489,10 @@ def release_blocker_funnel(records: list[dict[str, Any]]) -> dict[str, Any]:
                         continue
                     block["counterfactual_candidates"] += 1
                     for gate in candidate.get("gates", []):
-                        if not isinstance(gate, dict) or gate.get("category") != "release":
+                        if (
+                            not isinstance(gate, dict)
+                            or gate.get("category") != "release"
+                        ):
                             continue
                         name = str(gate.get("gate") or "")
                         if not name:
@@ -8821,7 +11541,9 @@ def shadow_review_trigger_by_market(
     }
 
 
-def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[str, Any]:
+def league_performance(
+    records: list[dict[str, Any]], league_key: str
+) -> dict[str, Any]:
     strict_records = strict_forward_reviewed_records(records)
     primary_by_market = primary_market_performance(strict_records)
     primary = performance_block(primary_pairs(strict_records))
@@ -8886,9 +11608,15 @@ def league_performance(records: list[dict[str, Any]], league_key: str) -> dict[s
 
 
 def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
-    reviewed = [r for r in history if r.get("mode") == "prematch" and r.get("status") == "reviewed"]
+    reviewed = [
+        r
+        for r in history
+        if r.get("mode") == "prematch" and r.get("status") == "reviewed"
+    ]
     strict_reviewed = strict_forward_reviewed_records(reviewed)
-    excluded_reviewed = [record for record in reviewed if not is_strict_forward_oos_record(record)]
+    excluded_reviewed = [
+        record for record in reviewed if not is_strict_forward_oos_record(record)
+    ]
     exclusion_reasons: dict[str, int] = {}
     for record in excluded_reviewed:
         reason = strict_forward_exclusion_reason(record) or "unknown"
@@ -8899,7 +11627,9 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
     exact_scores = exact_score_diagnostics(strict_reviewed)
     display_exact_scores = exact_score_diagnostics(strict_reviewed, display=True)
     leagues: dict[str, dict[str, Any]] = {}
-    for league_key in sorted({competition_key_for_record(record) for record in reviewed}):
+    for league_key in sorted(
+        {competition_key_for_record(record) for record in reviewed}
+    ):
         subset = [
             record
             for record in reviewed
@@ -8935,7 +11665,10 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "strict_no_primary_reviewed_matches": selection_policy_block(reviewed)[
             "abstained_matches"
         ],
-        "pending_matches": sum(r.get("mode") == "prematch" and r.get("status") == "pending" for r in history),
+        "pending_matches": sum(
+            r.get("mode") == "prematch" and r.get("status") == "pending"
+            for r in history
+        ),
         "learning_samples": learning_samples,
         "selection_policy": selection_policy_block(reviewed),
         "one_x_two_metrics": one_x_two_metrics(reviewed),
@@ -8967,9 +11700,12 @@ def calculate_stats(history: list[dict[str, Any]]) -> dict[str, Any]:
         "display_exact_score_top1_rate": display_exact_scores["top1_rate"],
         "display_exact_score_top2_hits": display_exact_scores["top2_hits"],
         "display_exact_score_top2_rate": display_exact_scores["top2_rate"],
-        "learnings_recorded": sum(bool(str(r.get("key_learning", "")).strip()) for r in reviewed),
+        "learnings_recorded": sum(
+            bool(str(r.get("key_learning", "")).strip()) for r in reviewed
+        ),
         "market_status_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
+        "untouched_live_forward": untouched_live_forward_summary(reviewed),
         "leagues": leagues,
     }
 
@@ -9063,9 +11799,7 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "sample_tier": sample_tier,
             "minimum_graded_per_market_for_manual_review": minimum,
             "sample_review_trigger_met_by_market": sample_threshold,
-            "shadow_selection_by_market": league_stats[
-                "shadow_selection_by_market"
-            ],
+            "shadow_selection_by_market": league_stats["shadow_selection_by_market"],
             "shadow_review_trigger_met_by_market": shadow_threshold,
             "release_blocker_funnel": league_stats["release_blocker_funnel"],
             "decision": (
@@ -9086,9 +11820,7 @@ def league_calibration_profiles(stats: dict[str, Any], minimum: int) -> dict[str
             "all_formal": league_stats["all_formal"],
             "secondary_tracking": "disabled",
             "one_x_two_metrics": league_stats["one_x_two_metrics"],
-            "observation_gate_funnel": league_stats[
-                "observation_gate_funnel"
-            ],
+            "observation_gate_funnel": league_stats["observation_gate_funnel"],
             "exact_scores": league_stats["exact_scores"],
             "recent_learnings": league_stats["recent_learnings"],
         }
@@ -9105,8 +11837,12 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         loaded = json.loads(output_file.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             existing = loaded
-    supplied_guardrails = args.guardrail if args.guardrail is not None else existing.get("guardrails", [])
-    supplied_guardrails = [item for item in supplied_guardrails if item not in OBSOLETE_GUARDRAILS]
+    supplied_guardrails = (
+        args.guardrail if args.guardrail is not None else existing.get("guardrails", [])
+    )
+    supplied_guardrails = [
+        item for item in supplied_guardrails if item not in OBSOLETE_GUARDRAILS
+    ]
     guardrails = merge_guardrails(DEFAULT_GUARDRAILS, supplied_guardrails)
     minimum = args.minimum_graded
     eligibility = {
@@ -9148,6 +11884,7 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
         "parameter_change_authorized": False,
         "market_status_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
+        "untouched_live_forward": stats["untouched_live_forward"],
         "summary": dynamic_calibration_summary(stats, minimum),
         "guardrails": guardrails,
         "stats": stats,
@@ -9160,21 +11897,46 @@ def cmd_calibrate(args: argparse.Namespace) -> dict[str, Any]:
     if args.write:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         temp = output_file.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(calibration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.write_text(
+            json.dumps(calibration, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         temp.replace(output_file)
-    return {"ok": True, "path": str(output_file), "written": args.write, "calibration": calibration}
+    return {
+        "ok": True,
+        "path": str(output_file),
+        "written": args.write,
+        "calibration": calibration,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-dir", help="Workspace root; defaults to the current directory")
+    parser.add_argument(
+        "--base-dir", help="Workspace root; defaults to the current directory"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    record = sub.add_parser("record", help="Create or update a pending pre-match prediction")
+    record = sub.add_parser(
+        "record", help="Create or update a pending pre-match prediction"
+    )
     record.add_argument("--match-id", required=True)
-    record.add_argument("--analysis-stage", choices=("initial", "lineup-check"), default="initial")
+    record.add_argument(
+        "--forward-validation-ledger",
+        help=(
+            "pre-match forward-observations/3.0.0 JSON with only pending settlements; "
+            "required whenever an untouched live-forward cohort is active"
+        ),
+    )
+    record.add_argument(
+        "--analysis-stage", choices=("initial", "lineup-check"), default="initial"
+    )
     record.add_argument("--league", required=True)
-    record.add_argument("--kickoff", required=True, help="User-local kickoff datetime with explicit timezone")
+    record.add_argument(
+        "--kickoff",
+        required=True,
+        help="User-local kickoff datetime with explicit timezone",
+    )
     record.add_argument(
         "--page-status",
         required=True,
@@ -9298,9 +12060,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     record.add_argument(
+        "--source-evidence-file",
+        help=(
+            "source-evidence/2.0.0 bundle rebuilt from content-addressed visible-page "
+            "snapshots; mandatory while an untouched forward cohort is active"
+        ),
+    )
+    record.add_argument(
         "--candidate-evaluation-file",
         help=(
-            "candidate-evaluation/2.0.0 multi-market audit artifact; probabilities, "
+            "candidate-evaluation/3.0.0 multi-market audit artifact; probabilities, "
             "EV, edge, timing, gates, and shadow selection are revalidated before archive"
         ),
     )
@@ -9312,7 +12081,11 @@ def build_parser() -> argparse.ArgumentParser:
             "explicitly unavailable manifest entry for every supported market"
         ),
     )
-    record.add_argument("--data-quality", choices=("high", "medium", "low", "unknown"), default="unknown")
+    record.add_argument(
+        "--data-quality",
+        choices=("high", "medium", "low", "unknown"),
+        default="unknown",
+    )
     record.add_argument("--lineup-confirmed", action="store_true")
     record.add_argument("--fundamental-evidence", action="store_true")
     record.add_argument("--chance-quality-evidence", action="store_true")
@@ -9337,16 +12110,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Exactly one formal primary market, or 'none' only when no formal picks exist",
     )
-    record.add_argument("--primary-htft-selection", help="Required when the HT/FT primary must be selected from multiple picks")
+    record.add_argument(
+        "--primary-htft-selection",
+        help="Required when the HT/FT primary must be selected from multiple picks",
+    )
     record.add_argument("--home-win-probability", type=float)
     record.add_argument("--draw-probability", type=float)
     record.add_argument("--away-win-probability", type=float)
     record.add_argument("--asian-side", choices=("home", "away"))
     record.add_argument("--asian-line", type=float)
     record.add_argument("--asian-odds", type=float)
-    record.add_argument(
-        "--asian-odds-format", choices=("decimal", "hong_kong")
-    )
+    record.add_argument("--asian-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--asian-probability", type=float)
     record.add_argument("--asian-ev", type=float)
     record.add_argument(
@@ -9368,13 +12142,15 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--asian-loss-probability", type=float)
     record.add_argument("--asian-cover-probability", type=float)
     record.add_argument("--asian-cover-distribution-validated", action="store_true")
-    record.add_argument("--asian-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
+    record.add_argument(
+        "--asian-market-signal",
+        choices=("aligned", "neutral", "against", "conflicting", "unknown"),
+        default="unknown",
+    )
     record.add_argument("--total-side", choices=("over", "under"))
     record.add_argument("--total-line", type=float)
     record.add_argument("--total-odds", type=float)
-    record.add_argument(
-        "--total-odds-format", choices=("decimal", "hong_kong")
-    )
+    record.add_argument("--total-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--total-probability", type=float)
     record.add_argument("--total-ev", type=float)
     record.add_argument(
@@ -9394,14 +12170,18 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--total-push-probability", type=float)
     record.add_argument("--total-half-loss-probability", type=float)
     record.add_argument("--total-loss-probability", type=float)
-    record.add_argument("--total-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
+    record.add_argument(
+        "--total-market-signal",
+        choices=("aligned", "neutral", "against", "conflicting", "unknown"),
+        default="unknown",
+    )
     record.add_argument("--half-market", choices=("1x2", "asian", "total"))
-    record.add_argument("--half-side", choices=("home", "draw", "away", "over", "under"))
+    record.add_argument(
+        "--half-side", choices=("home", "draw", "away", "over", "under")
+    )
     record.add_argument("--half-line", type=float)
     record.add_argument("--half-odds", type=float)
-    record.add_argument(
-        "--half-odds-format", choices=("decimal", "hong_kong")
-    )
+    record.add_argument("--half-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--half-probability", type=float)
     record.add_argument("--half-ev", type=float)
     record.add_argument("--half-edge-pp", type=float)
@@ -9417,11 +12197,17 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--half-push-probability", type=float)
     record.add_argument("--half-half-loss-probability", type=float)
     record.add_argument("--half-loss-probability", type=float)
-    record.add_argument("--half-market-signal", choices=("aligned", "neutral", "against", "conflicting", "unknown"), default="unknown")
-    record.add_argument("--htft-pick", action="append", help="Repeatable SELECTION:ODDS:PROBABILITY:EV, e.g. DD:3.40:0.31:0.054")
     record.add_argument(
-        "--htft-odds-format", choices=("decimal", "hong_kong")
+        "--half-market-signal",
+        choices=("aligned", "neutral", "against", "conflicting", "unknown"),
+        default="unknown",
     )
+    record.add_argument(
+        "--htft-pick",
+        action="append",
+        help="Repeatable SELECTION:ODDS:PROBABILITY:EV, e.g. DD:3.40:0.31:0.054",
+    )
+    record.add_argument("--htft-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--htft-market-complete", action="store_true")
     record.add_argument("--htft-market-odds", action="append")
     record.add_argument(
@@ -9466,14 +12252,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--goal-range-market-probability", type=float)
     record.add_argument("--goal-range-market-source")
     record.add_argument("--goal-range-market-collected-at")
-    record.add_argument(
-        "--goal-range-price-basis", choices=("consensus", "median")
-    )
+    record.add_argument("--goal-range-price-basis", choices=("consensus", "median"))
     record.add_argument("--btts-side", choices=("yes", "no"))
     record.add_argument("--btts-odds", type=float)
-    record.add_argument(
-        "--btts-odds-format", choices=("decimal", "hong_kong")
-    )
+    record.add_argument("--btts-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--btts-probability", type=float)
     record.add_argument("--btts-ev", type=float)
     record.add_argument("--btts-edge-pp", type=float)
@@ -9492,9 +12274,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--corner-total-side", choices=("over", "under"))
     record.add_argument("--corner-total-line", type=float)
     record.add_argument("--corner-total-odds", type=float)
-    record.add_argument(
-        "--corner-total-odds-format", choices=("decimal", "hong_kong")
-    )
+    record.add_argument("--corner-total-odds-format", choices=("decimal", "hong_kong"))
     record.add_argument("--corner-total-probability", type=float)
     record.add_argument("--corner-total-ev", type=float)
     record.add_argument("--corner-total-edge-pp", type=float)
@@ -9509,17 +12289,13 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--corner-total-market-probability", type=float)
     record.add_argument("--corner-total-market-source")
     record.add_argument("--corner-total-market-collected-at")
-    record.add_argument(
-        "--corner-total-price-basis", choices=("consensus", "median")
-    )
+    record.add_argument("--corner-total-price-basis", choices=("consensus", "median"))
     record.add_argument("--corner-total-full-win-probability", type=float)
     record.add_argument("--corner-total-half-win-probability", type=float)
     record.add_argument("--corner-total-push-probability", type=float)
     record.add_argument("--corner-total-half-loss-probability", type=float)
     record.add_argument("--corner-total-loss-probability", type=float)
-    record.add_argument(
-        "--corner-handicap-side", choices=("home", "away")
-    )
+    record.add_argument("--corner-handicap-side", choices=("home", "away"))
     record.add_argument("--corner-handicap-line", type=float)
     record.add_argument("--corner-handicap-odds", type=float)
     record.add_argument(
@@ -9534,9 +12310,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("aligned", "neutral", "against", "conflicting", "unknown"),
         default="unknown",
     )
-    record.add_argument(
-        "--corner-handicap-market-complete", action="store_true"
-    )
+    record.add_argument("--corner-handicap-market-complete", action="store_true")
     record.add_argument("--corner-handicap-market-odds", action="append")
     record.add_argument("--corner-handicap-market-probability", type=float)
     record.add_argument("--corner-handicap-market-source")
@@ -9550,7 +12324,9 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--corner-handicap-half-loss-probability", type=float)
     record.add_argument("--corner-handicap-loss-probability", type=float)
     record.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
-    review = sub.add_parser("review", help="Settle an archived prediction after verified full-time")
+    review = sub.add_parser(
+        "review", help="Settle an archived prediction after verified full-time"
+    )
     review.add_argument(
         "--verified-finished",
         action="store_true",
@@ -9575,20 +12351,27 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--verification-source", required=True)
     review.add_argument("--verification-collected-at", required=True)
 
-    migrate = sub.add_parser("migrate-primary", help="Backfill one active primary pick without re-settling reviewed matches")
+    migrate = sub.add_parser(
+        "migrate-primary",
+        help="Backfill one active primary pick without re-settling reviewed matches",
+    )
     migrate.add_argument(
         "--primary",
         action="append",
         required=True,
         help="Repeatable MATCH_ID:MARKET[:HTFT_SELECTION] assignment",
     )
-    migrate.add_argument("--write", action="store_true", help="Persist the compatibility migration")
+    migrate.add_argument(
+        "--write", action="store_true", help="Persist the compatibility migration"
+    )
 
     migrate_leagues = sub.add_parser(
         "migrate-leagues",
         help="Backfill normalized league keys without changing revisions or settlements",
     )
-    migrate_leagues.add_argument("--write", action="store_true", help="Persist league-key migration")
+    migrate_leagues.add_argument(
+        "--write", action="store_true", help="Persist league-key migration"
+    )
 
     competition = sub.add_parser(
         "attach-competition-evidence",
@@ -9607,7 +12390,9 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate-settlement-basis",
         help="Backfill active-version settlement metadata without re-grading matches",
     )
-    migrate_basis.add_argument("--write", action="store_true", help="Persist settlement-basis metadata")
+    migrate_basis.add_argument(
+        "--write", action="store_true", help="Persist settlement-basis metadata"
+    )
 
     migrate_learning = sub.add_parser(
         "migrate-learning-scopes",
@@ -9617,14 +12402,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--write", action="store_true", help="Persist review-learning metadata"
     )
 
+    export_manifest = sub.add_parser(
+        "export-forward-record-manifest",
+        help="Preview the complete canonical record manifest for one forward cohort",
+    )
+    export_manifest.add_argument("--output", required=True)
+    export_manifest.add_argument("--cohort-id", required=True)
+
+    close_forward = sub.add_parser(
+        "close-forward-cohort",
+        help=(
+            "Atomically build the complete record manifest from history and close the "
+            "active forward cohort"
+        ),
+    )
+    close_forward.add_argument("--cohort-id", required=True)
+    close_forward.add_argument("--closed-at")
+    close_forward.add_argument(
+        "--record-manifest-output",
+        help="Optional output path; defaults beside the immutable cohort manifests",
+    )
+
+    export_forward = sub.add_parser(
+        "export-forward-validation",
+        help=(
+            "Export a receipt-bound forward-validation cohort envelope from archived "
+            "memory-store records"
+        ),
+    )
+    export_forward.add_argument("--output", required=True)
+    export_forward.add_argument("--cohort-id", required=True)
+    export_forward.add_argument(
+        "--cohort-closure-file",
+        required=True,
+        help="Record-manifest-bound immutable cohort closure",
+    )
+
     sub.add_parser("pending", help="List pending pre-match predictions")
-    due = sub.add_parser("due-lineup-check", help="List pending matches due in the final 30 minutes before kickoff")
-    due.add_argument("--now", help="Override current time with an ISO datetime including timezone")
+    due = sub.add_parser(
+        "due-lineup-check",
+        help="List pending matches due in the final 30 minutes before kickoff",
+    )
+    due.add_argument(
+        "--now", help="Override current time with an ISO datetime including timezone"
+    )
     due.add_argument("--min-minutes", type=float, default=0.0)
     due.add_argument("--max-minutes", type=float, default=30.0)
     sub.add_parser("stats", help="Print cumulative accuracy")
-    calibrate = sub.add_parser("calibrate", help="Summarize reviewed performance and persist cautious calibration state")
-    calibrate.add_argument("--write", action="store_true", help="Persist calibration.json beside history.json")
+    calibrate = sub.add_parser(
+        "calibrate",
+        help="Summarize reviewed performance and persist cautious calibration state",
+    )
+    calibrate.add_argument(
+        "--write",
+        action="store_true",
+        help="Persist calibration.json beside history.json",
+    )
     calibrate.add_argument("--minimum-graded", type=int, default=20)
     calibrate.add_argument("--guardrail", action="append")
     return parser
@@ -9650,6 +12483,12 @@ def main() -> int:
             result = cmd_migrate_settlement_basis(args)
         elif args.command == "migrate-learning-scopes":
             result = cmd_migrate_learning_scopes(args)
+        elif args.command == "export-forward-record-manifest":
+            result = cmd_export_forward_record_manifest(args)
+        elif args.command == "close-forward-cohort":
+            result = cmd_close_forward_cohort(args)
+        elif args.command == "export-forward-validation":
+            result = cmd_export_forward_validation(args)
         elif args.command == "due-lineup-check":
             if args.min_minutes < 0 or args.max_minutes < args.min_minutes:
                 raise ValueError("Require 0 <= min-minutes <= max-minutes")
@@ -9661,13 +12500,23 @@ def main() -> int:
         else:
             history = load_history(path)
             if args.command == "pending":
-                result = {"path": str(path), "pending": [r for r in history if r.get("mode") == "prematch" and r.get("status") == "pending"]}
+                result = {
+                    "path": str(path),
+                    "pending": [
+                        r
+                        for r in history
+                        if r.get("mode") == "prematch" and r.get("status") == "pending"
+                    ],
+                }
             else:
                 result = {"path": str(path), "stats": calculate_stats(history)}
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
         return 2
 
 

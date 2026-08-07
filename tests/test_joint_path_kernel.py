@@ -37,18 +37,21 @@ def _product_targets(half, second, *, rows=None, columns=None):
                     if ft_home < rows and ft_away < columns:
                         planes[half_index][ft_home][ft_away] += probability
                         retained += probability
-    planes = [
-        [[cell / retained for cell in row] for row in plane] for plane in planes
-    ]
+    planes = [[[cell / retained for cell in row] for row in plane] for plane in planes]
     full = [
-        [sum(planes[index][home][away] for index in range(3)) for away in range(columns)]
+        [
+            sum(planes[index][home][away] for index in range(3))
+            for away in range(columns)
+        ]
         for home in range(rows)
     ]
     htft = {code: 0.0 for code in joint_path_kernel.HTFT_ORDER}
     for half_index, half_result in enumerate(joint_path_kernel.RESULT_ORDER):
         for home in range(rows):
             for away in range(columns):
-                htft[half_result + _result(home, away)] += planes[half_index][home][away]
+                htft[half_result + _result(home, away)] += planes[half_index][home][
+                    away
+                ]
     return planes, full, htft, retained
 
 
@@ -78,24 +81,16 @@ class JointPathKernelTests(unittest.TestCase):
         self.assertNotIn("paths", artifact)
         self.assertNotIn("joint_cells", artifact)
         self.assertEqual(artifact["group_scales"]["encoding"], "sparse-v1")
-        self.assertLessEqual(
-            len(artifact["group_scales"]["entries"]), 3 * 3 * 3
-        )
+        self.assertLessEqual(len(artifact["group_scales"]["entries"]), 3 * 3 * 3)
         for entry in artifact["group_scales"]["entries"]:
             self.assertAlmostEqual(entry[3], 1.0, places=12)
 
         rebuilt = joint_path_kernel.validate_kernel(artifact)
-        for actual_plane, expected_plane in zip(
-            rebuilt["event_planes"], self.planes
-        ):
+        for actual_plane, expected_plane in zip(rebuilt["event_planes"], self.planes):
             self.assertMatrixAlmostEqual(actual_plane, expected_plane)
         self.assertMatrixAlmostEqual(rebuilt["full_score_marginal"], self.full)
-        self.assertMatrixAlmostEqual(
-            rebuilt["half_time_score_marginal"], self.half
-        )
-        self.assertMatrixAlmostEqual(
-            rebuilt["second_half_score_marginal"], self.second
-        )
+        self.assertMatrixAlmostEqual(rebuilt["half_time_score_marginal"], self.half)
+        self.assertMatrixAlmostEqual(rebuilt["second_half_score_marginal"], self.second)
         for code in joint_path_kernel.HTFT_ORDER:
             self.assertAlmostEqual(rebuilt["htft_marginal"][code], self.htft[code])
 
@@ -115,13 +110,13 @@ class JointPathKernelTests(unittest.TestCase):
             aligned_event_planes=self.planes,
         )
         for code in joint_path_kernel.HTFT_ORDER:
-            self.assertAlmostEqual(
-                artifact["targets"]["htft"][code], self.htft[code]
-            )
+            self.assertAlmostEqual(artifact["targets"]["htft"][code], self.htft[code])
         self.assertTrue(artifact["hall_audit"]["feasible"])
         joint_path_kernel.validate_kernel(artifact)
 
-    def test_htft_transport_checks_all_hall_subsets_and_reproduces_targets(self) -> None:
+    def test_htft_transport_checks_all_hall_subsets_and_reproduces_targets(
+        self,
+    ) -> None:
         artifact = joint_path_kernel.build_compact_kernel(
             self.half,
             self.second,
@@ -166,9 +161,7 @@ class JointPathKernelTests(unittest.TestCase):
         target["HD"] = 0.5
         target["DH"] = 0.5
 
-        with self.assertRaises(
-            joint_path_kernel.PathKernelFeasibilityError
-        ) as caught:
+        with self.assertRaises(joint_path_kernel.PathKernelFeasibilityError) as caught:
             joint_path_kernel.build_compact_kernel(
                 half, second, full, htft_target=target
             )
@@ -203,9 +196,7 @@ class JointPathKernelTests(unittest.TestCase):
         self.assertAlmostEqual(
             tail["conditional_convolution_omitted_probability"], 0.25
         )
-        self.assertAlmostEqual(
-            tail["component_raw_joint_retained_probability"], 0.72
-        )
+        self.assertAlmostEqual(tail["component_raw_joint_retained_probability"], 0.72)
         self.assertAlmostEqual(tail["overall_raw_retained_probability"], 0.54)
         self.assertAlmostEqual(tail["overall_raw_omitted_probability"], 0.46)
         self.assertIn(
@@ -250,9 +241,7 @@ class JointPathKernelTests(unittest.TestCase):
             joint_path_kernel.validate_kernel(changed_hall)
 
     def test_rejects_unsupported_aligned_group(self) -> None:
-        with self.assertRaises(
-            joint_path_kernel.PathKernelFeasibilityError
-        ) as caught:
+        with self.assertRaises(joint_path_kernel.PathKernelFeasibilityError) as caught:
             joint_path_kernel.build_compact_kernel(
                 [[0.5], [0.5]],
                 [[0.5], [0.5]],
@@ -292,9 +281,7 @@ class JointPathKernelTests(unittest.TestCase):
                 },
             )
 
-        with self.assertRaisesRegex(
-            joint_path_kernel.PathKernelError, "dynamic range"
-        ):
+        with self.assertRaisesRegex(joint_path_kernel.PathKernelError, "dynamic range"):
             joint_path_kernel.build_compact_kernel(
                 [[1.0 - 1e-101, 1e-101]],
                 [[1.0]],

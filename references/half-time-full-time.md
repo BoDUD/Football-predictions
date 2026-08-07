@@ -31,7 +31,12 @@ Mark unavailable data explicitly. Never infer first-half or HT/FT EV from full-t
 2. Estimate the league's nine-cell HT/FT association from training rows only. Add Jeffreys
    smoothing of 0.5 to every cell, divide the joint by the product of its historical row and
    column marginals, and apply the resulting association lift to the fixture-specific
-   first-half and full-time marginals.
+   first-half and full-time marginals. The registered fixed configuration exponentially
+   downweights older association rows with a frozen 365-day half-life, matching the full-time
+   marginal horizon. Model and prediction audits record raw/weighted counts, effective sample
+   weight, reference date, formula, and half-life; missing, uniform, or drifted association
+   weighting is rejected by formal evaluator/registry replay. Any alternative half-life is an
+   explicit configuration experiment and needs new chronological evidence and a policy version.
 3. Use iterative proportional fitting (IPF) so the final 3x3 matrix reproduces the fixture's
    half-time and full-time marginals exactly. The resulting cells are HH, HD, HA, DH, DD, DA,
    AH, AD, and AA.
@@ -136,18 +141,21 @@ Concise mode includes the formal primary or explicit no-primary state, the one R
 
 ## Supported-competition boundary
 
-The expanded history targets separate component models for fourteen competitions: Brazil
-Serie A, Japan J1, Norway Eliteserien, MLS, the five major European leagues, Korean K League
-1, Allsvenskan, Finland Veikkausliiga, UEFA Champions League, and AFC Champions League. Read
+The expanded history targets separate component models for sixteen competitions: Brazil
+Serie A, Brazil Cup, Japan J1, Norway Eliteserien, MLS, the five major European leagues,
+Korean K League 1, Allsvenskan, Finland Veikkausliiga, UEFA Champions League, UEFA Nations
+League, and AFC Champions League. Read
 the exact match counts from the current validated manifest and deployment status from the
 current hash-bound registry. Do not hard-code a `candidate`/`shadow` list. These are
 historical classification cohorts, not transferable proof of executable HT/FT value, and
 every registered model remains `formal_htft_eligible=false`.
 
 The importer retains all collected Titan formats and phases for audit and evaluation slices.
-The registered manager nevertheless trains only on `competition_regime=regular`; special
-formats are excluded from registered fitting and fixed-season metrics, with their counts and
-regime warning retained to surface drift. This is not a separate production model per phase.
+The registered manager uses the frozen competition-specific regime allowlist: ordinary
+leagues use `regular`, Brazil Cup uses `national_knockout_cup`, and UEFA Nations League uses
+`national_team_league_and_knockout`. Other formats are excluded from registered fitting and
+fixed-season metrics, with their counts and regime warning retained to surface drift. This
+is not a separate production model per phase.
 
 Rows marked `season_status=partial_as_of_*`, including unfinished 2026 seasons, are
 right-censored snapshots. They may be shown

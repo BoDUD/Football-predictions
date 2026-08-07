@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-from io import BytesIO
 import json
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from io import BytesIO
+from pathlib import Path
 from unittest import mock
 from xml.etree import ElementTree as ET
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "prediction_card_renderer.py"
 SPEC = importlib.util.spec_from_file_location("prediction_card_renderer", SCRIPT)
@@ -121,7 +120,13 @@ def _joint_artifact(
     filler_keys: list[tuple[str, str]] = []
     for home_goals in range(7):
         for away_goals in range(7):
-            full = "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
+            full = (
+                "H"
+                if home_goals > away_goals
+                else "A"
+                if home_goals < away_goals
+                else "D"
+            )
             score = f"{home_goals}-{away_goals}"
             for half in ("H", "D", "A"):
                 key = (half + full, score)
@@ -376,7 +381,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicates an archived match"):
             renderer.validate_payload(payload, _history_index())
 
-    def test_header_is_archive_derived_and_identifier_cannot_carry_pick_markers(self) -> None:
+    def test_header_is_archive_derived_and_identifier_cannot_carry_pick_markers(
+        self,
+    ) -> None:
         for field, value in (
             ("date", "2099-12-31"),
             ("title", "大2.5 @0.95"),
@@ -385,7 +392,9 @@ class PredictionCardRendererTests(unittest.TestCase):
             with self.subTest(field=field):
                 payload = _payload()
                 payload[field] = value
-                with self.assertRaisesRegex(ValueError, "header metadata is archive-derived"):
+                with self.assertRaisesRegex(
+                    ValueError, "header metadata is archive-derived"
+                ):
                     renderer.validate_payload(payload, _history_index())
 
         payload = _payload()
@@ -441,7 +450,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         payload = _payload()
         payload["rows"][0]["status"] = "observation"
         payload["rows"][0]["primary"] = "观察方向"
-        with self.assertRaisesRegex(ValueError, "conflicts with an archived active formal primary"):
+        with self.assertRaisesRegex(
+            ValueError, "conflicts with an archived active formal primary"
+        ):
             renderer.validate_payload(payload, _history_index())
 
     def test_observation_requires_a_validated_candidate_audit(self) -> None:
@@ -467,7 +478,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertFalse(card.rows[1].star)
         self.assertNotIn("角球小9.5", renderer.render_svg(card))
 
-    def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(self) -> None:
+    def test_unqualified_corner_candidate_cannot_be_promoted_to_observation(
+        self,
+    ) -> None:
         payload = _payload()
         history = _history_index()
         history["9002"]["candidate_audits"][0]["best_observation"][
@@ -484,7 +497,9 @@ class PredictionCardRendererTests(unittest.TestCase):
 
         tampered = copy.deepcopy(payload)
         tampered["rows"][0]["archive_version_hash"] = "sha256:" + "0" * 64
-        with self.assertRaisesRegex(ValueError, "does not match the selected archived version"):
+        with self.assertRaisesRegex(
+            ValueError, "does not match the selected archived version"
+        ):
             renderer.validate_payload(tampered, history)
 
         wrong_time = copy.deepcopy(payload)
@@ -505,23 +520,28 @@ class PredictionCardRendererTests(unittest.TestCase):
         changed["league_key"] = "england_premier_league"
         self.assertNotEqual(renderer.archive_version_hash(changed), original)
 
-    def test_archived_raw_or_key_league_is_accepted_but_only_resolved_chinese_is_rendered(self) -> None:
+    def test_archived_raw_or_key_league_is_accepted_but_only_resolved_chinese_is_rendered(
+        self,
+    ) -> None:
         history = _history_index()
         archived = history["9003"]
         archived["league"] = "巴西杯16强次回合"
         archived["league_key"] = "brazil_serie_a"
 
         for supplied in (archived["league"], archived["league_key"], "巴西杯"):
-            with self.subTest(supplied=supplied), mock.patch.object(
-                renderer.plain_text_formatter,
-                "league_display_name",
-                return_value="巴西杯",
+            with (
+                self.subTest(supplied=supplied),
+                mock.patch.object(
+                    renderer.plain_text_formatter,
+                    "league_display_name",
+                    return_value="巴西杯",
+                ),
             ):
                 payload = _payload()
                 payload["rows"] = payload["rows"][2:]
                 payload["rows"][0]["league"] = supplied
-                payload["rows"][0]["archive_version_hash"] = renderer.archive_version_hash(
-                    archived
+                payload["rows"][0]["archive_version_hash"] = (
+                    renderer.archive_version_hash(archived)
                 )
 
                 card = renderer.validate_payload(payload, history)
@@ -545,7 +565,9 @@ class PredictionCardRendererTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "league does not match"):
                 renderer.validate_payload(forged, history)
 
-    def test_verified_competition_metadata_requires_its_independent_hash_binding(self) -> None:
+    def test_verified_competition_metadata_requires_its_independent_hash_binding(
+        self,
+    ) -> None:
         history = _history_index()
         archived = history["9003"]
         archived.update(
@@ -642,6 +664,9 @@ class PredictionCardRendererTests(unittest.TestCase):
             "scores": ["1-1", "1-2"],
             "one_x_two": "胜/平/负",
             "joint_scenarios": ["平平·1-1", "负负·1-2"],
+            "top2_cumulative_probability": 0.99,
+            "other_scenarios_probability": 0.01,
+            "joint_uncertainty": {"level": "低"},
         }
         for field, value in forbidden_values.items():
             with self.subTest(field=field):
@@ -654,13 +679,16 @@ class PredictionCardRendererTests(unittest.TestCase):
         history = _history_index()
         card = renderer.validate_payload(_payload(), history)
         first = card.rows[0]
-        self.assertEqual(first.total_goals, "2-3球")
+        self.assertEqual(
+            first.total_goals.splitlines(),
+            ["2-3球", "Top2累计 10.3%", "其他情景 89.7%", "不确定度 高(v1)"],
+        )
         self.assertEqual(first.htft, "平平\n负负")
         self.assertEqual(first.scores, "1-1 5.8%\n1-2 4.5%")
         self.assertEqual(self.validated_joint.call_count, 3)
 
         svg = renderer.render_svg(card)
-        for label in ("主推", "总进球", "半全场", "波胆"):
+        for label in ("主推", "联合首选情景总球", "半全场", "波胆"):
             self.assertIn(label, svg)
         self.assertIn("平平", svg)
         self.assertIn("1-1 5.8%", svg)
@@ -669,7 +697,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertNotIn("BTTS", svg)
         self.assertNotIn("9-9", svg)
 
-    def test_goal_range_uses_joint_rank_one_while_htft_and_score_keep_top_two(self) -> None:
+    def test_goal_range_uses_joint_rank_one_while_htft_and_score_keep_top_two(
+        self,
+    ) -> None:
         history = _history_index()
         history["9001"]["_validated_joint_artifact"] = _joint_artifact(
             first=("DD", "0-0", 0.1086),
@@ -681,7 +711,10 @@ class PredictionCardRendererTests(unittest.TestCase):
 
         row = renderer.validate_payload(payload, history).rows[0]
 
-        self.assertEqual(row.total_goals, "0-1球")
+        self.assertEqual(row.total_goals.splitlines()[0], "0-1球")
+        self.assertIn("Top2累计 17.7%", row.total_goals)
+        self.assertIn("其他情景 82.3%", row.total_goals)
+        self.assertIn("不确定度 高(v1)", row.total_goals)
         self.assertEqual(row.htft.splitlines(), ["平平", "平负"])
         self.assertEqual(row.scores.splitlines(), ["0-0 10.9%", "0-1 6.8%"])
         self.assertNotIn("2-3球", row.total_goals)
@@ -698,7 +731,7 @@ class PredictionCardRendererTests(unittest.TestCase):
 
         row = renderer.validate_payload(payload, history).rows[0]
 
-        self.assertEqual(row.total_goals, "0-1球")
+        self.assertEqual(row.total_goals.splitlines()[0], "0-1球")
         self.assertEqual(row.htft.splitlines(), ["平平", "平平"])
         self.assertEqual(row.scores.splitlines(), ["0-0 10.9%", "1-1 6.8%"])
         self.assertNotIn("2-3球", row.total_goals)
@@ -768,6 +801,26 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertEqual(row.htft, "数据不足")
         self.assertEqual(row.scores, "数据不足")
 
+    def test_caller_or_renderer_cannot_override_recomputed_joint_concentration(
+        self,
+    ) -> None:
+        public = renderer.public_market_outlook.build_public_market_outlook(
+            _joint_artifact()
+        )
+        public["joint_scenarios"]["top2_cumulative_probability"] = 0.99
+        public["joint_scenarios"]["other_scenarios_probability"] = 0.01
+        public["joint_scenarios"]["uncertainty"]["label_zh"] = "低"
+        with mock.patch.object(
+            renderer.public_market_outlook,
+            "build_public_market_outlook",
+            return_value=public,
+        ):
+            row = renderer.validate_payload(_payload(), _history_index()).rows[0]
+        self.assertEqual(
+            (row.total_goals, row.htft, row.scores),
+            ("数据不足", "数据不足", "数据不足"),
+        )
+
     def test_missing_or_malformed_joint_artifact_fails_closed(self) -> None:
         for malformed in (None, {}, {"joint_top_two": []}):
             with self.subTest(malformed=malformed):
@@ -832,8 +885,12 @@ class PredictionCardRendererTests(unittest.TestCase):
             input_path = root / "input.json"
             history_path = root / "history.json"
             output_path = root / "card.svg"
-            input_path.write_text(json.dumps(_payload(), ensure_ascii=False), encoding="utf-8")
-            history_path.write_text(json.dumps(_history(), ensure_ascii=False), encoding="utf-8")
+            input_path.write_text(
+                json.dumps(_payload(), ensure_ascii=False), encoding="utf-8"
+            )
+            history_path.write_text(
+                json.dumps(_history(), ensure_ascii=False), encoding="utf-8"
+            )
 
             returned = renderer.render_file(input_path, output_path, history_path)
             self.assertEqual(returned, output_path)
@@ -860,9 +917,10 @@ class PredictionCardRendererTests(unittest.TestCase):
         footnote = next(
             node
             for node in root.findall("svg:text", namespace)
-            if "总进球取冻结联合第1名比分映射" in (node.text or "")
+            if "联合首选情景总球取冻结联合第1名比分映射" in (node.text or "")
         )
-        self.assertIn("不展示独立榜单或第三项", footnote.text or "")
+        self.assertIn("Top2累计与不确定度由完整归档联合分布重算", footnote.text or "")
+        self.assertIn("边际第一仅在文字审计", footnote.text or "")
         panel_bottom = int(panel.attrib["y"]) + int(panel.attrib["height"])
         self.assertGreaterEqual(panel_bottom - int(footnote.attrib["y"]), 30)
 
@@ -878,7 +936,9 @@ class PredictionCardRendererTests(unittest.TestCase):
         self.assertNotIn("…", svg)
         self.assertNotIn("...", svg)
 
-    def test_unsafe_derived_league_falls_back_without_rendering_injected_text(self) -> None:
+    def test_unsafe_derived_league_falls_back_without_rendering_injected_text(
+        self,
+    ) -> None:
         for league in (
             "主推大2.5",
             "大2.5赛事",
@@ -899,7 +959,9 @@ class PredictionCardRendererTests(unittest.TestCase):
                 self.assertEqual(card.rows[0].league, "赛事待核验")
                 self.assertNotIn(league, svg)
 
-    def test_team_market_direction_shape_is_rejected_without_blocking_real_names(self) -> None:
+    def test_team_market_direction_shape_is_rejected_without_blocking_real_names(
+        self,
+    ) -> None:
         for injected in ("大2.5 @0.95", "角球大10.5", "受让+0.5"):
             with self.subTest(injected=injected):
                 history = _history_index()
@@ -989,18 +1051,27 @@ class PredictionCardRendererTests(unittest.TestCase):
             input_path = root / "input.json"
             history_path = root / "history.json"
             output_path = root / "card.png"
-            input_path.write_text(json.dumps(_payload(), ensure_ascii=False), encoding="utf-8")
-            history_path.write_text(json.dumps(_history(), ensure_ascii=False), encoding="utf-8")
+            input_path.write_text(
+                json.dumps(_payload(), ensure_ascii=False), encoding="utf-8"
+            )
+            history_path.write_text(
+                json.dumps(_history(), ensure_ascii=False), encoding="utf-8"
+            )
 
             renderer.render_file(input_path, output_path, history_path)
             with Image.open(output_path) as image:
                 self.assertEqual(image.format, "PNG")
                 self.assertEqual(
                     image.size,
-                    (renderer.WIDTH, renderer.validate_payload(_payload(), _history_index()).height),
+                    (
+                        renderer.WIDTH,
+                        renderer.validate_payload(_payload(), _history_index()).height,
+                    ),
                 )
 
-    def test_png_footer_text_stays_inside_panel_for_short_and_multirow_cards(self) -> None:
+    def test_png_footer_text_stays_inside_panel_for_short_and_multirow_cards(
+        self,
+    ) -> None:
         try:
             from PIL import Image
         except ImportError:
@@ -1030,12 +1101,18 @@ class PredictionCardRendererTests(unittest.TestCase):
                     muted_rows = [
                         y
                         for y in range(footer_start, card.height)
-                        if any(pixels[x, y] == muted for x in range(72, renderer.WIDTH - 72))
+                        if any(
+                            pixels[x, y] == muted
+                            for x in range(72, renderer.WIDTH - 72)
+                        )
                     ]
                     warning_rows = [
                         y
                         for y in range(footer_start, card.height)
-                        if any(pixels[x, y] == warning for x in range(72, renderer.WIDTH - 72))
+                        if any(
+                            pixels[x, y] == warning
+                            for x in range(72, renderer.WIDTH - 72)
+                        )
                     ]
 
                 self.assertTrue(muted_rows)

@@ -70,7 +70,7 @@ Compare candidates using an executable consensus or median price, edge, evidence
 ## Archive and lineup check
 
 For every new normal initial and lineup-check archive, evaluate this whole pool through one
-fixture-bound `candidate-evaluation/2.0.0` file and pass
+fixture-bound `candidate-evaluation/3.0.0` file and pass
 `--candidate-evaluation-file ... --require-candidate-evaluations`. Its manifest must contain
 all eight primary-market keys, marking each as `evaluated` with at least one candidate or
 `unavailable` with a concrete reason. The archive reopens the canonical model distribution,
@@ -78,7 +78,9 @@ recalculates complete-market no-vig probabilities, EV, edge, timing, evidence, a
 gates, and chooses at most one counterfactual shadow per match and market. A shadow remains
 non-monetary and cannot become the card primary. Release-gate failures are measured separately
 so paused markets can accumulate clean forward evidence; they never weaken integrity, value,
-or risk gates. See [model-validation.md](model-validation.md#forward-candidate-evaluation-cohort).
+or risk gates. Legacy `candidate-evaluation/2.0.0` files are historical read-only and cannot
+authorize an active cohort write. See
+[model-validation.md](model-validation.md#forward-candidate-evaluation-cohort).
 
 The candidate artifact must be generated at or after every market collection time and every
 bound joint/corner model or ranker generation time. The archive freezes its normalized source
@@ -102,6 +104,11 @@ total needs both `--total-market-odds over:1.95` and
 bands, and end in `N+`, such as `0-1`, `2-3`, `4-6`, `7+`. The selected complete-market
 price must equal the executable pick price. The archive command converts every outcome
 using the declared odds format and calculates the no-vig probabilities itself.
+
+For `asian` and `corner_handicap`, canonical `market_identity.line` always uses the
+home-side perspective. Away +0.75 and Home -0.75 are opposite selections in the same market
+identity and both use `line=-0.75`; preserve the evaluated side in `selection` and
+`settlement_reference_outcome`. Do not invert the identity line when the chosen side is away.
 
 Store fixed, explicit fields:
 

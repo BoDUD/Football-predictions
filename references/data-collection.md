@@ -86,7 +86,7 @@ must agree; conflicts abort before replacement. Each changed file is written ato
 the command performs no network requests, and a second run is a byte-preserving no-op.
 
 For the multi-snapshot result collector, strict legacy-checkpoint migration, company 8
-research-only price collection, source-bound dataset build, sequential fourteen-league
+research-only price collection, source-bound dataset build, sequential sixteen-competition
 registry training, and final workbook-to-HTFT order, follow
 [expanded-history-runbook.md](expanded-history-runbook.md).
 

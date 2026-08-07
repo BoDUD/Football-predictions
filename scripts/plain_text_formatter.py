@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
 import json
 import math
-from pathlib import Path
 import re
 import sys
-from typing import Any
 import unicodedata
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -20,7 +20,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import memory_store
 import public_market_outlook
-
 
 RESULT_LABELS = {
     "win": "红",
@@ -57,6 +56,7 @@ CANONICAL_LEAGUE_DISPLAY_LABELS = {
     "uefa_champions_league": "欧冠",
     "afc_champions_league": "亚冠",
     "brazil_cup": "巴西杯",
+    "uefa_nations_league": "欧国联",
 }
 LEAGUE_DISPLAY_LABELS = dict(CANONICAL_LEAGUE_DISPLAY_LABELS)
 LEAGUE_DISPLAY_LABELS.update(
@@ -65,7 +65,9 @@ LEAGUE_DISPLAY_LABELS.update(
         for key, label in CANONICAL_LEAGUE_DISPLAY_LABELS.items()
     }
 )
-FORBIDDEN_MARKUP = re.compile(r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I)
+FORBIDDEN_MARKUP = re.compile(
+    r"(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|```|</?(?:html|table|div|p)\b)", re.I
+)
 ZERO_ZERO_REFERENCE = re.compile(r"0-0", re.IGNORECASE)
 ZERO_ZERO_CONTINUATION = re.compile(
     r"^\s*(?:(?:其|该项|对应)\s*)?"
@@ -100,14 +102,10 @@ def goal_range_label(pick: dict[str, Any]) -> str:
     if selection != "无":
         return selection
     minimum = (
-        pick.get("minimum_goals")
-        if "minimum_goals" in pick
-        else pick.get("min_goals")
+        pick.get("minimum_goals") if "minimum_goals" in pick else pick.get("min_goals")
     )
     maximum = (
-        pick.get("maximum_goals")
-        if "maximum_goals" in pick
-        else pick.get("max_goals")
+        pick.get("maximum_goals") if "maximum_goals" in pick else pick.get("max_goals")
     )
     if minimum is None:
         return "未取得"
@@ -149,9 +147,7 @@ def league_display_name(record: dict[str, Any]) -> str:
                 return _safe_league_display(label)
 
     raw_key = str(
-        identity.get("league_key")
-        or memory_store.league_key_for_record(identity)
-        or ""
+        identity.get("league_key") or memory_store.league_key_for_record(identity) or ""
     ).strip()
     normalized_key = re.sub(r"[\s-]+", "_", raw_key.casefold())
     mapped = LEAGUE_DISPLAY_LABELS.get(
@@ -160,9 +156,7 @@ def league_display_name(record: dict[str, Any]) -> str:
     if mapped:
         return _safe_league_display(mapped)
 
-    raw_label = unicodedata.normalize(
-        "NFKC", str(identity.get("league") or "")
-    ).strip()
+    raw_label = unicodedata.normalize("NFKC", str(identity.get("league") or "")).strip()
     normalized_label = memory_store.normalize_league_name(raw_label)
     normalized_label_key = re.sub(r"[\s-]+", "_", normalized_label.casefold())
     mapped = LEAGUE_DISPLAY_LABELS.get(
@@ -191,11 +185,17 @@ def _safe_league_display(value: Any) -> str:
     return label
 
 
-def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[str, Any]) -> str:
+def format_pick(
+    market: str | None, pick: dict[str, Any] | None, record: dict[str, Any]
+) -> str:
     if not market or not isinstance(pick, dict):
         return "无正式推荐"
     if market == "asian":
-        team = record.get("home_team") if pick.get("side") == "home" else record.get("away_team")
+        team = (
+            record.get("home_team")
+            if pick.get("side") == "home"
+            else record.get("away_team")
+        )
         return f"{clean_text(team)} {float(pick.get('line', 0)):+g}{price(pick.get('odds'))}"
     if market == "total":
         side = "大" if pick.get("side") == "over" else "小"
@@ -203,7 +203,9 @@ def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[st
     if market == "goal_range":
         return f"总进球{goal_range_label(pick)}球{price(pick.get('odds'))}"
     if market == "btts":
-        side = {"yes": "是", "no": "否"}.get(str(pick.get("side", "")).lower(), clean_text(pick.get("side")))
+        side = {"yes": "是", "no": "否"}.get(
+            str(pick.get("side", "")).lower(), clean_text(pick.get("side"))
+        )
         return f"双方进球-{side}{price(pick.get('odds'))}"
     if market == "corner_total":
         side = "大" if pick.get("side") == "over" else "小"
@@ -217,12 +219,18 @@ def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[st
     if market == "half_time":
         half_market = pick.get("market")
         if half_market == "1x2":
-            side = {"home": "半场主胜", "draw": "半场平", "away": "半场客胜"}.get(pick.get("side"), "半场")
+            side = {"home": "半场主胜", "draw": "半场平", "away": "半场客胜"}.get(
+                pick.get("side"), "半场"
+            )
             return f"{side}{price(pick.get('odds'))}"
         if half_market == "total":
             side = "半场大" if pick.get("side") == "over" else "半场小"
             return f"{side}{float(pick.get('line', 0)):g}{price(pick.get('odds'))}"
-        team = record.get("home_team") if pick.get("side") == "home" else record.get("away_team")
+        team = (
+            record.get("home_team")
+            if pick.get("side") == "home"
+            else record.get("away_team")
+        )
         return f"半场 {clean_text(team)} {float(pick.get('line', 0)):+g}{price(pick.get('odds'))}"
     if market == "htft":
         selection = str(pick.get("selection", "")).upper()
@@ -232,12 +240,18 @@ def format_pick(market: str | None, pick: dict[str, Any] | None, record: dict[st
 
 
 def version_candidates(record: dict[str, Any]) -> list[dict[str, Any]]:
-    return [item for item in record.get("revisions", []) if isinstance(item, dict)] + [record]
+    return [item for item in record.get("revisions", []) if isinstance(item, dict)] + [
+        record
+    ]
 
 
 def select_version(record: dict[str, Any], kind: str) -> dict[str, Any]:
     if kind == "initial":
-        candidates = [item for item in version_candidates(record) if item.get("analysis_stage", "initial") == "initial"]
+        candidates = [
+            item
+            for item in version_candidates(record)
+            if item.get("analysis_stage", "initial") == "initial"
+        ]
         if not candidates:
             raise ValueError("No archived initial version is available")
         return candidates[-1]
@@ -260,9 +274,7 @@ def merged_version(record: dict[str, Any], version: dict[str, Any]) -> dict[str,
     return merged
 
 
-def _top_probability(
-    value: Any, order: tuple[str, ...]
-) -> tuple[str, float] | None:
+def _top_probability(value: Any, order: tuple[str, ...]) -> tuple[str, float] | None:
     if not isinstance(value, dict) or not value:
         return None
     candidates: list[tuple[str, float]] = []
@@ -284,8 +296,10 @@ def _insufficient_joint_outlook() -> dict[str, str]:
         "half_time": "数据不足",
         "one_x_two": "数据不足",
         "goal_range": "数据不足",
+        "goal_range_marginal_top1": "数据不足",
         "btts": "数据不足",
         "scenarios": "数据不足",
+        "joint_concentration": "数据不足",
         "source": "未取得可验证联合模型",
     }
 
@@ -306,6 +320,35 @@ def _format_public_market(
     clarity = "较明确" if market.get("clarity") == "clear" else "分歧"
     gap_label = "领先第二名" if len(ranked) == 1 else "前二差"
     return f"{values}（{clarity}，{gap_label}{gap:.1f}个百分点）"
+
+
+def _format_joint_concentration(scenarios: Mapping[str, Any]) -> str:
+    top_two = float(scenarios["top2_cumulative_probability"])
+    other = float(scenarios["other_scenarios_probability"])
+    uncertainty = scenarios["uncertainty"]
+    if (
+        not isinstance(uncertainty, Mapping)
+        or uncertainty.get("schema_version")
+        != public_market_outlook.JOINT_UNCERTAINTY_SCHEMA_VERSION
+        or uncertainty.get("policy") != public_market_outlook.JOINT_UNCERTAINTY_POLICY
+    ):
+        raise ValueError("joint uncertainty policy is missing or unsupported")
+    normalized_entropy = float(uncertainty["normalized_entropy"])
+    label = clean_text(uncertainty.get("label_zh"))
+    if (
+        not math.isfinite(top_two)
+        or not math.isfinite(other)
+        or not math.isfinite(normalized_entropy)
+        or abs(top_two + other - 1.0) > 1e-9
+        or not 0.0 <= normalized_entropy <= 1.0
+        or label not in {"低", "中", "高"}
+    ):
+        raise ValueError("joint uncertainty summary is invalid")
+    policy_version = str(uncertainty["schema_version"]).split(".", 1)[0]
+    return (
+        f"Top2累计{percentage(top_two)}｜其他情景{percentage(other)}｜"
+        f"不确定度{label}（归一化熵{percentage(normalized_entropy)}，政策v{policy_version}）"
+    )
 
 
 def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
@@ -336,6 +379,16 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
             if mode == "upstream_half_time_market_anchor"
             else clean_text(mode)
         )
+        marginal_audit = public["goal_range_marginal_audit"]
+        if (
+            not isinstance(marginal_audit, Mapping)
+            or marginal_audit.get("label") != "总进球边际第一"
+            or marginal_audit.get("role") != "marginal_distribution_audit_only"
+            or marginal_audit.get("replaces_joint_scenario") is not False
+        ):
+            raise ValueError("goal-range marginal audit contract is invalid")
+        marginal_goal_range = marginal_audit["top1"]
+        concentration = _format_joint_concentration(scenarios)
         return {
             "half_time": _format_public_market(
                 markets["half_time"], {"H": "主胜", "D": "平", "A": "客胜"}
@@ -345,17 +398,27 @@ def joint_outlook(version: dict[str, Any]) -> dict[str, str]:
                 {"home": "主胜", "draw": "平", "away": "客胜"},
             ),
             "goal_range": (
-                f"{scenario_items[0]['goal_range_label']}"
-                "（联合第1名比分映射）"
+                f"{scenario_items[0]['goal_range_label']}（冻结联合第1名比分映射）"
+            ),
+            "goal_range_marginal_top1": (
+                f"{clean_text(marginal_goal_range['label'])}"
+                f" {percentage(marginal_goal_range['probability'])}"
+                "（边际分布第一，仅审计，不替代联合首选情景）"
             ),
             "btts": _format_public_market(markets["btts"]),
             "scenarios": (
                 "联合事件 Top 2（半全场＋波胆逐行同源，"
-                f"按联合概率排序，高方差，不作推荐）：{path_text}"
+                f"按联合概率排序，高方差，不作推荐）：{path_text}；{concentration}"
             ),
+            "joint_concentration": concentration,
             "source": source,
         }
-    except (KeyError, TypeError, ValueError, public_market_outlook.PublicMarketOutlookError):
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        public_market_outlook.PublicMarketOutlookError,
+    ):
         return _insufficient_joint_outlook()
 
 
@@ -366,10 +429,7 @@ def model_leader_reference(version: dict[str, Any]) -> str:
         return "无"
     observations = qualified_observation_references(version)
     if observations:
-        return (
-            f"◇ 观察方向：{observations[0]}"
-            "（不计主推、不计战绩）"
-        )
+        return f"◇ 观察方向：{observations[0]}（不计主推、不计战绩）"
     return "无"
 
 
@@ -384,17 +444,30 @@ def display_text(version: dict[str, Any], field: str) -> str:
     if not isinstance(audit, dict) or audit_visible:
         return value
     clauses = re.split(r"(?<=[。；！？!?])", value)
-    hidden = {index for index, clause in enumerate(clauses) if ZERO_ZERO_REFERENCE.search(clause)}
+    hidden = {
+        index
+        for index, clause in enumerate(clauses)
+        if ZERO_ZERO_REFERENCE.search(clause)
+    }
     for index in tuple(hidden):
         next_index = index + 1
-        while next_index < len(clauses) and ZERO_ZERO_CONTINUATION.search(clauses[next_index]):
+        while next_index < len(clauses) and ZERO_ZERO_CONTINUATION.search(
+            clauses[next_index]
+        ):
             hidden.add(next_index)
             next_index += 1
         previous_index = index - 1
-        while previous_index >= 0 and ZERO_ZERO_CONTINUATION.search(clauses[previous_index]):
+        while previous_index >= 0 and ZERO_ZERO_CONTINUATION.search(
+            clauses[previous_index]
+        ):
             hidden.add(previous_index)
             previous_index -= 1
-    return "".join(clause for index, clause in enumerate(clauses) if index not in hidden).strip() or "无"
+    return (
+        "".join(
+            clause for index, clause in enumerate(clauses) if index not in hidden
+        ).strip()
+        or "无"
+    )
 
 
 def primary_line(version: dict[str, Any], record: dict[str, Any]) -> str:
@@ -407,10 +480,11 @@ def resolved_primary_pick(version: dict[str, Any]) -> dict[str, Any] | None:
     pick = version.get("primary_pick")
     if not isinstance(pick, dict):
         return None
-    if (
-        version.get("primary_market") == "half_time"
-        and pick.get("market") not in {"1x2", "asian", "total"}
-    ):
+    if version.get("primary_market") == "half_time" and pick.get("market") not in {
+        "1x2",
+        "asian",
+        "total",
+    }:
         half_time_pick = version.get("half_time_pick")
         if isinstance(half_time_pick, dict):
             return half_time_pick
@@ -462,9 +536,7 @@ def secondary_picks(version: dict[str, Any], record: dict[str, Any]) -> str:
             rank = float(pick.get("confidence_rank"))
         except (TypeError, ValueError):
             rank = math.inf
-        ranked_values.append(
-            (rank, sequence_index, format_pick(market, pick, record))
-        )
+        ranked_values.append((rank, sequence_index, format_pick(market, pick, record)))
     values = [
         item[2] for item in sorted(ranked_values, key=lambda item: (item[0], item[1]))
     ]
@@ -508,7 +580,11 @@ def structured_evidence_summary(version: dict[str, Any]) -> str:
 
 def half_time_text(version: dict[str, Any], record: dict[str, Any]) -> str:
     pick = version.get("half_time_pick")
-    return format_pick("half_time", pick, record) if isinstance(pick, dict) else "观察或无正式推荐"
+    return (
+        format_pick("half_time", pick, record)
+        if isinstance(pick, dict)
+        else "观察或无正式推荐"
+    )
 
 
 def validate_plain_text(lines: list[str]) -> str:
@@ -525,64 +601,86 @@ def validate_plain_text(lines: list[str]) -> str:
 
 def render_initial(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "initial"))
-    primary = version.get("primary_pick") if isinstance(version.get("primary_pick"), dict) else {}
+    primary = (
+        version.get("primary_pick")
+        if isinstance(version.get("primary_pick"), dict)
+        else {}
+    )
     outlook = joint_outlook(version)
-    return validate_plain_text([
-        f"【初盘分析｜{version.get('match_id')}】",
-        f"赛事：{league_display_name(version)}",
-        f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
-        f"开赛：{format_time(version.get('kickoff'))}",
-        f"主推：{primary_line(version, version)}",
-        model_leader_reference(version),
-        f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
-        f"半场倾向：{outlook['half_time']}",
-        f"胜平负：{outlook['one_x_two']}",
-        f"总进球：{outlook['goal_range']}",
-        f"双方进球：{outlook['btts']}",
-        f"联合情景：{outlook['scenarios']}",
-        f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
-        f"证据状态：{structured_evidence_summary(version)}",
-        "仅供数据分析参考",
-    ])
+    return validate_plain_text(
+        [
+            f"【初盘分析｜{version.get('match_id')}】",
+            f"赛事：{league_display_name(version)}",
+            f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
+            f"开赛：{format_time(version.get('kickoff'))}",
+            f"主推：{primary_line(version, version)}",
+            model_leader_reference(version),
+            f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
+            f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
+            f"半场倾向：{outlook['half_time']}",
+            f"胜平负：{outlook['one_x_two']}",
+            f"联合首选情景总球：{outlook['goal_range']}｜总进球边际第一：{outlook['goal_range_marginal_top1']}",
+            f"双方进球：{outlook['btts']}",
+            f"联合情景：{outlook['scenarios']}",
+            f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
+            f"证据状态：{structured_evidence_summary(version)}",
+            "仅供数据分析参考",
+        ]
+    )
 
 
 def render_lineup(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "lineup-check"))
-    primary = version.get("primary_pick") if isinstance(version.get("primary_pick"), dict) else {}
+    primary = (
+        version.get("primary_pick")
+        if isinstance(version.get("primary_pick"), dict)
+        else {}
+    )
     outlook = joint_outlook(version)
-    change = version.get("primary_change") if isinstance(version.get("primary_change"), dict) else {}
+    change = (
+        version.get("primary_change")
+        if isinstance(version.get("primary_change"), dict)
+        else {}
+    )
     status = change.get("status")
     if status == "maintained":
         change_line = f"主推维持：{primary_line(version, version)}"
     else:
-        previous_versions = [item for item in record.get("revisions", []) if isinstance(item, dict)]
-        previous = merged_version(record, previous_versions[-1]) if previous_versions else {}
+        previous_versions = [
+            item for item in record.get("revisions", []) if isinstance(item, dict)
+        ]
+        previous = (
+            merged_version(record, previous_versions[-1]) if previous_versions else {}
+        )
         previous_text = primary_line(previous, previous) if previous else "原方向"
         if not primary:
             change_line = f"主推取消：{previous_text} → 不下注"
         else:
-            change_line = f"主推变更：{previous_text} → {primary_line(version, version)}"
-    return validate_plain_text([
-        f"【临场分析｜{version.get('match_id')}】",
-        f"赛事：{league_display_name(version)}",
-        f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
-        f"检查时间：{format_time(version.get('lineup_rechecked_at'))}",
-        "比赛状态：赛前，临场版本已归档",
-        change_line,
-        f"当前主推：{primary_line(version, version)}",
-        model_leader_reference(version),
-        f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
-        f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
-        f"半场倾向：{outlook['half_time']}",
-        f"胜平负：{outlook['one_x_two']}",
-        f"总进球：{outlook['goal_range']}",
-        f"双方进球：{outlook['btts']}",
-        f"联合情景：{outlook['scenarios']}",
-        f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
-        f"证据状态：{structured_evidence_summary(version)}",
-        "仅供数据分析参考",
-    ])
+            change_line = (
+                f"主推变更：{previous_text} → {primary_line(version, version)}"
+            )
+    return validate_plain_text(
+        [
+            f"【临场分析｜{version.get('match_id')}】",
+            f"赛事：{league_display_name(version)}",
+            f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
+            f"检查时间：{format_time(version.get('lineup_rechecked_at'))}",
+            "比赛状态：赛前，临场版本已归档",
+            change_line,
+            f"当前主推：{primary_line(version, version)}",
+            model_leader_reference(version),
+            f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
+            f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
+            f"半场倾向：{outlook['half_time']}",
+            f"胜平负：{outlook['one_x_two']}",
+            f"联合首选情景总球：{outlook['goal_range']}｜总进球边际第一：{outlook['goal_range_marginal_top1']}",
+            f"双方进球：{outlook['btts']}",
+            f"联合情景：{outlook['scenarios']}",
+            f"模型说明：{structured_analysis_summary(version)}；{outlook['source']}",
+            f"证据状态：{structured_evidence_summary(version)}",
+            "仅供数据分析参考",
+        ]
+    )
 
 
 def result_text(result: Any) -> str:
@@ -590,8 +688,12 @@ def result_text(result: Any) -> str:
 
 
 def review_secondary_picks(basis: dict[str, Any], record: dict[str, Any]) -> str:
-    primary_identity = memory_store.pick_identity(basis.get("primary_market"), basis.get("primary_pick"))
-    formal = basis.get("formal_picks") if isinstance(basis.get("formal_picks"), dict) else {}
+    primary_identity = memory_store.pick_identity(
+        basis.get("primary_market"), basis.get("primary_pick")
+    )
+    formal = (
+        basis.get("formal_picks") if isinstance(basis.get("formal_picks"), dict) else {}
+    )
     values = []
     for market, formal_value in formal.items():
         picks = formal_value if isinstance(formal_value, list) else [formal_value]
@@ -622,9 +724,17 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
     league_key = memory_store.competition_key_for_record(record)
     league = stats["leagues"].get(league_key, {})
     league_label = league_display_name(record)
-    basis = record.get("settlement_basis") if isinstance(record.get("settlement_basis"), dict) else memory_store.settlement_basis_for_record(record)
-    basis_label = "临场版" if basis.get("analysis_stage") == "lineup-check" else "初盘版"
-    primary = basis.get("primary_pick") if isinstance(basis.get("primary_pick"), dict) else {}
+    basis = (
+        record.get("settlement_basis")
+        if isinstance(record.get("settlement_basis"), dict)
+        else memory_store.settlement_basis_for_record(record)
+    )
+    basis_label = (
+        "临场版" if basis.get("analysis_stage") == "lineup-check" else "初盘版"
+    )
+    primary = (
+        basis.get("primary_pick") if isinstance(basis.get("primary_pick"), dict) else {}
+    )
     primary_result_line = (
         f"主推：{format_pick(basis.get('primary_market'), primary, record)}＝"
         f"{result_text(record.get('primary_result'))}"
@@ -637,20 +747,23 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         else "学习归档：无主推观察样本（只用于规则与数据质量复核）"
     )
     outlook = joint_outlook(record)
-    return validate_plain_text([
-        f"【赛后复盘｜{league_label}｜{record.get('match_id')}】",
-        f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
-        f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
-        f"结算依据：{basis_label}最终有效推荐",
-        primary_result_line,
-        learning_scope_line,
-        f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",
-        f"联合情景：{outlook['scenarios']}",
-        f"本场关键：{display_text(record, 'key_learning')}",
-        f"{league_label}主推：{performance_text(league.get('primary'))}",
-        f"累计主推：{performance_text(stats.get('primary'))}",
-        "复盘用于校准分析，不代表未来收益",
-    ])
+    return validate_plain_text(
+        [
+            f"【赛后复盘｜{league_label}｜{record.get('match_id')}】",
+            f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
+            f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
+            f"结算依据：{basis_label}最终有效推荐",
+            primary_result_line,
+            learning_scope_line,
+            f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",
+            f"联合首选情景总球：{outlook['goal_range']}｜总进球边际第一：{outlook['goal_range_marginal_top1']}",
+            f"联合情景：{outlook['scenarios']}",
+            f"本场关键：{display_text(record, 'key_learning')}",
+            f"{league_label}主推：{performance_text(league.get('primary'))}",
+            f"累计主推：{performance_text(stats.get('primary'))}",
+            "复盘用于校准分析，不代表未来收益",
+        ]
+    )
 
 
 def render(base_dir: str | None, match_id: str, kind: str) -> str:
@@ -668,9 +781,13 @@ def render(base_dir: str | None, match_id: str, kind: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-dir", help="Workspace root; defaults to current directory")
+    parser.add_argument(
+        "--base-dir", help="Workspace root; defaults to current directory"
+    )
     parser.add_argument("--match-id", required=True)
-    parser.add_argument("--kind", choices=("initial", "lineup-check", "review"), required=True)
+    parser.add_argument(
+        "--kind", choices=("initial", "lineup-check", "review"), required=True
+    )
     return parser
 
 
@@ -681,7 +798,10 @@ def main() -> int:
         print(render(args.base_dir, args.match_id, args.kind))
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
         return 2
 
 

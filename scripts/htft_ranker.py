@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import json
 import math
 import re
+from datetime import datetime
 from typing import Any, Mapping
-
 
 HALF_RESULTS = ("H", "D", "A")
 FULL_RESULTS = ("H", "D", "A")
@@ -110,7 +109,9 @@ def _league_pair_gate_evidence(
         if not isinstance(value, str) or not re.fullmatch(hash_pattern, value):
             raise ValueError(f"league_evidence.{name} must be a SHA-256 hash")
     if model_hash is None or evidence.get("model_hash") != model_hash:
-        raise ValueError("league_evidence model_hash does not match the prediction model")
+        raise ValueError(
+            "league_evidence model_hash does not match the prediction model"
+        )
     if evidence.get("source_role") != "historical_post_selection_development_evidence":
         raise ValueError("league_evidence source_role is invalid")
     threshold = evidence.get("threshold")
@@ -134,12 +135,16 @@ def _league_pair_gate_evidence(
         raise ValueError("league_evidence cohort counts are inconsistent")
     deployment_status = evidence.get("deployment_status")
     if deployment_status not in {"candidate", "shadow"}:
-        raise ValueError("league_evidence deployment_status must be candidate or shadow")
+        raise ValueError(
+            "league_evidence deployment_status must be candidate or shadow"
+        )
     regime_warning = evidence.get("regime_warning")
     if regime_warning is not None and (
         not isinstance(regime_warning, str) or not regime_warning.strip()
     ):
-        raise ValueError("league_evidence regime_warning must be null or non-empty text")
+        raise ValueError(
+            "league_evidence regime_warning must be null or non-empty text"
+        )
     if (
         evidence.get("formal_htft_eligible") is not False
         or evidence.get("production_confidence_eligible") is not False
@@ -234,7 +239,9 @@ def _validate_probability_total(
     label: str,
     tolerance: float,
 ) -> None:
-    if any(not math.isfinite(value) or value < 0 or value > 1 for value in values.values()):
+    if any(
+        not math.isfinite(value) or value < 0 or value > 1 for value in values.values()
+    ):
         raise ValueError(f"{label} probabilities must be finite and within [0, 1]")
     total = sum(values.values())
     if abs(total - 1.0) > tolerance:
@@ -409,9 +416,7 @@ def rank_htft(
         league_evidence,
         model_hash=model_hash,
     )
-    normalized_exact_results = _normalize_exact_score_results(
-        exact_score_results
-    )
+    normalized_exact_results = _normalize_exact_score_results(exact_score_results)
 
     tolerance = tolerance_pp / 100
     _validate_probability_total(matrix, label="matrix", tolerance=tolerance)
@@ -521,9 +526,7 @@ def rank_htft(
         full_time_thesis_rank = full_time_order.index(full_result) + 1
         coherence_gate_passed = full_result in coherent_full_time_set
         exact_score_result_aligned = (
-            full_result in exact_result_set
-            if normalized_exact_results
-            else None
+            full_result in exact_result_set if normalized_exact_results else None
         )
         coherence_failures: list[str] = []
         if not coherence_gate_passed:
@@ -534,17 +537,14 @@ def rank_htft(
             )
         stability_components = {
             "conditional_follow_through": (
-                STABILITY_WEIGHTS["conditional_follow_through"]
-                * conditional_stability
+                STABILITY_WEIGHTS["conditional_follow_through"] * conditional_stability
             ),
             "joint_support": STABILITY_WEIGHTS["joint_support"] * probability,
             "full_time_support": (
                 STABILITY_WEIGHTS["full_time_support"] * full_probability
             ),
             "state_continuity": (
-                STABILITY_WEIGHTS["state_continuity"]
-                if state_continuity
-                else 0.0
+                STABILITY_WEIGHTS["state_continuity"] if state_continuity else 0.0
             ),
         }
         stability_score = sum(stability_components.values()) * 100
@@ -659,8 +659,7 @@ def rank_htft(
     )
     pair_mass_threshold = PAIR_MASS_THRESHOLDS.get(matrix_mode)
     pair_mass_threshold_crossed = (
-        pair_mass_threshold is not None
-        and pair_probability_mass >= pair_mass_threshold
+        pair_mass_threshold is not None and pair_probability_mass >= pair_mass_threshold
     )
     pair_mass_gate_passed = (
         pair_mass_threshold_crossed
@@ -723,14 +722,10 @@ def rank_htft(
             f"market policy {ACTIVE_MARKET_POLICY} pauses HT/FT formal picks",
         ]
         scenario["stability_status"] = (
-            "supported"
-            if item["stability_gate_passed"]
-            else "insufficient"
+            "supported" if item["stability_gate_passed"] else "insufficient"
         )
         scenario["coherence_status"] = (
-            "on_thesis"
-            if item["coherence_gate_passed"]
-            else "off_thesis_fallback"
+            "on_thesis" if item["coherence_gate_passed"] else "off_thesis_fallback"
         )
         if pair_mass_threshold is None:
             scenario["selection_reason"] = (
@@ -747,8 +742,7 @@ def rank_htft(
                 "joint-probability Top-2 display slot; the global descriptive "
                 "threshold is crossed but league evidence is not forward-confirmed"
                 + (
-                    "; scenario stability evidence is below its qualification "
-                    "threshold"
+                    "; scenario stability evidence is below its qualification threshold"
                     if not item["stability_gate_passed"]
                     else ""
                 )
@@ -887,8 +881,7 @@ def rank_htft(
         "top_two": legacy_top_two,
         "formal_count": 0,
         "diagnostically_qualified_count": sum(
-            item["diagnostic_qualification_status"] == "qualified"
-            for item in scenarios
+            item["diagnostic_qualification_status"] == "qualified" for item in scenarios
         ),
         "value_anomalies": value_anomalies,
     }

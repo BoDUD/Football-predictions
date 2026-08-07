@@ -29,12 +29,11 @@ and overall raw omitted mass is one minus that expression.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from itertools import combinations
-import math
 from typing import Any, Iterator, Mapping, Sequence
-
 
 ARTIFACT_TYPE = "soccer_joint_path_kernel"
 SCHEMA_VERSION = 1
@@ -113,7 +112,9 @@ def _integer(value: Any, name: str, *, minimum: int = 0) -> int:
 
 
 def _is_sequence(value: Any) -> bool:
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    return isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
 
 
 def _positive_dynamic_range(values: Sequence[float], name: str) -> None:
@@ -281,7 +282,9 @@ def _seed_planes(
             "conditional convolution retained probability is too small"
         )
     if retained > 1.0 + NORMALIZATION_TOLERANCE:
-        raise PathKernelError("conditional convolution retained probability exceeds one")
+        raise PathKernelError(
+            "conditional convolution retained probability exceeds one"
+        )
     normalized = [
         [[cell / retained for cell in row] for row in plane] for plane in planes
     ]
@@ -294,9 +297,7 @@ def _tail_audit(
     conditional_retained: float,
 ) -> dict[str, Any]:
     conditional_omitted = max(0.0, 1.0 - conditional_retained)
-    component_raw_retained = (1.0 - half_raw_omitted) * (
-        1.0 - second_raw_omitted
-    )
+    component_raw_retained = (1.0 - half_raw_omitted) * (1.0 - second_raw_omitted)
     overall_raw_retained = component_raw_retained * conditional_retained
     overall_raw_omitted = 1.0 - overall_raw_retained
     return {
@@ -459,7 +460,9 @@ def _coerce_aligned_planes(
             allow_zero_total=True,
         )
         if len(plane) != rows or len(plane[0]) != columns:
-            raise PathKernelError("aligned_event_planes shape must match full_score_target")
+            raise PathKernelError(
+                "aligned_event_planes shape must match full_score_target"
+            )
         planes.append(plane)
         all_values.extend(cell for row in plane for cell in row)
     _positive_dynamic_range(all_values, "aligned_event_planes")
@@ -511,7 +514,9 @@ def _max_flow_block(
         original[(start, end)] = capacity
 
     for half_index, half_result in enumerate(RESULT_ORDER):
-        add_edge(source, row_offset + half_index, htft_target[half_result + full_result])
+        add_edge(
+            source, row_offset + half_index, htft_target[half_result + full_result]
+        )
     for cell_index, (home, away) in enumerate(cells):
         cell_node = cell_offset + cell_index
         demand = full_target[home][away]
@@ -557,9 +562,7 @@ def _max_flow_block(
             node = previous
         flow += increment
 
-    required = math.fsum(
-        htft_target[half + full_result] for half in RESULT_ORDER
-    )
+    required = math.fsum(htft_target[half + full_result] for half in RESULT_ORDER)
     if abs(flow - required) > FEASIBILITY_TOLERANCE:
         raise PathKernelError(
             f"deterministic flow failed after Hall feasibility for {full_result}"
@@ -656,9 +659,7 @@ def build_compact_kernel(
     """
 
     if htft_target is None and aligned_event_planes is None:
-        raise PathKernelError(
-            "provide htft_target, aligned_event_planes, or both"
-        )
+        raise PathKernelError("provide htft_target, aligned_event_planes, or both")
     half = _matrix(
         half_time_matrix,
         "half_time_matrix",
@@ -691,9 +692,7 @@ def build_compact_kernel(
         )
     half_raw = _raw_omitted(half_raw_omitted, "half_raw_omitted")
     second_raw = _raw_omitted(second_raw_omitted, "second_raw_omitted")
-    seed, conditional_retained = _seed_planes(
-        half, second, len(full), len(full[0])
-    )
+    seed, conditional_retained = _seed_planes(half, second, len(full), len(full[0]))
 
     if aligned_event_planes is not None:
         aligned, derived_aligned_htft = _coerce_aligned_planes(
@@ -773,9 +772,7 @@ def build_compact_kernel(
 
 def _close(actual: float, expected: float, name: str) -> None:
     if abs(actual - expected) > TARGET_TOLERANCE:
-        raise PathKernelError(
-            f"{name} mismatch: {actual:.17g} != {expected:.17g}"
-        )
+        raise PathKernelError(f"{name} mismatch: {actual:.17g} != {expected:.17g}")
 
 
 def _same_audit(actual: Any, expected: Any, name: str) -> None:
@@ -881,9 +878,7 @@ def _decode_artifact(artifact: Any) -> dict[str, Any]:
     if dimensions != expected_dimensions:
         raise PathKernelError("dimensions do not match the stored matrices")
 
-    seed, conditional_retained = _seed_planes(
-        half, second, len(full), len(full[0])
-    )
+    seed, conditional_retained = _seed_planes(half, second, len(full), len(full[0]))
     expected_tail = _tail_audit(half_raw, second_raw, conditional_retained)
     _same_audit(artifact.get("tail_mass"), expected_tail, "tail_mass")
     expected_hall = fractional_hall_audit(seed, full, htft)
@@ -913,7 +908,9 @@ def _decode_artifact(artifact: Any) -> dict[str, Any]:
         home = _integer(entry[1], f"group scale {entry_index} home score")
         away = _integer(entry[2], f"group scale {entry_index} away score")
         if half_index >= 3 or home >= len(full) or away >= len(full[0]):
-            raise PathKernelError(f"group_scales.entries[{entry_index}] is out of range")
+            raise PathKernelError(
+                f"group_scales.entries[{entry_index}] is out of range"
+            )
         identity = (half_index, home, away)
         if identity in scales:
             raise PathKernelError("group_scales.entries contains a duplicate identity")
@@ -923,7 +920,9 @@ def _decode_artifact(artifact: Any) -> dict[str, Any]:
                 f"group_scales.entries[{entry_index}] multiplier is unsafe"
             )
         if seed[half_index][home][away] <= 0.0:
-            raise PathKernelError("positive group scale is attached to unsupported seed")
+            raise PathKernelError(
+                "positive group scale is attached to unsupported seed"
+            )
         scales[identity] = scale
     _positive_dynamic_range(list(scales.values()), "positive group scales")
 

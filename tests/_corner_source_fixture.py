@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts import corner_history_dataset_builder as builder
-
 
 TEAMS = ("A", "B", "C", "D")
 SCHEDULES = (
@@ -66,9 +65,9 @@ def _record(
         "corner_exclusion_reasons": [],
         "corner_odds": [],
         "source_url": f"https://example.test/corner/{match_id}",
-        "source_collected_at": (kickoff + timedelta(hours=3)).isoformat(
-            timespec="seconds"
-        ).replace("+00:00", "Z"),
+        "source_collected_at": (kickoff + timedelta(hours=3))
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "source_response_sha256": _hash(f"response:{match_id}"),
     }
     value["schedule_fixture_sha256"] = builder.calculate_fixture_fingerprint(value)

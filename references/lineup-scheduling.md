@@ -18,7 +18,7 @@ Also register the post-match review:
 python <skill-dir>/scripts/review_scheduler.py --base-dir <workspace> register --match-id <id> --user-timezone Asia/Tokyo
 ```
 
-Create one exact Codex automation for `scheduled_for`, with an RRULE ending in `COUNT=1`, and attach its real automation ID to the scheduler task. Do not create `retry-T-*` automations: the retry plan is audit/recovery metadata, not a request for repeated execution. `lineup_scheduler.py due` exposes the logical check only from T-30 until kickoff. Do not create a lineup task before T-30 or at/after kickoff, and do not run a global Python or PowerShell polling process.
+Create one exact Codex automation for `scheduled_for`, with an RRULE ending in `COUNT=1`, and attach its real automation ID to the scheduler task. Every planned attempt also carries a versioned `automation_schedule_spec`: `run_at_utc`, `dtstart_utc`, and `until_utc` must be the same exact UTC instant and `count` must be one. This full-date specification, not an hour-only RRULE interpretation, is authoritative. If the platform returns a next-run timestamp, pass it to `attach-automation --platform-next-run <offset-aware-ISO>`; attachment must reject a next-day, wrong-month, DST-fold, or any other instant mismatch with `run_at_utc`. Do not create `retry-T-*` automations: the retry plan is audit/recovery metadata, not a request for repeated execution. `lineup_scheduler.py due` exposes the logical check only from T-30 until kickoff. Do not create a lineup task before T-30 or at/after kickoff, and do not run a global Python or PowerShell polling process.
 
 The one-time automation must create a new saved Codex project task before acknowledging the scheduler item. The child title is:
 

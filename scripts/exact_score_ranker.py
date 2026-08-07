@@ -8,7 +8,6 @@ import math
 import re
 from typing import Any
 
-
 SCORE_RE = re.compile(r"^(\d+)-(\d+)$")
 
 
@@ -32,7 +31,9 @@ def parse_odds(values: list[str] | None) -> dict[str, float]:
     parsed: dict[str, float] = {}
     for value in values or []:
         if "=" not in value:
-            raise ValueError("Exact-score odds must use SCORE=DECIMAL, for example 0-0=12.0")
+            raise ValueError(
+                "Exact-score odds must use SCORE=DECIMAL, for example 0-0=12.0"
+            )
         score, raw_odds = (part.strip() for part in value.split("=", 1))
         if not SCORE_RE.fullmatch(score):
             raise ValueError(f"Invalid exact score: {score}")
@@ -93,16 +94,12 @@ def rank_exact_scores(
         market_odds = (odds or {}).get(item["score"])
         item["odds"] = market_odds
         item["ev"] = (
-            item["probability"] * market_odds - 1
-            if market_odds is not None
-            else None
+            item["probability"] * market_odds - 1 if market_odds is not None else None
         )
 
     def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         result_penalty = (
-            0
-            if preferred_result is None or item["result"] == preferred_result
-            else 1
+            0 if preferred_result is None or item["result"] == preferred_result else 1
         )
         return (
             -item["probability"],
@@ -148,7 +145,9 @@ def rank_exact_scores(
         display_pool = [item for item in ranked if supports_total_primary(item)]
         event_probability = sum(item["probability"] for item in display_pool)
         if len(display_pool) < 2 or event_probability <= 0:
-            raise ValueError("Primary-conditioned score pool has fewer than two outcomes")
+            raise ValueError(
+                "Primary-conditioned score pool has fewer than two outcomes"
+            )
         display_selection = {
             "basis": "primary_total_net_profit",
             "market": "total",
@@ -179,8 +178,7 @@ def rank_exact_scores(
 
     zero_zero = next(item for item in ranked if item["score"] == "0-0")
     zero_zero_audit = {
-        key: zero_zero[key]
-        for key in ("rank", "score", "probability", "odds", "ev")
+        key: zero_zero[key] for key in ("rank", "score", "probability", "odds", "ev")
     }
     zero_zero_audit["included_in_top2"] = zero_zero["rank"] <= 2
     zero_zero_audit["included_in_display_top2"] = any(

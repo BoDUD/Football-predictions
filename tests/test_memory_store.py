@@ -6,22 +6,23 @@ import hashlib
 import importlib.util
 import json
 import math
+import tempfile
+import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-import tempfile
-import unittest
 from unittest import mock
 
 from _corner_source_fixture import build_source_bound_dataset
+
 from scripts import (
     htft_model,
     joint_scenario_model,
     prediction_card_renderer,
     review_card_renderer,
     score_model,
+    source_evidence,
 )
-
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_store.py"
 SPEC = importlib.util.spec_from_file_location("soccer_memory_store", SCRIPT)
@@ -154,11 +155,15 @@ def write_htft_observation_files(
 ):
     probabilities = dict(matrix or HTFT_OBSERVATION_MATRIX)
     half = {
-        result: sum(probabilities[f"{result}{full_result}"] for full_result in "HDA")
+        result: math.fsum(
+            probabilities[f"{result}{full_result}"] for full_result in "HDA"
+        )
         for result in "HDA"
     }
     full = {
-        result: sum(probabilities[f"{half_result}{result}"] for half_result in "HDA")
+        result: math.fsum(
+            probabilities[f"{half_result}{result}"] for half_result in "HDA"
+        )
         for result in "HDA"
     }
 
@@ -223,9 +228,7 @@ def write_htft_observation_files(
         full,
         league_key="test_league",
         model_hash=model["model_hash"],
-        anchor_context=(
-            None if drop_ranker_anchor else half_time_anchor
-        ),
+        anchor_context=(None if drop_ranker_anchor else half_time_anchor),
     )
     model_path = Path(base_dir) / f"htft-model-{match_id}.json"
     ranker_path = Path(base_dir) / f"htft-ranker-{match_id}.json"
@@ -246,9 +249,7 @@ def write_corner_observation_files(
     prediction_path.write_text(
         json.dumps(prediction, ensure_ascii=False), encoding="utf-8"
     )
-    ranking_path.write_text(
-        json.dumps(ranking, ensure_ascii=False), encoding="utf-8"
-    )
+    ranking_path.write_text(json.dumps(ranking, ensure_ascii=False), encoding="utf-8")
     return str(model_dir), str(prediction_path), str(ranking_path)
 
 
@@ -256,9 +257,16 @@ def synthesize_market_odds(values, prefix, outcomes, selected):
     odds = values.get(f"{prefix}_odds")
     market_probability = values.get(f"{prefix}_market_probability")
     odds_format = values.get(f"{prefix}_odds_format")
-    if odds is None or market_probability is None or not selected or odds_format is None:
+    if (
+        odds is None
+        or market_probability is None
+        or not selected
+        or odds_format is None
+    ):
         return None
-    selected_raw = 1.0 / (float(odds) if odds_format == "decimal" else 1.0 + float(odds))
+    selected_raw = 1.0 / (
+        float(odds) if odds_format == "decimal" else 1.0 + float(odds)
+    )
     scale = selected_raw / float(market_probability)
     remaining = (1.0 - float(market_probability)) / (len(outcomes) - 1)
     result = []
@@ -272,9 +280,7 @@ def synthesize_market_odds(values, prefix, outcomes, selected):
 
 def review_command(args):
     previous = memory_store.utc_now
-    memory_store.utc_now = lambda: datetime(
-        2026, 7, 21, 13, 0, tzinfo=timezone.utc
-    )
+    memory_store.utc_now = lambda: datetime(2026, 7, 21, 13, 0, tzinfo=timezone.utc)
     try:
         return memory_store.cmd_review(args)
     finally:
@@ -527,17 +533,14 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
             item
             for item in ranked
             if item["probability"] > 0.0
-            and memory_store.settle_total(
-                total_pick, item["home"], item["away"]
-            )
+            and memory_store.settle_total(total_pick, item["home"], item["away"])
             in {"win", "half_win"}
         ]
         event_probability = sum(
             float(probability)
             for home, row in enumerate(matrix)
             for away, probability in enumerate(row)
-            if memory_store.settle_total(total_pick, home, away)
-            in {"win", "half_win"}
+            if memory_store.settle_total(total_pick, home, away) in {"win", "half_win"}
         )
         values["display_exact_score_pick"] = [
             f"{item['score']}:{item['probability']:.12g}:"
@@ -564,7 +567,9 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         key = f"{prefix}_market_odds"
         if values.get(key) is None and selected:
             values[key] = synthesize_market_odds(values, prefix, outcomes, selected)
-    if values.get("goal_range_market_odds") is None and values.get("goal_range_selection"):
+    if values.get("goal_range_market_odds") is None and values.get(
+        "goal_range_selection"
+    ):
         values["goal_range_market_odds"] = synthesize_market_odds(
             values,
             "goal_range",
@@ -644,7 +649,15 @@ def attach_competition_args(
     return SimpleNamespace(**values)
 
 
-def reviewed_record(match_id, asian=None, asian_result=None, total=None, total_result=None, half=None, half_result=None):
+def reviewed_record(
+    match_id,
+    asian=None,
+    asian_result=None,
+    total=None,
+    total_result=None,
+    half=None,
+    half_result=None,
+):
     return {
         "match_id": match_id,
         "mode": "prematch",
@@ -719,9 +732,7 @@ def strict_metric_record(
             "primary_market": "total" if selected else None,
             "primary_pick": primary,
             "primary_result": "win" if selected else None,
-            "learning_scope": (
-                "primary" if selected else "no_primary_observation"
-            ),
+            "learning_scope": ("primary" if selected else "no_primary_observation"),
             "exact_score_hit_rank": exact_score_hit_rank,
             "score_exact": exact_score_hit_rank == 1,
         }
@@ -993,9 +1004,7 @@ class MemoryStoreTests(unittest.TestCase):
         *,
         probability_offset: float = 0.0,
     ) -> str:
-        matrix = self.joint_prediction["full_time_score_marginal"][
-            "probabilities"
-        ]
+        matrix = self.joint_prediction["full_time_score_marginal"]["probabilities"]
         distributions = {
             side: memory_store.matrix_settlement_distribution(
                 matrix, "asian", {"market": "asian", "side": side, "line": 0.0}
@@ -1008,6 +1017,12 @@ class MemoryStoreTests(unittest.TestCase):
         )
         other = "away" if side == "home" else "home"
         distribution = distributions[side]
+        market_identity = {
+            "family": "asian",
+            "period": "full_time",
+            "line": 0.0,
+            "price_outcomes": ["home", "away"],
+        }
         payload = {
             "artifact_type": memory_store.CANDIDATE_EVALUATION_ARTIFACT_TYPE,
             "schema_version": memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
@@ -1033,6 +1048,11 @@ class MemoryStoreTests(unittest.TestCase):
                     "market": "asian",
                     "side": side,
                     "line": 0.0,
+                    "market_identity": market_identity,
+                    "market_identity_hash": source_evidence.market_identity_hash(
+                        market_identity
+                    ),
+                    "settlement_reference_outcome": side,
                     "probability": distribution["full_win"]
                     + distribution["half_win"]
                     + probability_offset,
@@ -1055,39 +1075,39 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_record_parser_exposes_joint_scenario_file(self):
         arguments = [
-                "record",
-                "--match-id",
-                "fixture",
-                "--league",
-                "test_league",
-                "--kickoff",
-                "2026-07-21T19:30:00+09:00",
-                "--page-status",
-                "prematch",
-                "--source-kickoff",
-                "2026-07-21T18:30:00+08:00",
-                "--source-timezone",
-                "Asia/Shanghai",
-                "--user-local-kickoff",
-                "2026-07-21T19:30:00+09:00",
-                "--user-timezone",
-                "Asia/Tokyo",
-                "--home-team",
-                "Alpha",
-                "--away-team",
-                "Bravo",
-                "--predicted-score",
-                "1-0",
-                "--zero-zero-probability",
-                "0.1",
-                "--zero-zero-rank",
-                "4",
-                "--primary-market",
-                "none",
-                "--joint-scenario-file",
-                "joint.json",
-                "--require-complete-analysis",
-            ]
+            "record",
+            "--match-id",
+            "fixture",
+            "--league",
+            "test_league",
+            "--kickoff",
+            "2026-07-21T19:30:00+09:00",
+            "--page-status",
+            "prematch",
+            "--source-kickoff",
+            "2026-07-21T18:30:00+08:00",
+            "--source-timezone",
+            "Asia/Shanghai",
+            "--user-local-kickoff",
+            "2026-07-21T19:30:00+09:00",
+            "--user-timezone",
+            "Asia/Tokyo",
+            "--home-team",
+            "Alpha",
+            "--away-team",
+            "Bravo",
+            "--predicted-score",
+            "1-0",
+            "--zero-zero-probability",
+            "0.1",
+            "--zero-zero-rank",
+            "4",
+            "--primary-market",
+            "none",
+            "--joint-scenario-file",
+            "joint.json",
+            "--require-complete-analysis",
+        ]
         parsed = memory_store.build_parser().parse_args(arguments)
         self.assertEqual(parsed.joint_scenario_file, "joint.json")
         self.assertTrue(parsed.require_complete_analysis)
@@ -1097,7 +1117,7 @@ class MemoryStoreTests(unittest.TestCase):
         defaulted = memory_store.build_parser().parse_args(arguments[:-1])
         self.assertTrue(defaulted.require_complete_analysis)
 
-    def test_candidate_evaluation_v2_archives_shadow_without_formal_pick(self):
+    def test_candidate_evaluation_v3_archives_shadow_without_formal_pick(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             created = memory_store.cmd_record(
@@ -1128,7 +1148,7 @@ class MemoryStoreTests(unittest.TestCase):
                 audit["shadow_selections"]["asian"], candidate["candidate_id"]
             )
 
-    def test_candidate_evaluation_v2_rejects_missing_or_tampered_input(self):
+    def test_candidate_evaluation_v3_rejects_missing_or_tampered_input(self):
         with tempfile.TemporaryDirectory() as base:
             with self.assertRaisesRegex(
                 ValueError, "requires --candidate-evaluation-file"
@@ -1170,7 +1190,7 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
-    def test_candidate_evaluation_v2_settles_shadow_and_triggers_review_only(self):
+    def test_candidate_evaluation_v3_settles_shadow_and_triggers_review_only(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             memory_store.cmd_record(
@@ -1209,14 +1229,10 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
             self.assertEqual(reviewed["stats"]["primary"]["profit_units"], 0)
-            shadow = reviewed["stats"]["shadow_selection_by_market"]["markets"][
-                "asian"
-            ]
+            shadow = reviewed["stats"]["shadow_selection_by_market"]["markets"]["asian"]
             self.assertEqual(shadow["shadow_selected"], 1)
             self.assertEqual(shadow["graded_shadow_selections"], 1)
-            release = reviewed["stats"]["release_blocker_funnel"]["markets"][
-                "asian"
-            ]
+            release = reviewed["stats"]["release_blocker_funnel"]["markets"]["asian"]
             self.assertEqual(
                 release["release_gates"]["market_policy_enabled"]["failed"], 1
             )
@@ -1250,28 +1266,31 @@ class MemoryStoreTests(unittest.TestCase):
                     if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
                 )
                 old_to_new: dict[str, str] = {}
-                artifact_sha = "sha256:" + hashlib.sha256(
-                    match_id.encode("utf-8")
-                ).hexdigest()
+                artifact_sha = (
+                    "sha256:" + hashlib.sha256(match_id.encode("utf-8")).hexdigest()
+                )
                 audit["fixture"]["match_id"] = match_id
                 audit["artifact"]["artifact_sha256"] = artifact_sha
                 audit["observation_id"] = artifact_sha
                 for candidate in audit["candidates"]:
                     old_id = candidate["candidate_id"]
-                    new_id = "sha256:" + hashlib.sha256(
-                        (
-                            f"{artifact_sha}:{candidate['source_index']}:"
-                            f"{candidate['identity']}"
-                        ).encode("utf-8")
-                    ).hexdigest()
+                    new_id = (
+                        "sha256:"
+                        + hashlib.sha256(
+                            (
+                                f"{artifact_sha}:{candidate['source_index']}:"
+                                f"{candidate['identity']}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    )
                     candidate["candidate_id"] = new_id
                     old_to_new[old_id] = new_id
                 audit["shadow_selections"] = {
                     market: old_to_new[candidate_id]
                     for market, candidate_id in audit["shadow_selections"].items()
                 }
-                audit["audit_hash"] = memory_store.calculate_candidate_evaluation_audit_hash(
-                    audit
+                audit["audit_hash"] = (
+                    memory_store.calculate_candidate_evaluation_audit_hash(audit)
                 )
                 diagnostic = next(
                     item
@@ -1294,19 +1313,15 @@ class MemoryStoreTests(unittest.TestCase):
 
             shadow_summary = {
                 "markets": {
-                    market: {
-                        "graded_shadow_selections": 20 if market == "asian" else 0
-                    }
+                    market: {"graded_shadow_selections": 20 if market == "asian" else 0}
                     for market in memory_store.PRIMARY_MARKETS
                 }
             }
-            threshold = memory_store.shadow_review_trigger_by_market(
-                shadow_summary, 20
-            )
+            threshold = memory_store.shadow_review_trigger_by_market(shadow_summary, 20)
             self.assertTrue(threshold["asian"])
             self.assertFalse(threshold["total"])
 
-    def test_candidate_evaluation_v2_enforces_temporal_causality(self):
+    def test_candidate_evaluation_v3_enforces_temporal_causality(self):
         cases = (
             (
                 "market-after-candidate",
@@ -1363,10 +1378,8 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.validated_candidate_evaluation_audit(audit, created)
             )
 
-    def test_candidate_evaluation_v2_uses_five_state_quarter_line_edge(self):
-        matrix = self.joint_prediction["full_time_score_marginal"][
-            "probabilities"
-        ]
+    def test_candidate_evaluation_v3_uses_five_state_quarter_line_edge(self):
+        matrix = self.joint_prediction["full_time_score_marginal"]["probabilities"]
         for line in (-0.25, -0.75):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as base:
                 artifact = self.write_candidate_evaluation_file(base)
@@ -1389,6 +1402,10 @@ class MemoryStoreTests(unittest.TestCase):
                         "complete_market_odds": {side: 2.0, other: 2.0},
                         "cover_distribution_validated": True,
                     }
+                )
+                raw["market_identity"]["line"] = line if side == "home" else -line
+                raw["market_identity_hash"] = source_evidence.market_identity_hash(
+                    raw["market_identity"]
                 )
                 Path(artifact).write_text(
                     json.dumps(payload, ensure_ascii=False), encoding="utf-8"
@@ -1429,7 +1446,62 @@ class MemoryStoreTests(unittest.TestCase):
             )
         )
 
-    def test_candidate_evaluation_v2_replays_derived_fields_and_diagnostics(self):
+    def test_candidate_evaluation_rejects_home_distribution_bound_to_away_quote(
+        self,
+    ) -> None:
+        matrix = self.joint_prediction["full_time_score_marginal"]["probabilities"]
+        home_distribution = memory_store.matrix_settlement_distribution(
+            matrix,
+            "asian",
+            {"market": "asian", "side": "home", "line": -0.75},
+        )
+        away_distribution = memory_store.matrix_settlement_distribution(
+            matrix,
+            "asian",
+            {"market": "asian", "side": "away", "line": 0.75},
+        )
+        self.assertNotEqual(home_distribution, away_distribution)
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+            raw = payload["candidates"][0]
+            identity = {
+                "family": "asian",
+                "period": "full_time",
+                "line": -0.75,
+                "price_outcomes": ["home", "away"],
+            }
+            raw.update(
+                {
+                    "side": "away",
+                    "line": 0.75,
+                    "market_identity": identity,
+                    "market_identity_hash": source_evidence.market_identity_hash(
+                        identity
+                    ),
+                    "settlement_reference_outcome": "away",
+                    "probability": home_distribution["full_win"]
+                    + home_distribution["half_win"],
+                    "settlement_probabilities": home_distribution,
+                    "complete_market_odds": {"home": 2.0, "away": 2.0},
+                    "odds": 2.0,
+                }
+            )
+            Path(artifact).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ValueError, "probability does not match the canonical model"
+            ):
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )
+
+    def test_candidate_evaluation_v3_replays_derived_fields_and_diagnostics(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             memory_store.cmd_record(
@@ -1465,8 +1537,8 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.validated_candidate_evaluation_audit(audit, reviewed)
             )
             audit["candidates"][0]["ev"] += 1.0
-            audit["audit_hash"] = memory_store.calculate_candidate_evaluation_audit_hash(
-                audit
+            audit["audit_hash"] = (
+                memory_store.calculate_candidate_evaluation_audit_hash(audit)
             )
             self.assertFalse(
                 memory_store.validated_candidate_evaluation_audit(audit, reviewed)
@@ -1494,7 +1566,9 @@ class MemoryStoreTests(unittest.TestCase):
                 0,
             )
 
-    def test_candidate_evaluation_v2_deduplicates_same_match_market_across_artifact_hashes(self):
+    def test_candidate_evaluation_v3_deduplicates_same_match_market_across_artifact_hashes(
+        self,
+    ):
         records = []
         observation_ids = []
         raw_artifact_hashes = []
@@ -1536,9 +1610,7 @@ class MemoryStoreTests(unittest.TestCase):
                     if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
                 )
                 observation_ids.append(audit["observation_id"])
-                raw_artifact_hashes.append(
-                    audit["artifact"]["raw_artifact_sha256"]
-                )
+                raw_artifact_hashes.append(audit["artifact"]["raw_artifact_sha256"])
         self.assertEqual(observation_ids[0], observation_ids[1])
         self.assertNotEqual(raw_artifact_hashes[0], raw_artifact_hashes[1])
         stats = memory_store.calculate_stats(records)
@@ -1582,9 +1654,7 @@ class MemoryStoreTests(unittest.TestCase):
                 self.joint_record_args(base, require_complete_analysis=True)
             )["record"]
 
-            self.assertIsNotNone(
-                memory_store.validated_joint_scenario_audit(created)
-            )
+            self.assertIsNotNone(memory_store.validated_joint_scenario_audit(created))
 
     def test_real_complete_archive_renders_no_primary_and_joint_pairs_end_to_end(self):
         with tempfile.TemporaryDirectory() as base:
@@ -1615,7 +1685,11 @@ class MemoryStoreTests(unittest.TestCase):
 
             self.assertEqual(card.rows[0].primary, "无正式主推")
             self.assertNotEqual(card.rows[0].total_goals, "数据不足")
-            self.assertEqual(len(card.rows[0].total_goals.splitlines()), 1)
+            total_goal_lines = card.rows[0].total_goals.splitlines()
+            self.assertEqual(len(total_goal_lines), 4)
+            self.assertTrue(total_goal_lines[1].startswith("Top2"))
+            self.assertNotIn("...", card.rows[0].total_goals)
+            self.assertNotIn("…", card.rows[0].total_goals)
             self.assertEqual(len(card.rows[0].htft.splitlines()), 2)
             self.assertEqual(
                 len(card.rows[0].htft.splitlines()),
@@ -1635,7 +1709,9 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertFalse(audit["formal_eligible"])
             self.assertEqual(audit["fixture_binding"]["fixture_id"], JOINT_FIXTURE_ID)
             self.assertEqual(audit["snapshot"], self.joint_prediction)
-            self.assertEqual(audit["joint_top_two"], self.joint_prediction["joint_top_two"])
+            self.assertEqual(
+                audit["joint_top_two"], self.joint_prediction["joint_top_two"]
+            )
             self.assertEqual(audit["derived"], self.joint_prediction["derived"])
             binding = audit["active_version_binding"]
             self.assertEqual(
@@ -1776,9 +1852,7 @@ class MemoryStoreTests(unittest.TestCase):
         cases.append((score_hash, "canonical score input hash"))
 
         htft_hash = copy.deepcopy(self.joint_prediction)
-        htft_hash["inputs"]["htft_prediction"]["content_hash"] = (
-            "sha256:" + "e" * 64
-        )
+        htft_hash["inputs"]["htft_prediction"]["content_hash"] = "sha256:" + "e" * 64
         cases.append((htft_hash, "HT/FT input hash"))
 
         model_lineage = copy.deepcopy(self.joint_prediction)
@@ -1807,9 +1881,7 @@ class MemoryStoreTests(unittest.TestCase):
                     tampered["joint_scenario_audit"]
                 )
             )
-            self.assertIsNone(
-                memory_store.validated_joint_scenario_audit(tampered)
-            )
+            self.assertIsNone(memory_store.validated_joint_scenario_audit(tampered))
 
             tampered = copy.deepcopy(created)
             tampered["joint_scenario_audit"]["snapshot"]["joint_top_two"] = []
@@ -1823,9 +1895,7 @@ class MemoryStoreTests(unittest.TestCase):
                     tampered["joint_scenario_audit"]
                 )
             )
-            self.assertIsNone(
-                memory_store.validated_joint_scenario_audit(tampered)
-            )
+            self.assertIsNone(memory_store.validated_joint_scenario_audit(tampered))
 
     def test_joint_scenario_revision_preserves_the_previous_immutable_wrapper(self):
         with tempfile.TemporaryDirectory() as base:
@@ -1871,9 +1941,7 @@ class MemoryStoreTests(unittest.TestCase):
                     revision["joint_scenario_audit"]
                 )
             )
-            self.assertIsNone(
-                memory_store.validated_joint_scenario_audit(revision)
-            )
+            self.assertIsNone(memory_store.validated_joint_scenario_audit(revision))
 
             reused_initial = copy.deepcopy(updated)
             reused_initial["joint_scenario_audit"] = initial_audit
@@ -2000,9 +2068,7 @@ class MemoryStoreTests(unittest.TestCase):
                 corner_observation_prediction_file=str(
                     Path(base) / "missing-prediction.json"
                 ),
-                corner_observation_ranker_file=str(
-                    Path(base) / "missing-ranking.json"
-                ),
+                corner_observation_ranker_file=str(Path(base) / "missing-ranking.json"),
             )
             with self.assertRaisesRegex(ValueError, "does not exist"):
                 memory_store.cmd_record(missing)
@@ -2053,8 +2119,8 @@ class MemoryStoreTests(unittest.TestCase):
             ranking["prediction_binding"]["prediction_hash"] = prediction[
                 "prediction_hash"
             ]
-            ranking["ranking_hash"] = (
-                memory_store.corner_ranker.calculate_ranking_hash(ranking)
+            ranking["ranking_hash"] = memory_store.corner_ranker.calculate_ranking_hash(
+                ranking
             )
             with self.assertRaisesRegex(ValueError, "ranking is invalid"):
                 memory_store.cmd_record(
@@ -2070,8 +2136,8 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             ranking = copy.deepcopy(self.corner_ranking)
             ranking["candidates"][0]["ev"] += 0.01
-            ranking["ranking_hash"] = (
-                memory_store.corner_ranker.calculate_ranking_hash(ranking)
+            ranking["ranking_hash"] = memory_store.corner_ranker.calculate_ranking_hash(
+                ranking
             )
             with self.assertRaisesRegex(ValueError, "does not reproduce"):
                 memory_store.cmd_record(
@@ -2120,9 +2186,7 @@ class MemoryStoreTests(unittest.TestCase):
                     expected = memory_store.settle_corner_handicap(candidate, 6, 3)
                 expected = "full_win" if expected == "win" else expected
                 self.assertEqual(result_by_id[candidate["candidate_id"]], expected)
-            best_id = created["candidate_audits"][0]["best_observation"][
-                "candidate_id"
-            ]
+            best_id = created["candidate_audits"][0]["best_observation"]["candidate_id"]
             self.assertEqual(
                 diagnostic["best_observation_result"], result_by_id[best_id]
             )
@@ -2136,12 +2200,8 @@ class MemoryStoreTests(unittest.TestCase):
             for market in ("corner_total", "corner_handicap"):
                 market_funnel = funnel["markets"][market]
                 self.assertEqual(market_funnel["candidate_count"], 2)
-                self.assertEqual(
-                    market_funnel["diagnostics"]["graded_observations"], 1
-                )
-                self.assertEqual(
-                    market_funnel["diagnostics"]["graded_candidates"], 2
-                )
+                self.assertEqual(market_funnel["diagnostics"]["graded_observations"], 1)
+                self.assertEqual(market_funnel["diagnostics"]["graded_candidates"], 2)
                 self.assertFalse(
                     market_funnel["diagnostics"]["counts_toward_primary_record"]
                 )
@@ -2176,9 +2236,9 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
             for market in ("corner_total", "corner_handicap"):
-                diagnostics = reviewed["stats"]["observation_gate_funnel"][
-                    "markets"
-                ][market]["diagnostics"]
+                diagnostics = reviewed["stats"]["observation_gate_funnel"]["markets"][
+                    market
+                ]["diagnostics"]
                 self.assertEqual(diagnostics["ungraded_observations"], 1)
                 self.assertEqual(diagnostics["ungraded_candidates"], 2)
                 self.assertEqual(diagnostics["graded_candidates"], 0)
@@ -2186,9 +2246,7 @@ class MemoryStoreTests(unittest.TestCase):
     def setUp(self):
         self._real_utc_now = memory_store.utc_now
         self._real_competition_fetch = memory_store.fetch_titan_competition_snapshot
-        memory_store.utc_now = lambda: datetime(
-            2026, 7, 21, 10, 0, tzinfo=timezone.utc
-        )
+        memory_store.utc_now = lambda: datetime(2026, 7, 21, 10, 0, tzinfo=timezone.utc)
         memory_store.fetch_titan_competition_snapshot = fake_competition_snapshot
 
     def tearDown(self):
@@ -2201,17 +2259,13 @@ class MemoryStoreTests(unittest.TestCase):
             "analysis_stage": "initial",
             "updated_at": archive_time,
             "candidate_audits": [
-                {
-                    "candidates": [
-                        {"market_collected_at": "2026-07-21T09:00:00Z"}
-                    ]
-                }
+                {"candidates": [{"market_collected_at": "2026-07-21T09:00:00Z"}]}
             ],
         }
         memory_store.validate_candidate_audit_freshness(initial)
-        initial["candidate_audits"][0]["candidates"][0][
-            "market_collected_at"
-        ] = "2026-07-21T08:59:59Z"
+        initial["candidate_audits"][0]["candidates"][0]["market_collected_at"] = (
+            "2026-07-21T08:59:59Z"
+        )
         with self.assertRaisesRegex(ValueError, "stale for initial"):
             memory_store.validate_candidate_audit_freshness(initial)
 
@@ -2219,17 +2273,13 @@ class MemoryStoreTests(unittest.TestCase):
             "analysis_stage": "lineup-check",
             "updated_at": archive_time,
             "candidate_audits": [
-                {
-                    "best_observation": {
-                        "market_collected_at": "2026-07-21T09:30:00Z"
-                    }
-                }
+                {"best_observation": {"market_collected_at": "2026-07-21T09:30:00Z"}}
             ],
         }
         memory_store.validate_candidate_audit_freshness(lineup)
-        lineup["candidate_audits"][0]["best_observation"][
-            "market_collected_at"
-        ] = "2026-07-21T09:29:59Z"
+        lineup["candidate_audits"][0]["best_observation"]["market_collected_at"] = (
+            "2026-07-21T09:29:59Z"
+        )
         with self.assertRaisesRegex(ValueError, "stale for lineup-check"):
             memory_store.validate_candidate_audit_freshness(lineup)
 
@@ -2333,11 +2383,19 @@ class MemoryStoreTests(unittest.TestCase):
                 record_args(base, exact_score_pick=["2-0:0.15", "1-0:0.20"])
             )["record"]
             self.assertEqual(
-                [(pick["rank"], pick["score"]) for pick in created["exact_score_picks"]],
+                [
+                    (pick["rank"], pick["score"])
+                    for pick in created["exact_score_picks"]
+                ],
                 [(1, "1-0"), (2, "2-0")],
             )
             self.assertEqual(created["league_key"], "测试联赛")
-            self.assertTrue(all(pick["status"] == "scenario_only" for pick in created["exact_score_picks"]))
+            self.assertTrue(
+                all(
+                    pick["status"] == "scenario_only"
+                    for pick in created["exact_score_picks"]
+                )
+            )
 
             reviewed = review_command(
                 SimpleNamespace(
@@ -2365,10 +2423,16 @@ class MemoryStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as base:
             with self.assertRaisesRegex(ValueError, "exactly two"):
-                memory_store.cmd_record(record_args(base, exact_score_pick=["1-0:0.20"]))
+                memory_store.cmd_record(
+                    record_args(base, exact_score_pick=["1-0:0.20"])
+                )
             with self.assertRaisesRegex(ValueError, "highest-probability"):
                 memory_store.cmd_record(
-                    record_args(base, predicted_score="2-0", exact_score_pick=["1-0:0.20", "2-0:0.15"])
+                    record_args(
+                        base,
+                        predicted_score="2-0",
+                        exact_score_pick=["1-0:0.20", "2-0:0.15"],
+                    )
                 )
 
     def test_primary_conditioned_display_scores_are_separate_and_reviewed(self):
@@ -2466,9 +2530,7 @@ class MemoryStoreTests(unittest.TestCase):
                 )
 
         with tempfile.TemporaryDirectory() as base:
-            with self.assertRaisesRegex(
-                ValueError, "conditioned display score rank 1"
-            ):
+            with self.assertRaisesRegex(ValueError, "conditioned display score rank 1"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -2531,7 +2593,9 @@ class MemoryStoreTests(unittest.TestCase):
                         zero_zero_rank=2,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "exceeds the archived second-ranked"):
+            with self.assertRaisesRegex(
+                ValueError, "exceeds the archived second-ranked"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -2555,7 +2619,9 @@ class MemoryStoreTests(unittest.TestCase):
                     total_ev=0.023,
                 )
             )
-            self.assertEqual(maintained["record"]["primary_change"]["status"], "maintained")
+            self.assertEqual(
+                maintained["record"]["primary_change"]["status"], "maintained"
+            )
 
             with self.assertRaisesRegex(ValueError, "immutable"):
                 memory_store.cmd_record(
@@ -2567,14 +2633,22 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
-            with self.assertRaisesRegex(ValueError, "valid only when there are no formal picks"):
-                memory_store.cmd_record(record_args(base, match_id="2", primary_market="none"))
+            with self.assertRaisesRegex(
+                ValueError, "valid only when there are no formal picks"
+            ):
+                memory_store.cmd_record(
+                    record_args(base, match_id="2", primary_market="none")
+                )
             with self.assertRaisesRegex(ValueError, "is not present"):
-                memory_store.cmd_record(record_args(base, match_id="3", primary_market="half_time"))
+                memory_store.cmd_record(
+                    record_args(base, match_id="3", primary_market="half_time")
+                )
 
     def test_review_persists_primary_result(self):
         with tempfile.TemporaryDirectory() as base:
-            memory_store.cmd_record(record_args(base, asian_side=None, primary_market="total"))
+            memory_store.cmd_record(
+                record_args(base, asian_side=None, primary_market="total")
+            )
             result = review_command(
                 SimpleNamespace(
                     base_dir=base,
@@ -2592,8 +2666,12 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(result["record"]["primary_result"], "win")
             self.assertIsNone(result["record"]["asian_result"])
             self.assertEqual(result["record"]["total_result"], "win")
-            self.assertEqual(result["record"]["settlement_basis"]["grading_scope"], "primary_only")
-            self.assertEqual(result["record"]["settlement_basis"]["analysis_stage"], "initial")
+            self.assertEqual(
+                result["record"]["settlement_basis"]["grading_scope"], "primary_only"
+            )
+            self.assertEqual(
+                result["record"]["settlement_basis"]["analysis_stage"], "initial"
+            )
             self.assertEqual(
                 result["record"]["settlement_basis"]["policy"],
                 "latest_active_prematch_version",
@@ -2619,9 +2697,7 @@ class MemoryStoreTests(unittest.TestCase):
                                 base_dir=base,
                                 verified_finished=True,
                                 verification_source="https://example.test/final",
-                                verification_collected_at=(
-                                    "2026-07-21T21:00:00+09:00"
-                                ),
+                                verification_collected_at=("2026-07-21T21:00:00+09:00"),
                                 match_id="1",
                                 home_score=1,
                                 away_score=0,
@@ -2683,7 +2759,9 @@ class MemoryStoreTests(unittest.TestCase):
             record = reviewed["record"]
             self.assertEqual(record["total_result"], "win")
             self.assertEqual(record["primary_result"], "win")
-            self.assertEqual(record["settlement_basis"]["analysis_stage"], "lineup-check")
+            self.assertEqual(
+                record["settlement_basis"]["analysis_stage"], "lineup-check"
+            )
             self.assertEqual(
                 record["settlement_basis"]["formal_picks"]["total"]["side"],
                 "over",
@@ -2699,15 +2777,17 @@ class MemoryStoreTests(unittest.TestCase):
             "market_signal": "aligned",
         }
         record = reviewed_record("201", total=total, total_result="win")
-        record.update({
-            "analysis_stage": "lineup-check",
-            "lineup_rechecked_at": "2026-07-21T10:00:00+00:00",
-            "updated_at": "2026-07-21T10:00:00+00:00",
-            "primary_market": "total",
-            "primary_pick": dict(total, market="total", role="primary"),
-            "primary_result": "win",
-            "final_score": "0-0",
-        })
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-21T10:00:00+00:00",
+                "updated_at": "2026-07-21T10:00:00+00:00",
+                "primary_market": "total",
+                "primary_pick": dict(total, market="total", role="primary"),
+                "primary_result": "win",
+                "final_score": "0-0",
+            }
+        )
         with tempfile.TemporaryDirectory() as base:
             path = memory_store.data_path(base)
             path.parent.mkdir(parents=True)
@@ -2718,7 +2798,9 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(migrated["changed_match_ids"], ["201"])
             saved = memory_store.load_history(path)[0]
-            self.assertEqual(saved["settlement_basis"]["analysis_stage"], "lineup-check")
+            self.assertEqual(
+                saved["settlement_basis"]["analysis_stage"], "lineup-check"
+            )
             self.assertEqual(saved["primary_result"], before["primary_result"])
             self.assertEqual(saved["total_result"], before["total_result"])
             self.assertEqual(saved["revisions"], before["revisions"])
@@ -2781,9 +2863,7 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertIsNone(basis["competition_evidence"])
             self.assertEqual(
-                basis["competition_identity_migration"][
-                    "competition_evidence_status"
-                ],
+                basis["competition_identity_migration"]["competition_evidence_status"],
                 "unavailable_in_legacy_settlement_basis",
             )
 
@@ -2841,9 +2921,7 @@ class MemoryStoreTests(unittest.TestCase):
 
         evidence = memory_store.build_competition_evidence(record, **values)
         record["competition_evidence"] = evidence
-        self.assertEqual(
-            memory_store.validated_competition_evidence(record), evidence
-        )
+        self.assertEqual(memory_store.validated_competition_evidence(record), evidence)
         self.assertEqual(evidence["competition"]["key"], "brazil_cup")
         self.assertEqual(evidence["competition"]["label"], "巴西杯")
         self.assertRegex(evidence["evidence_hash"], r"^sha256:[0-9a-f]{64}$")
@@ -2861,11 +2939,11 @@ class MemoryStoreTests(unittest.TestCase):
                 rebound_tamper["competition_evidence"]
             )
         )
-        self.assertIsNone(
-            memory_store.validated_competition_evidence(rebound_tamper)
-        )
+        self.assertIsNone(memory_store.validated_competition_evidence(rebound_tamper))
 
-        with self.assertRaisesRegex(ValueError, "not registered|do not match the registry"):
+        with self.assertRaisesRegex(
+            ValueError, "not registered|do not match the registry"
+        ):
             memory_store.build_competition_evidence(
                 record,
                 **{
@@ -3035,7 +3113,9 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
-    def test_lineup_kickoff_change_requires_and_accepts_fresh_competition_evidence(self):
+    def test_lineup_kickoff_change_requires_and_accepts_fresh_competition_evidence(
+        self,
+    ):
         match_id = "2991125"
         values = competition_evidence_values(match_id)
         cli_values = {
@@ -3060,9 +3140,7 @@ class MemoryStoreTests(unittest.TestCase):
                     **cli_values,
                 )
             )["record"]
-            self.assertIsNotNone(
-                memory_store.validated_competition_evidence(initial)
-            )
+            self.assertIsNotNone(memory_store.validated_competition_evidence(initial))
 
             with self.assertRaisesRegex(ValueError, "supply fresh source-verified"):
                 memory_store.cmd_record(
@@ -3085,9 +3163,7 @@ class MemoryStoreTests(unittest.TestCase):
                     **cli_values,
                 )
             )["record"]
-            self.assertIsNotNone(
-                memory_store.validated_competition_evidence(lineup)
-            )
+            self.assertIsNotNone(memory_store.validated_competition_evidence(lineup))
             self.assertEqual(
                 lineup["competition_evidence"]["fixture"]["kickoff"],
                 "2026-07-21T19:25:00+09:00",
@@ -3142,9 +3218,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(after["revisions"], before_revisions)
             self.assertEqual(after["settlement_basis"], before_settlement)
             self.assertEqual(len(after["metadata_revisions"]), 1)
-            self.assertIsNotNone(
-                memory_store.validated_competition_evidence(after)
-            )
+            self.assertIsNotNone(memory_store.validated_competition_evidence(after))
 
             bytes_after_first_attach = path.read_bytes()
             duplicate = memory_store.cmd_attach_competition_evidence(
@@ -3243,19 +3317,23 @@ class MemoryStoreTests(unittest.TestCase):
             "market_signal": "neutral",
         }
         first = reviewed_record("101", total=total_win, total_result="win")
-        first.update({
-            "league": "2026芬超第16轮",
-            "primary_market": "total",
-            "primary_pick": dict(total_win, market="total", role="primary"),
-            "primary_result": "win",
-        })
+        first.update(
+            {
+                "league": "2026芬超第16轮",
+                "primary_market": "total",
+                "primary_pick": dict(total_win, market="total", role="primary"),
+                "primary_result": "win",
+            }
+        )
         second = reviewed_record("102", total=total_loss, total_result="loss")
-        second.update({
-            "league": "芬超",
-            "primary_market": "total",
-            "primary_pick": dict(total_loss, market="total", role="primary"),
-            "primary_result": "loss",
-        })
+        second.update(
+            {
+                "league": "芬超",
+                "primary_market": "total",
+                "primary_pick": dict(total_loss, market="total", role="primary"),
+                "primary_result": "loss",
+            }
+        )
         history = [first, second]
 
         stats = memory_store.calculate_stats(history)
@@ -3296,7 +3374,9 @@ class MemoryStoreTests(unittest.TestCase):
             )
 
             calibration = memory_store.cmd_calibrate(
-                SimpleNamespace(base_dir=base, guardrail=None, minimum_graded=20, write=True)
+                SimpleNamespace(
+                    base_dir=base, guardrail=None, minimum_graded=20, write=True
+                )
             )["calibration"]
             profile = calibration["league_profiles"]["芬超"]
             self.assertEqual(profile["sample_tier"], "anecdotal")
@@ -3319,31 +3399,35 @@ class MemoryStoreTests(unittest.TestCase):
             },
             total_result="win",
         )
-        primary.update({
-            "primary_market": "total",
-            "primary_pick": {
-                "market": "total",
-                "side": "over",
-                "line": 2.5,
-                "odds": 0.9,
-                "ev": 0.08,
-                "role": "primary",
-            },
-            "primary_result": "win",
-        })
+        primary.update(
+            {
+                "primary_market": "total",
+                "primary_pick": {
+                    "market": "total",
+                    "side": "over",
+                    "line": 2.5,
+                    "odds": 0.9,
+                    "ev": 0.08,
+                    "role": "primary",
+                },
+                "primary_result": "win",
+            }
+        )
         no_primary = reviewed_record("no-primary-learning")
-        no_primary.update({
-            "primary_market": None,
-            "primary_pick": None,
-            "primary_result": None,
-            "settlement_basis": {
-                "policy": "latest_active_prematch_version",
-                "analysis_stage": "lineup-check",
+        no_primary.update(
+            {
                 "primary_market": None,
                 "primary_pick": None,
-                "formal_picks": {},
-            },
-        })
+                "primary_result": None,
+                "settlement_basis": {
+                    "policy": "latest_active_prematch_version",
+                    "analysis_stage": "lineup-check",
+                    "primary_market": None,
+                    "primary_pick": None,
+                    "formal_picks": {},
+                },
+            }
+        )
         history = [primary, no_primary]
         with tempfile.TemporaryDirectory() as base:
             path = memory_store.data_path(base)
@@ -3380,12 +3464,8 @@ class MemoryStoreTests(unittest.TestCase):
             )
             saved = memory_store.load_history(path)
             by_id = {record["match_id"]: record for record in saved}
-            self.assertEqual(
-                by_id["primary-learning"]["learning_scope"], "primary"
-            )
-            self.assertTrue(
-                by_id["primary-learning"]["counts_toward_primary_record"]
-            )
+            self.assertEqual(by_id["primary-learning"]["learning_scope"], "primary")
+            self.assertTrue(by_id["primary-learning"]["counts_toward_primary_record"])
             self.assertEqual(
                 by_id["no-primary-learning"]["learning_scope"],
                 "no_primary_observation",
@@ -3423,25 +3503,62 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             defaults = memory_store.build_parser().parse_args(["due-lineup-check"])
             self.assertEqual((defaults.min_minutes, defaults.max_minutes), (0.0, 30.0))
-            memory_store.cmd_record(record_args(base, asian_side=None, primary_market="total"))
+            memory_store.cmd_record(
+                record_args(base, asian_side=None, primary_market="total")
+            )
             early = memory_store.cmd_due_lineup_check(
-                SimpleNamespace(base_dir=base, now="2026-07-21T18:45:00+09:00", min_minutes=0, max_minutes=30)
+                SimpleNamespace(
+                    base_dir=base,
+                    now="2026-07-21T18:45:00+09:00",
+                    min_minutes=0,
+                    max_minutes=30,
+                )
             )
             due = memory_store.cmd_due_lineup_check(
-                SimpleNamespace(base_dir=base, now="2026-07-21T19:00:00+09:00", min_minutes=0, max_minutes=30)
+                SimpleNamespace(
+                    base_dir=base,
+                    now="2026-07-21T19:00:00+09:00",
+                    min_minutes=0,
+                    max_minutes=30,
+                )
             )
             self.assertEqual(early["due"], [])
             self.assertEqual([item["match_id"] for item in due["due"]], ["1"])
 
     def test_legacy_migration_primary_roi_all_formal_and_calibration(self):
-        asian = lambda odds: {"side": "home", "line": 0.0, "odds": odds, "ev": 0.06, "market_signal": "aligned"}
-        total = lambda odds: {"side": "under", "line": 2.5, "odds": odds, "ev": 0.06, "market_signal": "aligned"}
-        half = {"market": "total", "side": "under", "line": 1.0, "odds": 1.06, "ev": 0.03, "market_signal": "unknown"}
+        def asian(odds):
+            return {
+                "side": "home",
+                "line": 0.0,
+                "odds": odds,
+                "ev": 0.06,
+                "market_signal": "aligned",
+            }
+
+        def total(odds):
+            return {
+                "side": "under",
+                "line": 2.5,
+                "odds": odds,
+                "ev": 0.06,
+                "market_signal": "aligned",
+            }
+
+        half = {
+            "market": "total",
+            "side": "under",
+            "line": 1.0,
+            "odds": 1.06,
+            "ev": 0.03,
+            "market_signal": "unknown",
+        }
         history = [
             reviewed_record("2907406", asian(0.98), "half_win", total(0.86), "win"),
             reviewed_record("2913667", asian(1.07), "loss", total(0.95), "win"),
             reviewed_record("2913668", asian(0.83), "loss", total(1.04), "loss"),
-            reviewed_record("2912210", asian(0.93), "win", total(0.89), "win", half, "loss"),
+            reviewed_record(
+                "2912210", asian(0.93), "win", total(0.89), "win", half, "loss"
+            ),
             reviewed_record("2924601", asian(1.07), "win", total(1.06), "win"),
             reviewed_record("2929664", None, None, total(0.87), "loss"),
         ]
@@ -3472,20 +3589,28 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIsNone(stats["primary"]["roi"])
             self.assertEqual(stats["primary_by_market"]["combined"]["matches"], 0)
             self.assertEqual(stats["excluded_from_strict_forward"]["matches"], 6)
-            self.assertEqual(stats["all_formal"]["combined"]["monetary_scope"], "primary_only")
+            self.assertEqual(
+                stats["all_formal"]["combined"]["monetary_scope"], "primary_only"
+            )
             self.assertEqual(stats["all_formal"]["combined"]["stake_units"], 0)
             self.assertEqual(stats["all_formal"]["combined"]["profit_units"], 0)
             self.assertIsNone(stats["all_formal"]["combined"]["roi"])
             self.assertEqual(stats["combined"], stats["all_formal"]["combined"])
 
             saved = memory_store.load_history(path)
-            self.assertEqual({r["match_id"]: r["revisions"] for r in saved}, before_revisions)
+            self.assertEqual(
+                {r["match_id"]: r["revisions"] for r in saved}, before_revisions
+            )
             for record in saved:
-                roles = [pick.get("role") for _, pick in memory_store.formal_picks(record)]
+                roles = [
+                    pick.get("role") for _, pick in memory_store.formal_picks(record)
+                ]
                 self.assertEqual(roles.count("primary"), 1)
 
             calibration = memory_store.cmd_calibrate(
-                SimpleNamespace(base_dir=base, guardrail=None, minimum_graded=20, write=True)
+                SimpleNamespace(
+                    base_dir=base, guardrail=None, minimum_graded=20, write=True
+                )
             )["calibration"]
             self.assertEqual(calibration["reviewed_matches"], 6)
             self.assertEqual(calibration["primary_record_matches"], 0)
@@ -3504,8 +3629,7 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertTrue(
                 any(
-                    "EV and no-vig edge are positive eligibility gates only"
-                    in item
+                    "EV and no-vig edge are positive eligibility gates only" in item
                     for item in calibration["guardrails"]
                 )
             )
@@ -3525,17 +3649,38 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )
             self.assertEqual(calibration["active_weight_adjustments"], {})
-            self.assertTrue(all(value is False for value in calibration["weight_change_eligible"].values()))
+            self.assertTrue(
+                all(
+                    value is False
+                    for value in calibration["weight_change_eligible"].values()
+                )
+            )
 
     def test_secondary_pick_is_ignored_by_all_statistics(self):
-        primary = {"side": "under", "line": 2.5, "odds": 0.90, "ev": 0.06, "role": "primary"}
-        secondary = {"side": "home", "line": 0.0, "odds": 0.84, "ev": 0.05, "role": "secondary"}
-        record = reviewed_record("secondary-no-money", secondary, "loss", primary, "win")
-        record.update({
-            "primary_market": "total",
-            "primary_pick": dict(primary, market="total"),
-            "primary_result": "win",
-        })
+        primary = {
+            "side": "under",
+            "line": 2.5,
+            "odds": 0.90,
+            "ev": 0.06,
+            "role": "primary",
+        }
+        secondary = {
+            "side": "home",
+            "line": 0.0,
+            "odds": 0.84,
+            "ev": 0.05,
+            "role": "secondary",
+        }
+        record = reviewed_record(
+            "secondary-no-money", secondary, "loss", primary, "win"
+        )
+        record.update(
+            {
+                "primary_market": "total",
+                "primary_pick": dict(primary, market="total"),
+                "primary_result": "win",
+            }
+        )
 
         stats = memory_store.calculate_stats([record])
 
@@ -3548,9 +3693,7 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertIsNone(stats["all_formal"]["combined"]["roi"])
         self.assertEqual(stats["all_formal"]["asian"]["profit_units"], 0)
         self.assertEqual(stats["all_formal"]["totals"]["profit_units"], 0)
-        self.assertEqual(
-            stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9
-        )
+        self.assertEqual(stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9)
 
     def test_small_sample_gate_boundaries_and_no_primary(self):
         with tempfile.TemporaryDirectory() as base:
@@ -3600,9 +3743,7 @@ class MemoryStoreTests(unittest.TestCase):
                 sub_eight["primary_selection_basis"],
                 "highest_independent_settlement_risk_confidence",
             )
-            self.assertEqual(
-                sub_eight["confidence_ranking_version"], "stability-v2"
-            )
+            self.assertEqual(sub_eight["confidence_ranking_version"], "stability-v2")
 
             no_pick = memory_store.cmd_record(
                 record_args(
@@ -3663,9 +3804,15 @@ class MemoryStoreTests(unittest.TestCase):
                 "htft_odds_format": "decimal",
                 "htft_market_complete": True,
                 "htft_market_probability": [
-                    "HH:0.08775", "HD:0.08775", "HA:0.08775",
-                    "DH:0.08775", "DD:0.298", "DA:0.08775",
-                    "AH:0.08775", "AD:0.08775", "AA:0.08775",
+                    "HH:0.08775",
+                    "HD:0.08775",
+                    "HA:0.08775",
+                    "DH:0.08775",
+                    "DD:0.298",
+                    "DA:0.08775",
+                    "AH:0.08775",
+                    "AD:0.08775",
+                    "AA:0.08775",
                 ],
                 "htft_market_source": "https://example.test/htft",
                 "htft_market_collected_at": "2026-07-21T19:00:00+09:00",
@@ -3684,9 +3831,15 @@ class MemoryStoreTests(unittest.TestCase):
                         **{
                             **htft_overrides,
                             "htft_market_probability": [
-                                "HH:0.08625", "HD:0.08625", "HA:0.08625",
-                                "DH:0.08625", "DD:0.31", "DA:0.08625",
-                                "AH:0.08625", "AD:0.08625", "AA:0.08625",
+                                "HH:0.08625",
+                                "HD:0.08625",
+                                "HA:0.08625",
+                                "DH:0.08625",
+                                "DD:0.31",
+                                "DA:0.08625",
+                                "AH:0.08625",
+                                "AD:0.08625",
+                                "AA:0.08625",
                             ],
                         },
                     )
@@ -3743,15 +3896,21 @@ class MemoryStoreTests(unittest.TestCase):
                     **candidates_v2,
                 )
             )["record"]
-            self.assertGreater(accepted["goal_range_pick"]["ev"], accepted["btts_pick"]["ev"])
+            self.assertGreater(
+                accepted["goal_range_pick"]["ev"], accepted["btts_pick"]["ev"]
+            )
             self.assertEqual(accepted["btts_pick"]["confidence_rank"], 1)
-            gates = accepted["primary_pick"]["confidence_components"]["eligibility_gates"]
+            gates = accepted["primary_pick"]["confidence_components"][
+                "eligibility_gates"
+            ]
             self.assertFalse(gates["contributes_to_score"])
             self.assertEqual(accepted["confidence_ranking_version"], "stability-v2")
 
     def test_against_deep_favorite_and_total_evidence_gates(self):
         with tempfile.TemporaryDirectory() as base:
-            with self.assertRaisesRegex(ValueError, "adverse-signal EV must be at least 0.08"):
+            with self.assertRaisesRegex(
+                ValueError, "adverse-signal EV must be at least 0.08"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -3772,7 +3931,9 @@ class MemoryStoreTests(unittest.TestCase):
                         total_edge_pp=3.9,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "bookmaker count must be at least 5"):
+            with self.assertRaisesRegex(
+                ValueError, "bookmaker count must be at least 5"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -3783,7 +3944,9 @@ class MemoryStoreTests(unittest.TestCase):
                         total_firm_count=4,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "independent lineup or fundamental"):
+            with self.assertRaisesRegex(
+                ValueError, "independent lineup or fundamental"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -3835,7 +3998,9 @@ class MemoryStoreTests(unittest.TestCase):
                     primary_change_reason="confirmed information invalidated the only formal direction",
                 )
             )["record"]
-            self.assertEqual(cancelled["primary_change"]["decision"], "cancelled_to_none")
+            self.assertEqual(
+                cancelled["primary_change"]["decision"], "cancelled_to_none"
+            )
             with self.assertRaisesRegex(ValueError, "immutable"):
                 memory_store.cmd_record(
                     record_args(
@@ -3862,26 +4027,20 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )
             self.assertIsNone(reviewed["record"]["primary_result"])
-            self.assertIsNone(
-                reviewed["record"]["settlement_basis"]["primary_market"]
-            )
+            self.assertIsNone(reviewed["record"]["settlement_basis"]["primary_market"])
             self.assertEqual(reviewed["stats"]["reviewed_matches"], 1)
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
             self.assertEqual(
                 reviewed["record"]["learning_scope"],
                 "no_primary_observation",
             )
-            self.assertFalse(
-                reviewed["record"]["counts_toward_primary_record"]
-            )
+            self.assertFalse(reviewed["record"]["counts_toward_primary_record"])
             self.assertEqual(
                 reviewed["record"]["learning_sample"]["scope"],
                 "no_primary_observation",
             )
             self.assertEqual(reviewed["stats"]["primary_record_matches"], 0)
-            self.assertEqual(
-                reviewed["stats"]["no_primary_reviewed_matches"], 1
-            )
+            self.assertEqual(reviewed["stats"]["no_primary_reviewed_matches"], 1)
             self.assertEqual(
                 reviewed["stats"]["learning_samples"],
                 {
@@ -3975,9 +4134,9 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.cmd_record(
                     record_args(
                         base,
-                    match_id="goal-edge-zero",
-                    goal_range_edge_pp=0.0,
-                    goal_range_market_probability=0.45,
+                        match_id="goal-edge-zero",
+                        goal_range_edge_pp=0.0,
+                        goal_range_market_probability=0.45,
                         **{
                             key: value
                             for key, value in goal.items()
@@ -4067,7 +4226,10 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(created["btts_pick"]["role"], "secondary")
             self.assertTrue(created["btts_pick"]["market_complete"])
             self.assertEqual(
-                sum(pick["role"] == "primary" for _, pick in memory_store.formal_picks(created)),
+                sum(
+                    pick["role"] == "primary"
+                    for _, pick in memory_store.formal_picks(created)
+                ),
                 1,
             )
 
@@ -4090,9 +4252,7 @@ class MemoryStoreTests(unittest.TestCase):
                     btts_market_complete=True,
                 )
             )["record"]
-            self.assertEqual(
-                hong_kong["primary_pick"]["odds_format"], "hong_kong"
-            )
+            self.assertEqual(hong_kong["primary_pick"]["odds_format"], "hong_kong")
             with self.assertRaisesRegex(ValueError, "EV does not match"):
                 memory_store.cmd_record(
                     record_args(
@@ -4208,7 +4368,9 @@ class MemoryStoreTests(unittest.TestCase):
                         },
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "corner_total EV must be greater than 0"):
+            with self.assertRaisesRegex(
+                ValueError, "corner_total EV must be greater than 0"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4240,9 +4402,7 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )["record"]
             self.assertLess(sub_eight_corner["primary_pick"]["ev"], 0.08)
-            self.assertEqual(
-                sub_eight_corner["primary_pick"]["confidence_rank"], 1
-            )
+            self.assertEqual(sub_eight_corner["primary_pick"]["confidence_rank"], 1)
             with self.assertRaisesRegex(ValueError, "corner-profile evidence"):
                 memory_store.cmd_record(
                     record_args(
@@ -4252,7 +4412,9 @@ class MemoryStoreTests(unittest.TestCase):
                         **corner,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "bookmaker count must be at least 3"):
+            with self.assertRaisesRegex(
+                ValueError, "bookmaker count must be at least 3"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4275,7 +4437,8 @@ class MemoryStoreTests(unittest.TestCase):
                         **{
                             key: value
                             for key, value in corner.items()
-                            if key not in {
+                            if key
+                            not in {
                                 "corner_total_market_signal",
                                 "corner_total_firm_count",
                             }
@@ -4290,6 +4453,7 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_new_market_settlement_stats_and_corner_score_requirement(self):
         self.enable_corner_formal_for_settlement_unit_test()
+
         def review(base, match_id, home, away, **extra):
             values = {
                 "base_dir": base,
@@ -4341,9 +4505,9 @@ class MemoryStoreTests(unittest.TestCase):
             goal_review = review(base, "goal", 1, 2)
             self.assertEqual(goal_review["record"]["primary_result"], "win")
             self.assertEqual(
-                goal_review["record"]["settlement_basis"]["formal_picks"][
-                    "goal_range"
-                ]["selection"],
+                goal_review["record"]["settlement_basis"]["formal_picks"]["goal_range"][
+                    "selection"
+                ],
                 "2-3",
             )
             self.assertIsNone(goal_review["record"]["btts_result"])
@@ -4491,19 +4655,34 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(
             memory_store.settle_goal_range({"selection": "2-3"}, 2, 2), "loss"
         )
+        self.assertEqual(
+            memory_store._forward_observed_settlement_state(
+                {"final_score": "2-1", "half_time_score": "1-0"},
+                {
+                    "market_identity": {
+                        "family": "goal_range",
+                        "period": "full_time",
+                        "line": None,
+                        "price_outcomes": ["0-1", "2-3", "4-6", "7+"],
+                    },
+                    "settlement_reference_outcome": None,
+                },
+                {
+                    "settlement_states": ["0-1", "2-3", "4-6", "7+"],
+                    "settlement_semantics": "categorical",
+                },
+            ),
+            "2-3",
+        )
         self.assertEqual(memory_store.settle_btts({"side": "yes"}, 1, 1), "win")
         self.assertEqual(memory_store.settle_btts({"side": "no"}, 2, 0), "win")
         self.assertEqual(memory_store.settle_btts({"side": "no"}, 1, 1), "loss")
         self.assertEqual(
-            memory_store.settle_corner_total(
-                {"side": "over", "line": 10.75}, 6, 5
-            ),
+            memory_store.settle_corner_total({"side": "over", "line": 10.75}, 6, 5),
             "half_win",
         )
         self.assertEqual(
-            memory_store.settle_corner_handicap(
-                {"side": "home", "line": -2.0}, 7, 5
-            ),
+            memory_store.settle_corner_handicap({"side": "home", "line": -2.0}, 7, 5),
             "push",
         )
         self.assertEqual(memory_store.settlement_profit("win", 0.90), 0.90)
@@ -4511,9 +4690,7 @@ class MemoryStoreTests(unittest.TestCase):
             memory_store.settlement_profit("half_win", 0.92, "hong_kong"),
             0.46,
         )
-        self.assertEqual(
-            memory_store.settlement_profit("push", 1.95, "decimal"), 0.0
-        )
+        self.assertEqual(memory_store.settlement_profit("push", 1.95, "decimal"), 0.0)
         self.assertAlmostEqual(
             memory_store.settlement_profit("win", 1.90, "decimal"), 0.90
         )
@@ -4578,18 +4755,14 @@ class MemoryStoreTests(unittest.TestCase):
                 accepted["primary_change"]["decision"], "worse_line_replaced"
             )
             self.assertEqual(len(accepted["revisions"]), 1)
-            self.assertEqual(
-                accepted["revisions"][0]["corner_total_pick"]["line"], 9.5
-            )
+            self.assertEqual(accepted["revisions"][0]["corner_total_pick"]["line"], 9.5)
             self.assertIn("goal_range_pick", accepted["revisions"][0])
             self.assertIn(
                 "corner_handicap",
                 memory_store.settlement_basis_for_record(accepted)["formal_picks"],
             )
             self.assertEqual(
-                memory_store.pick_identity(
-                    "goal_range", {"selection": "2-3"}
-                ),
+                memory_store.pick_identity("goal_range", {"selection": "2-3"}),
                 ("goal_range", "2-3"),
             )
 
@@ -4700,17 +4873,13 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(htft["diagnostics"]["graded_observations"], 1)
             self.assertEqual(htft["diagnostics"]["top1_hits"], 0)
             self.assertEqual(htft["diagnostics"]["top2_hits"], 1)
-            self.assertEqual(
-                htft["gate_funnel"]["market_policy_enabled"]["failed"], 2
-            )
-            self.assertEqual(
-                htft["gate_funnel"]["scenario_stability"]["passed"], 2
-            )
+            self.assertEqual(htft["gate_funnel"]["market_policy_enabled"]["failed"], 2)
+            self.assertEqual(htft["gate_funnel"]["scenario_stability"]["passed"], 2)
             league_key = memory_store.normalize_league_name("测试联赛")
             self.assertEqual(
-                reviewed["stats"]["leagues"][league_key][
-                    "observation_gate_funnel"
-                ]["markets"]["htft"]["candidate_count"],
+                reviewed["stats"]["leagues"][league_key]["observation_gate_funnel"][
+                    "markets"
+                ]["htft"]["candidate_count"],
                 2,
             )
 
@@ -4729,18 +4898,16 @@ class MemoryStoreTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(
-                calibration["league_profiles"][league_key][
-                    "observation_gate_funnel"
-                ]["markets"]["htft"]["candidate_count"],
+                calibration["league_profiles"][league_key]["observation_gate_funnel"][
+                    "markets"
+                ]["htft"]["candidate_count"],
                 2,
             )
             self.assertFalse(calibration["parameter_change_authorized"])
 
     def test_htft_observation_rejects_ranker_that_does_not_match_model_top_two(self):
         with tempfile.TemporaryDirectory() as base:
-            model_file, ranker_file = write_htft_observation_files(
-                base, "htft-tamper"
-            )
+            model_file, ranker_file = write_htft_observation_files(base, "htft-tamper")
             ranker = json.loads(Path(ranker_file).read_text(encoding="utf-8"))
             ranker["scenarios"][0]["selection"] = "DD"
             Path(ranker_file).write_text(
@@ -4835,9 +5002,7 @@ class MemoryStoreTests(unittest.TestCase):
                 half_time_anchor=anchor,
                 drop_ranker_anchor=True,
             )
-            with self.assertRaisesRegex(
-                ValueError, "requires matching anchor_context"
-            ):
+            with self.assertRaisesRegex(ValueError, "requires matching anchor_context"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4868,9 +5033,9 @@ class MemoryStoreTests(unittest.TestCase):
                 half_time_anchor=anchor,
             )
             model = json.loads(Path(model_file).read_text(encoding="utf-8"))
-            model["provenance"]["marginal_targets"]["half_time"][
-                "captured_at"
-            ] = "2026-07-21T09:50:00Z"
+            model["provenance"]["marginal_targets"]["half_time"]["captured_at"] = (
+                "2026-07-21T09:50:00Z"
+            )
             model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
             Path(model_file).write_text(
                 json.dumps(model, ensure_ascii=False), encoding="utf-8"
@@ -4902,9 +5067,9 @@ class MemoryStoreTests(unittest.TestCase):
                 half_time_anchor=anchor,
             )
             model = json.loads(Path(model_file).read_text(encoding="utf-8"))
-            model["provenance"]["marginal_targets"]["half_time"][
-                "source"
-            ] = "https://example.test/different-source"
+            model["provenance"]["marginal_targets"]["half_time"]["source"] = (
+                "https://example.test/different-source"
+            )
             model["prediction_hash"] = memory_store.canonical_prediction_hash(model)
             Path(model_file).write_text(
                 json.dumps(model, ensure_ascii=False), encoding="utf-8"
@@ -4986,11 +5151,11 @@ class MemoryStoreTests(unittest.TestCase):
                     message="must be strictly before kickoff",
                 )
 
-    def test_htft_observation_without_half_score_stays_ungraded_and_never_blocks_review(self):
+    def test_htft_observation_without_half_score_stays_ungraded_and_never_blocks_review(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as base:
-            model_file, ranker_file = write_htft_observation_files(
-                base, "htft-no-half"
-            )
+            model_file, ranker_file = write_htft_observation_files(base, "htft-no-half")
             memory_store.cmd_record(
                 record_args(
                     base,
@@ -5019,15 +5184,13 @@ class MemoryStoreTests(unittest.TestCase):
                 )
             )
             diagnostic = reviewed["record"]["observation_diagnostics"][0]
-            self.assertEqual(
-                diagnostic["status"], "ungraded_missing_half_time_score"
-            )
+            self.assertEqual(diagnostic["status"], "ungraded_missing_half_time_score")
             self.assertIsNone(diagnostic["top2_hit"])
             self.assertEqual(reviewed["stats"]["primary"]["matches"], 0)
             self.assertEqual(
-                reviewed["stats"]["observation_gate_funnel"]["markets"][
-                    "htft"
-                ]["diagnostics"]["ungraded_observations"],
+                reviewed["stats"]["observation_gate_funnel"]["markets"]["htft"][
+                    "diagnostics"
+                ]["ungraded_observations"],
                 1,
             )
 
@@ -5079,17 +5242,13 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(metrics["sample_count"], 2)
         self.assertEqual(metrics["excluded_count"], 0)
         self.assertEqual(metrics["excluded_reasons"], {})
-        self.assertAlmostEqual(
-            metrics["one_x_two_multiclass_brier"], 0.5125
-        )
+        self.assertAlmostEqual(metrics["one_x_two_multiclass_brier"], 0.5125)
         self.assertAlmostEqual(
             metrics["one_x_two_multiclass_log_loss"], expected_log_loss
         )
         league_metrics = stats["leagues"][league_key]["one_x_two_metrics"]
         self.assertEqual(league_metrics["sample_count"], 2)
-        self.assertAlmostEqual(
-            league_metrics["one_x_two_multiclass_brier"], 0.5125
-        )
+        self.assertAlmostEqual(league_metrics["one_x_two_multiclass_brier"], 0.5125)
         self.assertEqual(stats["excluded_from_strict_forward"]["matches"], 1)
         self.assertEqual(stats["exact_score_diagnostics"]["samples"], 2)
         self.assertEqual(stats["exact_score_diagnostics"]["excluded"], 0)
@@ -5264,9 +5423,7 @@ class MemoryStoreTests(unittest.TestCase):
             stats["legacy_or_quarantined"]["primary_by_market"]["totals"]["matches"],
             1,
         )
-        self.assertEqual(
-            stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9
-        )
+        self.assertEqual(stats["legacy_or_quarantined"]["primary"]["profit_units"], 0.9)
         self.assertEqual(
             memory_store.primary_snapshot_for_stats(record),
             ("total", frozen_total),
@@ -5288,13 +5445,96 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(legacy_stats["primary_by_market"]["asian"]["matches"], 0)
         self.assertEqual(legacy_stats["primary"]["profit_units"], 0)
         self.assertEqual(
-            legacy_stats["legacy_or_quarantined"]["primary_by_market"]["asian"]["matches"],
+            legacy_stats["legacy_or_quarantined"]["primary_by_market"]["asian"][
+                "matches"
+            ],
             1,
         )
         self.assertEqual(
             legacy_stats["legacy_or_quarantined"]["primary"]["profit_units"],
             -1.0,
         )
+
+    def test_forward_bound_review_rejects_missing_replayable_source_evidence(self):
+        with tempfile.TemporaryDirectory() as base:
+            recorded = memory_store.cmd_record(record_args(base, match_id="source-gap"))
+            record = recorded["record"]
+            policy = {
+                "schema_version": memory_store.forward_policy.LEGACY_POLICY_SCHEMA_VERSION,
+                "artifact_type": "soccer_prediction_policy_freeze",
+                "created_at": "2026-07-20T00:00:00+00:00",
+                "code": {
+                    "commit": "a" * 40,
+                    "protected_files": {"SKILL.md": "sha256:" + "1" * 64},
+                },
+                "data": {
+                    "manifest_path": "manifest.json",
+                    "file_sha256": "sha256:" + "2" * 64,
+                    "declared_manifest_hash": "sha256:" + "3" * 64,
+                },
+                "models": {
+                    "registry_path": "registry.json",
+                    "file_sha256": "sha256:" + "4" * 64,
+                    "declared_registry_hash": "sha256:" + "5" * 64,
+                },
+                "policy": {
+                    "market_policy_version": "test",
+                    "market_status": {"total": "formal"},
+                    "selector": {"version": "test"},
+                    "release_thresholds": {"minimum_firms": 1},
+                    "candidate_evaluation": {"schema_version": "test"},
+                    "display_policy": {"joint_event_count": 2},
+                },
+                "confirmation_contract": {
+                    "retrospective_records_allowed": False,
+                    "parameter_or_threshold_changes_allowed": False,
+                    "prediction_affecting_bugfix_starts_new_cohort": True,
+                    "all_candidates_abstentions_and_unavailable_markets_required": True,
+                    "executable_timestamped_prices_required_for_market_comparison": True,
+                    "promotion_is_manual": True,
+                    "promotion_requirements": ["proper_scores"],
+                },
+            }
+            policy["policy_hash"] = memory_store.forward_policy._hash_json(policy)
+            policy["policy_id"] = (
+                "untouched-live-forward-" + policy["policy_hash"].split(":", 1)[1][:16]
+            )
+            binding = {
+                "schema_version": memory_store.forward_policy.RECORD_BINDING_SCHEMA_VERSION,
+                "cohort_id": "test-cohort",
+                "cohort_hash": "sha256:" + "6" * 64,
+                "cohort_starts_at": "2026-07-20T00:01:00+00:00",
+                "policy_id": policy["policy_id"],
+                "policy_hash": policy["policy_hash"],
+                "policy_snapshot": policy,
+                "recorded_code_commit": "a" * 40,
+                "archived_at": record["updated_at"],
+                "untouched_confirmation_eligible": True,
+            }
+            binding["binding_hash"] = memory_store.forward_policy._hash_json(binding)
+            record["forward_policy_binding"] = binding
+            record["source_evidence_audit"] = None
+            memory_store.save_history(memory_store.data_path(base), [record])
+
+            with self.assertRaisesRegex(
+                ValueError, "require replayable archived source evidence"
+            ):
+                review_command(
+                    SimpleNamespace(
+                        base_dir=base,
+                        verified_finished=True,
+                        verification_source="https://example.test/final",
+                        verification_collected_at="2026-07-21T21:00:00+09:00",
+                        match_id="source-gap",
+                        home_score=1,
+                        away_score=0,
+                        half_home_score=0,
+                        half_away_score=0,
+                        home_corners=None,
+                        away_corners=None,
+                        key_learning="missing source evidence must fail closed",
+                    )
+                )
 
 
 if __name__ == "__main__":

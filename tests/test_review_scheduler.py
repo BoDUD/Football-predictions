@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 import unittest
-
+from datetime import datetime, timedelta, tzinfo
+from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "review_scheduler.py"
 SPEC = importlib.util.spec_from_file_location("soccer_review_scheduler", SCRIPT)
 assert SPEC and SPEC.loader
 review_scheduler = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review_scheduler)
+
+
+class FoldAwareEastern(tzinfo):
+    """Minimal deterministic DST fold used without relying on host tzdata."""
+
+    def utcoffset(self, value):
+        return timedelta(hours=-5 if value is not None and value.fold else -4)
+
+    def dst(self, value):
+        return timedelta(0 if value is not None and value.fold else 1)
+
+    def tzname(self, value):
+        return "EST" if value is not None and value.fold else "EDT"
 
 
 def archived_record(
@@ -117,6 +130,14 @@ class ReviewSchedulerTests(unittest.TestCase):
                 attempt["automation_rrule"],
                 "RRULE:FREQ=DAILY;BYHOUR=13;BYMINUTE=30;COUNT=1",
             )
+            schedule_spec = attempt["automation_schedule_spec"]
+            self.assertEqual(
+                schedule_spec["schema_version"],
+                review_scheduler.EXACT_SCHEDULE_SPEC_VERSION,
+            )
+            self.assertEqual(schedule_spec["run_at_utc"], attempt["run_at_utc"])
+            self.assertEqual(schedule_spec["dtstart_utc"], schedule_spec["until_utc"])
+            self.assertEqual(schedule_spec["count"], 1)
 
             duplicate = review_scheduler.cmd_register(register_args(base))
             self.assertTrue(duplicate["duplicate_ignored"])
@@ -192,9 +213,15 @@ class ReviewSchedulerTests(unittest.TestCase):
                 SimpleNamespace(
                     **common,
                     automation_rrule=attempt["automation_rrule"],
+                    platform_next_run="2026-07-22T22:30:00+09:00",
                 )
             )
-            self.assertTrue(attached["task"]["automation_refs"][0]["schedule_verified"])
+            attached_ref = attached["task"]["automation_refs"][0]
+            self.assertTrue(attached_ref["schedule_verified"])
+            self.assertTrue(attached_ref["platform_next_run_verified"])
+            self.assertEqual(
+                attached_ref["platform_next_run_utc"], "2026-07-22T13:30:00+00:00"
+            )
 
             duplicate_plan = review_scheduler.cmd_automation_plan(
                 SimpleNamespace(
@@ -218,6 +245,41 @@ class ReviewSchedulerTests(unittest.TestCase):
                 )
             )
             self.assertTrue(duplicate["duplicate_ignored"])
+
+    def test_exact_schedule_spec_preserves_dst_fold_as_one_utc_instant(self):
+        local = datetime(
+            2026,
+            11,
+            1,
+            1,
+            30,
+            tzinfo=FoldAwareEastern(),
+            fold=1,
+        )
+        spec = review_scheduler.exact_utc_schedule_spec(local)
+        self.assertEqual(spec["run_at_utc"], "2026-11-01T06:30:00+00:00")
+        self.assertEqual(spec["dtstart_utc"], spec["until_utc"])
+        self.assertEqual(spec["count"], 1)
+
+    def test_attach_rejects_platform_next_run_after_missed_hour(self):
+        with tempfile.TemporaryDirectory() as base:
+            write_history(base)
+            task = review_scheduler.cmd_register(register_args(base))["task"]
+            attempt = task["attempts"][0]
+            with self.assertRaisesRegex(
+                ValueError, "does not exactly match run_at_utc"
+            ):
+                review_scheduler.cmd_attach_automation(
+                    SimpleNamespace(
+                        base_dir=base,
+                        match_id="42",
+                        attempt_id="review-1",
+                        automation_id="review-auto-1",
+                        automation_name="Soccer review 42 attempt 1",
+                        automation_rrule=attempt["automation_rrule"],
+                        platform_next_run="2026-07-23T13:30:00+00:00",
+                    )
+                )
 
     def test_claim_lease_and_due_support_executor_catch_up(self):
         with tempfile.TemporaryDirectory() as base:
@@ -359,9 +421,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 )
             )
             self.assertTrue(reclaimed["claimed"])
-            self.assertEqual(
-                reclaimed["task"]["claimed_thread_id"], "thread-latest"
-            )
+            self.assertEqual(reclaimed["task"]["claimed_thread_id"], "thread-latest")
 
             set_history_status(base, "reviewed")
             result_artifact = write_result_artifact(base)
@@ -390,9 +450,7 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             set_history_status(base, "reviewed")
             artifact = Path(base) / "review-result.txt"
             args = SimpleNamespace(
@@ -476,9 +534,7 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             first = review_scheduler.cmd_wait(
                 SimpleNamespace(
                     base_dir=base,
@@ -517,9 +573,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                 ["review-2"],
             )
 
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T23:05:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T23:05:00+09:00"))
             second = review_scheduler.cmd_wait(
                 SimpleNamespace(
                     base_dir=base,
@@ -548,9 +602,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                     automation_rrule=attempt["automation_rrule"],
                 )
             )
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             follow_up = review_scheduler.cmd_wait(
                 SimpleNamespace(
                     base_dir=base,
@@ -570,9 +622,7 @@ class ReviewSchedulerTests(unittest.TestCase):
                     automation_rrule=follow_up["automation_rrule"],
                 )
             )
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T23:05:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T23:05:00+09:00"))
             set_history_status(base, "reviewed")
 
             synced = review_scheduler.cmd_due(
@@ -690,9 +740,7 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             state_file = review_scheduler.state_path(base)
             state = json.loads(state_file.read_text(encoding="utf-8"))
             state["tasks"]["42"].pop("claimed_thread_id")
@@ -755,13 +803,13 @@ class ReviewSchedulerTests(unittest.TestCase):
                     )
                 )
 
-    def test_cleanup_recovery_waits_for_metadata_grace_but_complete_tuple_is_immediate(self):
+    def test_cleanup_recovery_waits_for_metadata_grace_but_complete_tuple_is_immediate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             set_history_status(base, "reviewed")
 
             within_grace = review_scheduler.cmd_cleanup_due(
@@ -788,9 +836,7 @@ class ReviewSchedulerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             write_history(base)
             review_scheduler.cmd_register(register_args(base))
-            review_scheduler.cmd_claim(
-                claim_args(base, "2026-07-22T22:30:00+09:00")
-            )
+            review_scheduler.cmd_claim(claim_args(base, "2026-07-22T22:30:00+09:00"))
             set_history_status(base, "reviewed")
             artifact = write_result_artifact(base)
             review_scheduler.cmd_complete(

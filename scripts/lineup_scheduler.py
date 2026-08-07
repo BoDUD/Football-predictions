@@ -4,22 +4,29 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import sys
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
 
 DEFAULT_USER_TIMEZONE = "Asia/Tokyo"
 DEFAULT_SOURCE_TIMEZONE = "Asia/Shanghai"
 RETRY_MINUTES = (30, 25, 20, 15, 10, 5, 2)
-TERMINAL_STATUSES = {"completed", "expired", "started", "finished", "cancelled", "postponed"}
+TERMINAL_STATUSES = {
+    "completed",
+    "expired",
+    "started",
+    "finished",
+    "cancelled",
+    "postponed",
+}
 RESULT_DELIVERY_STATUSES = {"not_ready", "pending", "delivered"}
 RESULT_METADATA_GRACE = timedelta(minutes=10)
+EXACT_SCHEDULE_SPEC_VERSION = "soccer-exact-utc-once/1.0.0"
 
 
 def configure_stdio() -> None:
@@ -79,7 +86,9 @@ def load_json(path: Path, default: Any) -> Any:
 def save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     temp.replace(path)
 
 
@@ -119,7 +128,9 @@ def history_record(base_dir: str | None, match_id: str) -> dict[str, Any] | None
     history = load_json(history_path(base_dir), [])
     if not isinstance(history, list):
         raise ValueError("history.json must contain an array")
-    return next((item for item in history if str(item.get("match_id")) == str(match_id)), None)
+    return next(
+        (item for item in history if str(item.get("match_id")) == str(match_id)), None
+    )
 
 
 def retry_plan(kickoff: datetime, local_zone) -> list[dict[str, Any]]:
@@ -127,13 +138,17 @@ def retry_plan(kickoff: datetime, local_zone) -> list[dict[str, Any]]:
     for minutes in RETRY_MINUTES:
         run_at = kickoff - timedelta(minutes=minutes)
         run_at_utc = run_at.astimezone(timezone.utc)
+        automation_rrule = codex_rrule_utc(run_at_utc)
         plan.append(
             {
                 "minutes_before_kickoff": minutes,
                 "run_at": iso_seconds(run_at.astimezone(local_zone)),
                 "run_at_utc": iso_seconds(run_at_utc),
                 "automation_timezone": "UTC",
-                "automation_rrule": codex_rrule_utc(run_at_utc),
+                "automation_rrule": automation_rrule,
+                "automation_schedule_spec": exact_utc_schedule_spec(
+                    run_at_utc, automation_rrule=automation_rrule
+                ),
                 "label": "T-30" if minutes == 30 else f"retry-T-{minutes}",
             }
         )
@@ -141,18 +156,40 @@ def retry_plan(kickoff: datetime, local_zone) -> list[dict[str, Any]]:
 
 
 def codex_rrule_utc(run_at: datetime) -> str:
-    """Return the unanchored one-shot RRULE expected by immediate Codex creates.
+    """Return the executor-compatible RRULE portion of an exact schedule spec.
 
     Codex immediate automation creation rejects DTSTART. Its local executor treats
     an unanchored BYHOUR/BYMINUTE rule as UTC, so converting the absolute instant
     here prevents callers from accidentally scheduling a Japan wall-clock hour as
-    a UTC hour.
+    a UTC hour.  The date is bound separately by :func:`exact_utc_schedule_spec`
+    and may be confirmed against the platform's returned next-run timestamp.
     """
     utc_run_at = run_at.astimezone(timezone.utc)
     return (
         "RRULE:FREQ=DAILY;"
         f"BYHOUR={utc_run_at.hour};BYMINUTE={utc_run_at.minute};COUNT=1"
     )
+
+
+def exact_utc_schedule_spec(
+    run_at: datetime, *, automation_rrule: str | None = None
+) -> dict[str, Any]:
+    """Return a date-bound, machine-verifiable one-time UTC schedule contract."""
+
+    run_at_utc = run_at.astimezone(timezone.utc).replace(microsecond=0)
+    rrule = automation_rrule or codex_rrule_utc(run_at_utc)
+    timestamp = iso_seconds(run_at_utc)
+    return {
+        "schema_version": EXACT_SCHEDULE_SPEC_VERSION,
+        "kind": "one_time",
+        "timezone": "UTC",
+        "run_at_utc": timestamp,
+        "dtstart_utc": timestamp,
+        "until_utc": timestamp,
+        "count": 1,
+        "automation_rrule": rrule,
+        "platform_next_run_must_equal_run_at_utc": True,
+    }
 
 
 def ensure_retry_plan(task: dict[str, Any]) -> None:
@@ -162,9 +199,30 @@ def ensure_retry_plan(task: dict[str, Any]) -> None:
     expected = retry_plan(kickoff, local_zone)
     current = task.get("retry_plan")
     if not isinstance(current, list) or any(
-        not isinstance(item, dict) or not item.get("automation_rrule") for item in current
+        not isinstance(item, dict)
+        or not item.get("run_at_utc")
+        or not item.get("automation_rrule")
+        for item in current
     ):
         task["retry_plan"] = expected
+        return
+    for item in current:
+        run_at_utc = parse_datetime(str(item["run_at_utc"]))
+        item["automation_schedule_spec"] = exact_utc_schedule_spec(
+            run_at_utc, automation_rrule=str(item["automation_rrule"])
+        )
+    attempts_by_label = {
+        str(item.get("label")): item for item in current if isinstance(item, dict)
+    }
+    for ref in task.get("automation_refs", []):
+        if not isinstance(ref, dict):
+            continue
+        attempt = attempts_by_label.get(str(ref.get("attempt_label")))
+        if not attempt:
+            continue
+        ref["automation_schedule_spec"] = dict(attempt["automation_schedule_spec"])
+        ref.setdefault("platform_next_run_utc", None)
+        ref.setdefault("platform_next_run_verified", False)
 
 
 def ensure_result_delivery(task: dict[str, Any]) -> dict[str, Any]:
@@ -178,9 +236,7 @@ def ensure_result_delivery(task: dict[str, Any]) -> dict[str, Any]:
         delivery = existing
     else:
         legacy_status = (
-            existing
-            if isinstance(existing, str)
-            else task.get("delivery_status")
+            existing if isinstance(existing, str) else task.get("delivery_status")
         )
         if cleanup_completed_at:
             status = "delivered"
@@ -205,8 +261,10 @@ def ensure_result_delivery(task: dict[str, Any]) -> dict[str, Any]:
         or ""
     )
     if status not in RESULT_DELIVERY_STATUSES:
-        status = "delivered" if cleanup_completed_at else (
-            "pending" if task_status in TERMINAL_STATUSES else "not_ready"
+        status = (
+            "delivered"
+            if cleanup_completed_at
+            else ("pending" if task_status in TERMINAL_STATUSES else "not_ready")
         )
     if cleanup_completed_at and status != "delivered":
         status = "delivered"
@@ -222,7 +280,11 @@ def ensure_result_delivery(task: dict[str, Any]) -> dict[str, Any]:
     delivery["result_artifact"] = result_artifact
     if result_artifact:
         task["result_artifact"] = result_artifact
-    if status == "delivered" and cleanup_completed_at and not delivery.get("delivered_at"):
+    if (
+        status == "delivered"
+        and cleanup_completed_at
+        and not delivery.get("delivered_at")
+    ):
         delivery["delivered_at"] = cleanup_completed_at
     delivery.setdefault("delivered_at", None)
     if legacy_inferred:
@@ -298,7 +360,9 @@ def set_result_delivery_pending(
     if result_delivery_status(delivery) != "delivered":
         delivery["delivery_status"] = "pending"
         task["delivery_status"] = "pending"
-        delivery["thread_id"] = thread_id or delivery.get("thread_id") or task.get("thread_id")
+        delivery["thread_id"] = (
+            thread_id or delivery.get("thread_id") or task.get("thread_id")
+        )
         delivery["result_artifact"] = (
             result_artifact
             or delivery.get("result_artifact")
@@ -319,7 +383,9 @@ def resolve_result_artifact(base_dir: str | None, value: Any) -> str:
         raise ValueError("Cannot complete lineup task without --result-artifact")
     artifact = Path(raw).expanduser()
     if not artifact.is_absolute():
-        base = Path(base_dir).expanduser().resolve() if base_dir else Path.cwd().resolve()
+        base = (
+            Path(base_dir).expanduser().resolve() if base_dir else Path.cwd().resolve()
+        )
         artifact = base / artifact
     artifact = artifact.resolve()
     if not artifact.exists():
@@ -331,7 +397,9 @@ def resolve_result_artifact(base_dir: str | None, value: Any) -> str:
     return str(artifact)
 
 
-def sync_terminal(task: dict[str, Any], record: dict[str, Any] | None, current: datetime) -> None:
+def sync_terminal(
+    task: dict[str, Any], record: dict[str, Any] | None, current: datetime
+) -> None:
     ensure_result_delivery(task)
     if task.get("status") in TERMINAL_STATUSES:
         return
@@ -361,7 +429,9 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
     path = state_path(args.base_dir)
     record = history_record(args.base_dir, args.match_id)
     if not record and not args.kickoff:
-        raise ValueError(f"No archived prediction for match {args.match_id}; pass --kickoff explicitly")
+        raise ValueError(
+            f"No archived prediction for match {args.match_id}; pass --kickoff explicitly"
+        )
     kickoff_text = args.kickoff or str(record.get("kickoff", ""))
     kickoff = parse_datetime(kickoff_text)
     local_zone = named_timezone(args.user_timezone)
@@ -385,7 +455,9 @@ def cmd_register(args: argparse.Namespace) -> dict[str, Any]:
                 ensure_result_delivery(existing)
                 return task_result(path, existing, duplicate_ignored=True)
             if existing.get("status") in TERMINAL_STATUSES:
-                raise ValueError(f"Refusing to replace terminal lineup task for match {args.match_id}")
+                raise ValueError(
+                    f"Refusing to replace terminal lineup task for match {args.match_id}"
+                )
         task = {
             "match_id": str(args.match_id),
             "home_team": args.home_team or (record or {}).get("home_team"),
@@ -497,7 +569,11 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Cannot attach an automation to a terminal lineup task")
         ensure_retry_plan(task)
         attempt = next(
-            (item for item in task["retry_plan"] if item["label"] == args.attempt_label),
+            (
+                item
+                for item in task["retry_plan"]
+                if item["label"] == args.attempt_label
+            ),
             None,
         )
         if not attempt:
@@ -507,6 +583,18 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
                 "Automation RRULE does not match the expected UTC rule for "
                 f"{args.attempt_label}: {attempt['automation_rrule']}"
             )
+        expected_run_at = parse_datetime(str(attempt["run_at_utc"]))
+        platform_next_run = str(getattr(args, "platform_next_run", "") or "").strip()
+        if platform_next_run:
+            parsed_platform_next_run = parse_datetime(platform_next_run)
+            if parsed_platform_next_run != expected_run_at:
+                raise ValueError(
+                    "Platform next-run does not exactly match run_at_utc: "
+                    f"expected {iso_seconds(expected_run_at)}"
+                )
+            platform_next_run_utc = iso_seconds(parsed_platform_next_run)
+        else:
+            platform_next_run_utc = None
         existing = next(
             (
                 ref
@@ -521,6 +609,12 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
                 and existing.get("automation_rrule") == args.automation_rrule
             )
             if same:
+                if platform_next_run_utc is not None:
+                    existing["platform_next_run_utc"] = platform_next_run_utc
+                    existing["platform_next_run_verified"] = True
+                    existing["automation_schedule_spec"] = exact_utc_schedule_spec(
+                        expected_run_at, automation_rrule=args.automation_rrule
+                    )
                 return task_result(path, task, duplicate_ignored=True)
             raise ValueError(f"Attempt {args.attempt_label} already has an automation")
         ref = {
@@ -531,6 +625,11 @@ def cmd_attach_automation(args: argparse.Namespace) -> dict[str, Any]:
             "run_at_utc": attempt["run_at_utc"],
             "automation_rrule": args.automation_rrule,
             "schedule_verified": True,
+            "automation_schedule_spec": exact_utc_schedule_spec(
+                expected_run_at, automation_rrule=args.automation_rrule
+            ),
+            "platform_next_run_utc": platform_next_run_utc,
+            "platform_next_run_verified": platform_next_run_utc is not None,
         }
         task["automation_refs"].append(ref)
         task["updated_at"] = iso_seconds(now_utc())
@@ -613,7 +712,9 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
     path = state_path(args.base_dir)
     record = history_record(args.base_dir, args.match_id)
     if not record or not record.get("lineup_rechecked_at"):
-        raise ValueError("Cannot complete lineup task before a lineup-check revision is archived")
+        raise ValueError(
+            "Cannot complete lineup task before a lineup-check revision is archived"
+        )
     current = parse_datetime(args.now) if args.now else now_utc()
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
@@ -642,7 +743,9 @@ def cmd_complete(args: argparse.Namespace) -> dict[str, Any]:
         task["result_artifact"] = result_artifact
         set_result_delivery_pending(task, thread_id, result_artifact)
         task["updated_at"] = iso_seconds(current)
-        return task_result(path, task, cleanup_automation_refs=task.get("automation_refs", []))
+        return task_result(
+            path, task, cleanup_automation_refs=task.get("automation_refs", [])
+        )
 
 
 def cmd_terminal(args: argparse.Namespace) -> dict[str, Any]:
@@ -680,7 +783,9 @@ def cmd_terminal(args: argparse.Namespace) -> dict[str, Any]:
         task["result_artifact"] = result_artifact
         set_result_delivery_pending(task, thread_id, result_artifact)
         task["updated_at"] = iso_seconds(current)
-        return task_result(path, task, cleanup_automation_refs=task.get("automation_refs", []))
+        return task_result(
+            path, task, cleanup_automation_refs=task.get("automation_refs", [])
+        )
 
 
 def cmd_mark_delivered(args: argparse.Namespace) -> dict[str, Any]:
@@ -692,11 +797,15 @@ def cmd_mark_delivered(args: argparse.Namespace) -> dict[str, Any]:
     with locked_state(path) as state:
         task = get_task(state, args.match_id)
         if task.get("status") not in TERMINAL_STATUSES:
-            raise ValueError("Cannot mark result delivered before the lineup task is terminal")
+            raise ValueError(
+                "Cannot mark result delivered before the lineup task is terminal"
+            )
         delivery = ensure_result_delivery(task)
         expected_thread_id = str(delivery.get("thread_id") or "").strip()
         if not expected_thread_id or supplied_thread_id != expected_thread_id:
-            raise ValueError("Delivered thread id does not match the archived lineup task")
+            raise ValueError(
+                "Delivered thread id does not match the archived lineup task"
+            )
         if delivery.get("result_artifact"):
             resolved_artifact = resolve_result_artifact(
                 args.base_dir, delivery.get("result_artifact")
@@ -735,7 +844,9 @@ def cmd_mark_cleaned(args: argparse.Namespace) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"Unknown automation id(s): {', '.join(unknown)}")
         if missing:
-            raise ValueError(f"Automation id(s) still require cleanup: {', '.join(missing)}")
+            raise ValueError(
+                f"Automation id(s) still require cleanup: {', '.join(missing)}"
+            )
         task["cleaned_automation_ids"] = sorted(supplied)
         task["cleanup_completed_at"] = iso_seconds(current)
         task["updated_at"] = iso_seconds(current)
@@ -755,14 +866,25 @@ def cmd_due(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             scheduled = parse_datetime(str(task["scheduled_for"]))
             kickoff = parse_datetime(str(task["kickoff"]))
-            lease = parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+            lease = (
+                parse_datetime(str(task["lease_until"]))
+                if task.get("lease_until")
+                else None
+            )
             if scheduled <= current < kickoff and (not lease or lease <= current):
                 item = dict(task)
                 item["catch_up"] = current > scheduled + timedelta(seconds=60)
-                item["minutes_to_kickoff"] = round((kickoff - current).total_seconds() / 60, 1)
+                item["minutes_to_kickoff"] = round(
+                    (kickoff - current).total_seconds() / 60, 1
+                )
                 due.append(item)
         due.sort(key=lambda item: item["kickoff"])
-        return {"ok": True, "path": str(path), "checked_at": iso_seconds(current), "due": due}
+        return {
+            "ok": True,
+            "path": str(path),
+            "checked_at": iso_seconds(current),
+            "due": due,
+        }
 
 
 def cmd_cleanup_due(args: argparse.Namespace) -> dict[str, Any]:
@@ -790,7 +912,9 @@ def cmd_cleanup_due(args: argparse.Namespace) -> dict[str, Any]:
                 metadata_complete = has_thread and (
                     has_artifact or delivery.get("legacy_inferred")
                 )
-                if not metadata_complete and result_metadata_grace_active(task, current):
+                if not metadata_complete and result_metadata_grace_active(
+                    task, current
+                ):
                     continue
                 next_action = (
                     "verify_delivery"
@@ -834,7 +958,11 @@ def cmd_automation_plan(args: argparse.Namespace) -> dict[str, Any]:
         kickoff = parse_datetime(str(task["kickoff"]))
         scheduled = parse_datetime(str(task["scheduled_for"]))
         terminal = task.get("status") in TERMINAL_STATUSES
-        lease = parse_datetime(str(task["lease_until"])) if task.get("lease_until") else None
+        lease = (
+            parse_datetime(str(task["lease_until"]))
+            if task.get("lease_until")
+            else None
+        )
         future_attempts = []
         if not terminal and current < kickoff:
             for item in task["retry_plan"]:
@@ -848,7 +976,9 @@ def cmd_automation_plan(args: argparse.Namespace) -> dict[str, Any]:
             "match_id": str(task["match_id"]),
             "status": task.get("status"),
             "catch_up_required": (
-                not terminal and scheduled <= current < kickoff and (not lease or lease <= current)
+                not terminal
+                and scheduled <= current < kickoff
+                and (not lease or lease <= current)
             ),
             "create_mode": "create",
             "rrule_timezone": "UTC",
@@ -867,18 +997,27 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
             return task_result(path, task)
         for task in state["tasks"].values():
             ensure_retry_plan(task)
-            sync_terminal(task, history_record(args.base_dir, str(task["match_id"])), current)
+            sync_terminal(
+                task, history_record(args.base_dir, str(task["match_id"])), current
+            )
         return {"ok": True, "path": str(path), "tasks": list(state["tasks"].values())}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-dir", help="Workspace root; defaults to current directory")
+    parser.add_argument(
+        "--base-dir", help="Workspace root; defaults to current directory"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    register = sub.add_parser("register", help="Register an idempotent T-30 schedule and retry plan")
+    register = sub.add_parser(
+        "register", help="Register an idempotent T-30 schedule and retry plan"
+    )
     register.add_argument("--match-id", required=True)
-    register.add_argument("--kickoff", help="Kickoff with explicit UTC offset; defaults to archived record")
+    register.add_argument(
+        "--kickoff",
+        help="Kickoff with explicit UTC offset; defaults to archived record",
+    )
     register.add_argument("--source-timezone", default=DEFAULT_SOURCE_TIMEZONE)
     register.add_argument("--user-timezone", default=DEFAULT_USER_TIMEZONE)
     register.add_argument("--home-team")
@@ -893,25 +1032,39 @@ def build_parser() -> argparse.ArgumentParser:
     sync_pending.add_argument("--user-timezone", default=DEFAULT_USER_TIMEZONE)
     sync_pending.add_argument("--now")
 
-    attach = sub.add_parser("attach-automation", help="Attach a Codex automation id for later cleanup")
+    attach = sub.add_parser(
+        "attach-automation", help="Attach a Codex automation id for later cleanup"
+    )
     attach.add_argument("--match-id", required=True)
     attach.add_argument("--automation-id", required=True)
     attach.add_argument("--automation-name", required=True)
     attach.add_argument("--attempt-label", required=True)
     attach.add_argument("--automation-rrule", required=True)
+    attach.add_argument(
+        "--platform-next-run",
+        "--platform-next-run-utc",
+        dest="platform_next_run",
+        help="Platform-reported next run; when supplied it must exactly equal run_at_utc",
+    )
 
     claim = sub.add_parser("claim", help="Atomically claim a due prematch lineup check")
     claim.add_argument("--match-id", required=True)
     claim.add_argument("--thread-id", required=True)
-    claim.add_argument("--now", help="ISO datetime with offset, for deterministic checks")
+    claim.add_argument(
+        "--now", help="ISO datetime with offset, for deterministic checks"
+    )
     claim.add_argument("--lease-minutes", type=float, default=4.0)
 
-    release = sub.add_parser("release", help="Release a failed claim so the next retry can run")
+    release = sub.add_parser(
+        "release", help="Release a failed claim so the next retry can run"
+    )
     release.add_argument("--match-id", required=True)
     release.add_argument("--reason", required=True)
     release.add_argument("--now")
 
-    complete = sub.add_parser("complete", help="Complete only after the lineup revision is archived")
+    complete = sub.add_parser(
+        "complete", help="Complete only after the lineup revision is archived"
+    )
     complete.add_argument("--match-id", required=True)
     complete.add_argument("--thread-id", required=True)
     complete.add_argument(
@@ -921,9 +1074,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     complete.add_argument("--now")
 
-    terminal = sub.add_parser("terminal", help="Stop retries for an explicit terminal match state")
+    terminal = sub.add_parser(
+        "terminal", help="Stop retries for an explicit terminal match state"
+    )
     terminal.add_argument("--match-id", required=True)
-    terminal.add_argument("--reason", choices=("started", "finished", "cancelled", "postponed", "expired"), required=True)
+    terminal.add_argument(
+        "--reason",
+        choices=("started", "finished", "cancelled", "postponed", "expired"),
+        required=True,
+    )
     terminal.add_argument("--thread-id", required=True)
     terminal.add_argument(
         "--result-artifact",
@@ -940,7 +1099,9 @@ def build_parser() -> argparse.ArgumentParser:
     delivered.add_argument("--thread-id", required=True)
     delivered.add_argument("--now")
 
-    cleaned = sub.add_parser("mark-cleaned", help="Record deletion/disablement of attached automations")
+    cleaned = sub.add_parser(
+        "mark-cleaned", help="Record deletion/disablement of attached automations"
+    )
     cleaned.add_argument("--match-id", required=True)
     cleaned.add_argument("--automation-id", action="append")
     cleaned.add_argument("--now")
@@ -993,7 +1154,10 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
         return 2
 
 

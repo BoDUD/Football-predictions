@@ -1,7 +1,19 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .ipynb_checkpoints/
+.coverage
+coverage.xml
+htmlcov/
+test-results-*.xml
+build/
+dist/
+*.egg-info/
+*.whl
+*.executed.ipynb
+executed*.ipynb
 
 # Local soccer-predict runtime state and private records.
 .codex/

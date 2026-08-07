@@ -10,20 +10,19 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import random
 import re
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 BASE = "https://m.titan007.com"
 ENDPOINT = BASE + "/Common/CommonInterface.ashx?type=1&isall=0&scheid={match_id}&lang=0"
@@ -68,7 +67,9 @@ class CornerCollectionError(ValueError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 def _canonical_json(value: Any) -> str:
@@ -107,16 +108,16 @@ def schedule_fixture_sha256(fixture: Mapping[str, Any]) -> str:
 def _fixture_binding(fixture: Mapping[str, Any]) -> dict[str, Any]:
     """Return the immutable schedule identity copied into every result row."""
 
-    binding = {
-        field: fixture.get(field) for field in CHECKPOINT_IDENTITY_FIELDS
-    }
+    binding = {field: fixture.get(field) for field in CHECKPOINT_IDENTITY_FIELDS}
     binding["schedule_fixture_sha256"] = schedule_fixture_sha256(fixture)
     return binding
 
 
 def _atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    data = (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -187,7 +188,9 @@ def _normalized_schedule_payload(
             raise CornerCollectionError(f"{source} matches[{index}] must be an object")
         match_id = str(raw.get("match_id") or "").strip()
         if not match_id.isdigit() or int(match_id) <= 0:
-            raise CornerCollectionError(f"{source} matches[{index}] has invalid match_id")
+            raise CornerCollectionError(
+                f"{source} matches[{index}] has invalid match_id"
+            )
         if match_id in seen_match_ids:
             raise CornerCollectionError(f"{source} has duplicate match_id {match_id}")
         seen_match_ids.add(match_id)
@@ -195,9 +198,11 @@ def _normalized_schedule_payload(
         row_source = f"{source} match {match_id}"
         local = _schedule_local_datetime(row.get("kickoff"), row_source)
         expected_epoch = int(local.timestamp())
-        expected_utc = local.astimezone(timezone.utc).isoformat(
-            timespec="seconds"
-        ).replace("+00:00", "Z")
+        expected_utc = (
+            local.astimezone(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
 
         existing_timezone = row.get("source_timezone")
         if (
@@ -253,9 +258,7 @@ def _normalized_schedule_payload(
         prior_regime = str(row.get("competition_regime") or "").strip()
         normalized_regime = normalize_competition_regime(row)
         if not normalized_regime:
-            raise CornerCollectionError(
-                f"{row_source} competition_regime is missing"
-            )
+            raise CornerCollectionError(f"{row_source} competition_regime is missing")
         if prior_regime != normalized_regime:
             row["competition_regime"] = normalized_regime
             counts["competition_regime_normalized"] += 1
@@ -330,7 +333,9 @@ def _as_nonnegative_int(value: Any, field: str) -> int:
     try:
         number = int(value)
     except (TypeError, ValueError) as error:
-        raise CornerCollectionError(f"{field} must be a non-negative integer") from error
+        raise CornerCollectionError(
+            f"{field} must be a non-negative integer"
+        ) from error
     if number < 0 or (isinstance(value, float) and value != number):
         raise CornerCollectionError(f"{field} must be a non-negative integer")
     return number
@@ -347,7 +352,9 @@ def _validate_schedule_kickoff(fixture: Mapping[str, Any], source: str) -> None:
     if utc_value.tzinfo is None or utc_value.utcoffset() is None:
         raise CornerCollectionError(f"{source} kickoff_utc must include a timezone")
     if int(utc_value.timestamp()) != epoch:
-        raise CornerCollectionError(f"{source} kickoff_epoch does not match kickoff_utc")
+        raise CornerCollectionError(
+            f"{source} kickoff_epoch does not match kickoff_utc"
+        )
 
     local_text = str(fixture.get("kickoff") or "").strip().replace("/", "-")
     try:
@@ -373,20 +380,28 @@ def load_schedule_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise CornerCollectionError(f"cannot read schedule bundle {path}: {error}") from error
+            raise CornerCollectionError(
+                f"cannot read schedule bundle {path}: {error}"
+            ) from error
         rows = payload.get("matches") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            raise CornerCollectionError(f"schedule bundle {path} must contain matches[]")
+            raise CornerCollectionError(
+                f"schedule bundle {path} must contain matches[]"
+            )
         for index, raw in enumerate(rows):
             if not isinstance(raw, dict):
-                raise CornerCollectionError(f"{path} matches[{index}] must be an object")
+                raise CornerCollectionError(
+                    f"{path} matches[{index}] must be an object"
+                )
             if raw.get("training_eligible") is False or raw.get("completed") is False:
                 continue
             raw = dict(raw)
             raw["competition_regime"] = normalize_competition_regime(raw)
             match_id = str(raw.get("match_id") or "").strip()
             if not match_id.isdigit():
-                raise CornerCollectionError(f"{path} matches[{index}] has invalid match_id")
+                raise CornerCollectionError(
+                    f"{path} matches[{index}] has invalid match_id"
+                )
             required = (
                 "competition_key",
                 "competition_regime",
@@ -399,9 +414,15 @@ def load_schedule_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
                 "away_team",
             )
             if any(not str(raw.get(field) or "").strip() for field in required):
-                raise CornerCollectionError(f"{path} match {match_id} has incomplete fixture metadata")
-            _as_nonnegative_int(raw.get("home_goals"), f"{path} match {match_id} home_goals")
-            _as_nonnegative_int(raw.get("away_goals"), f"{path} match {match_id} away_goals")
+                raise CornerCollectionError(
+                    f"{path} match {match_id} has incomplete fixture metadata"
+                )
+            _as_nonnegative_int(
+                raw.get("home_goals"), f"{path} match {match_id} home_goals"
+            )
+            _as_nonnegative_int(
+                raw.get("away_goals"), f"{path} match {match_id} away_goals"
+            )
             if str(raw.get("source_timezone")) != "Asia/Shanghai":
                 raise CornerCollectionError(
                     f"{path} match {match_id} source_timezone must be Asia/Shanghai"
@@ -429,7 +450,9 @@ def load_schedule_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
 def _tech_item(items: Any, kind: str) -> tuple[int, int] | None:
     if not isinstance(items, list):
         return None
-    matches = [item for item in items if isinstance(item, dict) and item.get("kind") == kind]
+    matches = [
+        item for item in items if isinstance(item, dict) and item.get("kind") == kind
+    ]
     if len(matches) > 1:
         raise CornerCollectionError(f"techStat contains duplicate {kind} entries")
     if not matches:
@@ -479,7 +502,10 @@ def parse_corner_odds(value: Any) -> list[dict[str, Any]]:
                 continue
             market_type = str(market.get("type") or "").upper()
             period = str(market.get("kind") or "").upper()
-            if market_type not in {"ASIAN", "OU", "EURO"} or period not in {"FULL", "HALF"}:
+            if market_type not in {"ASIAN", "OU", "EURO"} or period not in {
+                "FULL",
+                "HALF",
+            }:
                 continue
             records = market.get("records")
             if not isinstance(records, list):
@@ -487,8 +513,16 @@ def parse_corner_odds(value: Any) -> list[dict[str, Any]]:
             for record in records:
                 if not isinstance(record, dict):
                     continue
-                first = record.get("firstOdds") if isinstance(record.get("firstOdds"), dict) else {}
-                latest = record.get("runOdds") if isinstance(record.get("runOdds"), dict) else {}
+                first = (
+                    record.get("firstOdds")
+                    if isinstance(record.get("firstOdds"), dict)
+                    else {}
+                )
+                latest = (
+                    record.get("runOdds")
+                    if isinstance(record.get("runOdds"), dict)
+                    else {}
+                )
                 output.append(
                     {
                         "company_id": company_id,
@@ -501,7 +535,10 @@ def parse_corner_odds(value: Any) -> list[dict[str, Any]]:
                         "retained_latest_home": _number(latest.get("home")),
                         "retained_latest_line": _number(latest.get("draw")),
                         "retained_latest_away": _number(latest.get("away")),
-                        "retained_latest_modify_epoch": str(record.get("modifyTime") or "") or None,
+                        "retained_latest_modify_epoch": str(
+                            record.get("modifyTime") or ""
+                        )
+                        or None,
                         "historical_price_scope": "research_only_untimestamped_opening",
                     }
                 )
@@ -515,7 +552,9 @@ def parse_corner_odds(value: Any) -> list[dict[str, Any]]:
     return output
 
 
-def parse_response(fixture: Mapping[str, Any], raw: bytes, collected_at: str) -> dict[str, Any]:
+def parse_response(
+    fixture: Mapping[str, Any], raw: bytes, collected_at: str
+) -> dict[str, Any]:
     """Parse one response and reconcile full/half corner sources."""
     try:
         payload = json.loads(raw.decode("utf-8-sig"))
@@ -532,7 +571,11 @@ def parse_response(fixture: Mapping[str, Any], raw: bytes, collected_at: str) ->
     if half_direct is not None and half_list is not None and half_direct != half_list:
         conflict_reasons.append("half_corner_sources_disagree")
     half = half_direct if half_direct is not None else half_list
-    if full is not None and half is not None and (half[0] > full[0] or half[1] > full[1]):
+    if (
+        full is not None
+        and half is not None
+        and (half[0] > full[0] or half[1] > full[1])
+    ):
         conflict_reasons.append("half_corners_exceed_full_corners")
     extra_time = _contains_extra_time(payload.get("events"))
     if extra_time:
@@ -569,14 +612,20 @@ def parse_response(fixture: Mapping[str, Any], raw: bytes, collected_at: str) ->
         "home_corners": home_full,
         "away_corners": away_full,
         "total_corners": (
-            home_full + away_full if home_full is not None and away_full is not None else None
+            home_full + away_full
+            if home_full is not None and away_full is not None
+            else None
         ),
         "half_home_corners": home_half,
         "half_away_corners": away_half,
         "half_total_corners": (
-            home_half + away_half if home_half is not None and away_half is not None else None
+            home_half + away_half
+            if home_half is not None and away_half is not None
+            else None
         ),
-        "corner_period": "regulation_90" if quality_status == "complete" else "unverified",
+        "corner_period": "regulation_90"
+        if quality_status == "complete"
+        else "unverified",
         "corner_data_status": quality_status,
         "corner_exclusion_reasons": conflict_reasons,
         "corner_odds": parse_corner_odds(payload.get("cornerOdds")),
@@ -595,9 +644,9 @@ def header_url(match_id: str) -> str:
 def _fixture_extra_time(fixture: Mapping[str, Any]) -> bool:
     """Titan cup rows retain regulation/aggregate/penalty detail in raw_tail."""
     text = _canonical_json(fixture.get("raw_tail", []))
-    return any(token in text.lower() for token in ("extra", "penalty", "加时", "点球")) or bool(
-        re.search(r"\b90,\d+\s*-\s*\d+", text)
-    )
+    return any(
+        token in text.lower() for token in ("extra", "penalty", "加时", "点球")
+    ) or bool(re.search(r"\b90,\d+\s*-\s*\d+", text))
 
 
 def parse_analysis_header(
@@ -619,23 +668,33 @@ def parse_analysis_header(
     if fields[4].strip() != "-1":
         raise CornerCollectionError("analysis header is not in the finished state")
 
-    expected_kickoff = "".join(char for char in str(fixture.get("kickoff") or "") if char.isdigit())
+    expected_kickoff = "".join(
+        char for char in str(fixture.get("kickoff") or "") if char.isdigit()
+    )
     if expected_kickoff and fields[5].strip()[:12] != expected_kickoff[:12]:
         raise CornerCollectionError("analysis header kickoff does not match fixture")
     expected_home_id = fixture.get("home_team_id")
     expected_away_id = fixture.get("away_team_id")
     if expected_home_id is not None and str(expected_home_id) != fields[17].strip():
-        raise CornerCollectionError("analysis header home team id does not match fixture")
+        raise CornerCollectionError(
+            "analysis header home team id does not match fixture"
+        )
     if expected_away_id is not None and str(expected_away_id) != fields[18].strip():
-        raise CornerCollectionError("analysis header away team id does not match fixture")
+        raise CornerCollectionError(
+            "analysis header away team id does not match fixture"
+        )
 
     for position, key in ((10, "home_goals"), (11, "away_goals")):
         expected = fixture.get(key)
-        if expected is not None and _as_nonnegative_int(fields[position], f"header[{position}]") != int(expected):
+        if expected is not None and _as_nonnegative_int(
+            fields[position], f"header[{position}]"
+        ) != int(expected):
             raise CornerCollectionError(f"analysis header {key} does not match fixture")
     for position, key in ((26, "half_home_goals"), (27, "half_away_goals")):
         expected = fixture.get(key)
-        if expected is not None and _as_nonnegative_int(fields[position], f"header[{position}]") != int(expected):
+        if expected is not None and _as_nonnegative_int(
+            fields[position], f"header[{position}]"
+        ) != int(expected):
             raise CornerCollectionError(f"analysis header {key} does not match fixture")
 
     corner_values: tuple[int, int] | None
@@ -687,7 +746,9 @@ def parse_analysis_header(
         "home_corners": home_full,
         "away_corners": away_full,
         "total_corners": (
-            home_full + away_full if home_full is not None and away_full is not None else None
+            home_full + away_full
+            if home_full is not None and away_full is not None
+            else None
         ),
         "half_home_corners": None,
         "half_away_corners": None,
@@ -709,7 +770,9 @@ def parse_handicap_result(
     try:
         payload = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise CornerCollectionError("handicap fallback is not valid UTF-8 JSON") from error
+        raise CornerCollectionError(
+            "handicap fallback is not valid UTF-8 JSON"
+        ) from error
     sche = payload.get("Sche") if isinstance(payload, dict) else None
     if not isinstance(sche, dict):
         raise CornerCollectionError("handicap fallback has no Sche object")
@@ -718,10 +781,15 @@ def parse_handicap_result(
         raise CornerCollectionError("handicap fallback match_id does not match fixture")
     if int(sche.get("MatchState", 0)) != -1:
         raise CornerCollectionError("handicap fallback is not in the finished state")
-    for source_key, fixture_key in (("HomeTeamID", "home_team_id"), ("AwayTeamID", "away_team_id")):
+    for source_key, fixture_key in (
+        ("HomeTeamID", "home_team_id"),
+        ("AwayTeamID", "away_team_id"),
+    ):
         expected = fixture.get(fixture_key)
         if expected is not None and str(sche.get(source_key)) != str(expected):
-            raise CornerCollectionError(f"handicap fallback {source_key} does not match fixture")
+            raise CornerCollectionError(
+                f"handicap fallback {source_key} does not match fixture"
+            )
     home = _as_nonnegative_int(sche.get("HomeCorner"), "Sche.HomeCorner")
     away = _as_nonnegative_int(sche.get("AwayCorner"), "Sche.AwayCorner")
     extra_time = _fixture_extra_time(fixture)
@@ -822,7 +890,9 @@ def fetch_fixture(
                 return parsed
             fallback_url = HANDICAP_ENDPOINT.format(match_id=match_id)
             limiter.wait()
-            with urlopen(Request(fallback_url, headers=headers), timeout=45) as response:
+            with urlopen(
+                Request(fallback_url, headers=headers), timeout=45
+            ) as response:
                 fallback_raw = response.read()
             fallback = parse_handicap_result(fixture, fallback_raw, _utc_now())
             fallback["analysis_header_source_url"] = url
@@ -909,7 +979,13 @@ def checkpoint_matches_fixture(
     for field in CHECKPOINT_IDENTITY_FIELDS:
         expected = fixture.get(field)
         actual = record.get(field)
-        if field in {"season_start_year", "home_team_id", "away_team_id", "home_goals", "away_goals"}:
+        if field in {
+            "season_start_year",
+            "home_team_id",
+            "away_team_id",
+            "home_goals",
+            "away_goals",
+        }:
             if expected is None or actual is None:
                 if expected is not actual:
                     return False
@@ -1098,7 +1174,9 @@ def collect(
                 for fixture in pending
             }
             since_flush = 0
-            for index, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            for index, future in enumerate(
+                concurrent.futures.as_completed(futures), start=1
+            ):
                 record = future.result()
                 fixture = futures[future]
                 if not checkpoint_matches_fixture(record, fixture):
