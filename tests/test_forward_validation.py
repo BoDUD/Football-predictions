@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import tempfile
 import unittest
 from copy import deepcopy
@@ -1096,11 +1097,13 @@ def active_record_args_for_five_state_ledger(
     )
     htft_matrix = htft["htft"]["code_probabilities"]
     half = {
-        result: sum(htft_matrix[f"{result}{full}"] for full in "HDA")
+        result: math.fsum(htft_matrix[f"{result}{full}"] for full in "HDA")
         for result in "HDA"
     }
     full = {
-        result: sum(htft_matrix[f"{half_result}{result}"] for half_result in "HDA")
+        result: math.fsum(
+            htft_matrix[f"{half_result}{result}"] for half_result in "HDA"
+        )
         for result in "HDA"
     }
     ranking = memory_store.htft_ranker.rank_htft(

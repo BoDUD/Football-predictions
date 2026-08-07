@@ -155,11 +155,15 @@ def write_htft_observation_files(
 ):
     probabilities = dict(matrix or HTFT_OBSERVATION_MATRIX)
     half = {
-        result: sum(probabilities[f"{result}{full_result}"] for full_result in "HDA")
+        result: math.fsum(
+            probabilities[f"{result}{full_result}"] for full_result in "HDA"
+        )
         for result in "HDA"
     }
     full = {
-        result: sum(probabilities[f"{half_result}{result}"] for half_result in "HDA")
+        result: math.fsum(
+            probabilities[f"{half_result}{result}"] for half_result in "HDA"
+        )
         for result in "HDA"
     }
 
