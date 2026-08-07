@@ -1,5 +1,5 @@
 {
-  "schema_version": "visible-market-snapshot/1.0.0",
+  "schema_version": "visible-market-snapshot/2.0.0",
   "source_url": "https://zq.titan007.com/analysis/123cn.htm",
   "collected_at": "2026-08-06T09:30:00Z",
   "http_metadata": {
@@ -15,28 +15,33 @@
   },
   "markets": [
     {
-      "market": "total",
+      "market_identity": {
+        "family": "total",
+        "period": "full_time",
+        "line": 2.5,
+        "price_outcomes": ["over", "under"]
+      },
       "odds_format": "decimal",
       "firms": [
         {
           "name": "A",
           "outcomes": {
-            "over:2.5": 2.0,
-            "under:2.5": 1.9
+            "over": 2.0,
+            "under": 1.9
           }
         },
         {
           "name": "B",
           "outcomes": {
-            "over:2.5": 2.2,
-            "under:2.5": 1.8
+            "over": 2.2,
+            "under": 1.8
           }
         },
         {
           "name": "C",
           "outcomes": {
-            "over:2.5": 2.1,
-            "under:2.5": 1.85
+            "over": 2.1,
+            "under": 1.85
           }
         }
       ]

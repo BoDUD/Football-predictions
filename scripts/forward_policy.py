@@ -22,8 +22,10 @@ from typing import Any, Mapping, Sequence
 from soccer_predict import __version__ as SOCCER_PREDICT_VERSION
 
 LEGACY_POLICY_SCHEMA_VERSION = "forward-policy/1.0.0"
-POLICY_SCHEMA_VERSION = "forward-policy/2.0.0"
-COHORT_SCHEMA_VERSION = "live-forward-cohort/1.0.0"
+PREVIOUS_POLICY_SCHEMA_VERSION = "forward-policy/2.0.0"
+POLICY_SCHEMA_VERSION = "forward-policy/3.0.0"
+LEGACY_COHORT_SCHEMA_VERSION = "live-forward-cohort/1.0.0"
+COHORT_SCHEMA_VERSION = "live-forward-cohort/2.0.0"
 LEGACY_CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/1.0.0"
 CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.0.0"
 RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/1.0.0"
@@ -31,11 +33,43 @@ POLICY_ID_PREFIX = "untouched-live-forward"
 ACTIVE_COHORT_NAME = "active-forward-cohort.json"
 RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/1.0.0"
 COMMITTED_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/1.1.0"
-PROVENANCE_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/2.0.0"
-PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/2.1.0"
-PROVENANCE_SCHEMA_VERSION = "forward-provenance-binding/1.0.0"
+PREVIOUS_PROVENANCE_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/2.0.0"
+PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION = (
+    "forward-policy-binding/2.1.0"
+)
+PROVENANCE_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/3.0.0"
+PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/3.1.0"
+PREVIOUS_PROVENANCE_SCHEMA_VERSION = "forward-provenance-binding/1.0.0"
+PROVENANCE_SCHEMA_VERSION = "forward-provenance-binding/2.0.0"
+PROVENANCE_POLICY_SCHEMA_VERSIONS = frozenset(
+    {PREVIOUS_POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION}
+)
+LOCAL_INTEGRITY_SHADOW_KIND = "local-integrity-shadow-v2"
+PROMOTABLE_CONFIRMATION_KIND = "promotable-confirmation-v2"
+UNTOUCHED_ELIGIBILITY_SCOPE = "pre_kickoff_integrity_only_not_promotion"
+LOCAL_ASSURANCE_SCOPE = "local_integrity_only"
+PROMOTABLE_ASSURANCE_SCOPE = "promotable_confirmation"
+COHORT_KINDS = (
+    LOCAL_INTEGRITY_SHADOW_KIND,
+    PROMOTABLE_CONFIRMATION_KIND,
+)
+MISSING_PROMOTABLE_ADAPTERS = (
+    "external_timestamp_anchor_adapter",
+    "baseline_artifact_replay_adapter",
+    "entry_price_source_replay_adapter",
+    "closing_price_source_replay_adapter",
+)
+PROMOTION_REQUIREMENTS = (
+    "proper_scores_within_same_canonical_outcome_space",
+    "split_line_bookmaker_prices_limited_to_price_space_ev_and_clv",
+    "calibration_without_material_misfit",
+    "coverage_and_abstention_reported",
+    "league_market_and_lead_time_stability",
+    "clustered_confidence_intervals_support_improvement",
+    "positive_performance_at_executable_prices_after_slippage",
+)
 DEFAULT_VALIDATION_PROTOCOL: dict[str, Any] = {
-    "schema_version": "forward-validation-protocol/1.0.0",
+    "schema_version": "forward-validation-protocol/2.0.0",
     "bootstrap_repetitions": 2000,
     "bootstrap_seed": 20260806,
     "minimum_confirmation_samples": 200,
@@ -45,12 +79,16 @@ DEFAULT_VALIDATION_PROTOCOL: dict[str, Any] = {
     "same_time_tolerance_minutes": 5.0,
     "maximum_calibration_error": 0.05,
     "cluster_unit": "kickoff_iso_week",
-    "required_baselines": [
+    "required_model_space_baselines": [
         "historical_frequency",
         "independent_htft",
         "simple_poisson_dc",
-        "bookmaker_no_vig",
     ],
+    "bookmaker_price_baseline": "bookmaker_no_vig",
+    "bookmaker_proper_score_scope": "categorical_same_outcome_space_only",
+    "five_state_evaluation_scope": (
+        "settlement_state_scores_ev_roi_plus_price_space_clv"
+    ),
     "queue_contract": "frozen_fixture_market_manifest",
     "external_timestamp_anchor_required_for_promotion": True,
 }
@@ -107,6 +145,13 @@ RENDERER_POLICY_PROTECTED_FILES = (
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
 )
+COHORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+POLICY_ID_PATTERN = re.compile(rf"^{re.escape(POLICY_ID_PREFIX)}-[0-9a-f]{{16}}$")
+WINDOWS_RESERVED_FILE_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class ForwardPolicyError(ValueError):
@@ -136,6 +181,55 @@ def _require_package_version(value: Any, label: str) -> str:
     ):
         raise ForwardPolicyError(f"{label} must be a semantic package version")
     return text
+
+
+def _require_cohort_kind(value: Any, label: str) -> str:
+    kind = str(value or "").strip()
+    if kind not in COHORT_KINDS:
+        raise ForwardPolicyError(f"{label} must be one of: {', '.join(COHORT_KINDS)}")
+    return kind
+
+
+def _require_cohort_id(value: Any, label: str = "cohort_id") -> str:
+    if not isinstance(value, str) or not COHORT_ID_PATTERN.fullmatch(value):
+        raise ForwardPolicyError(
+            f"{label} must start with an ASCII letter or digit and contain only "
+            "ASCII letters, digits, dot, underscore, or hyphen"
+        )
+    if value in {".", ".."} or ".." in value or value.endswith("."):
+        raise ForwardPolicyError(f"{label} contains an unsafe dot segment")
+    if value.split(".", 1)[0].upper() in WINDOWS_RESERVED_FILE_STEMS:
+        raise ForwardPolicyError(f"{label} is a reserved Windows device name")
+    return value
+
+
+def _require_policy_id(value: Any, label: str = "policy_id") -> str:
+    policy_id = str(value or "")
+    if not POLICY_ID_PATTERN.fullmatch(policy_id):
+        raise ForwardPolicyError(f"{label} is invalid")
+    return policy_id
+
+
+def _safe_child_path(directory: Path, filename: str, label: str) -> Path:
+    root = directory.resolve()
+    candidate = (root / filename).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ForwardPolicyError(f"{label} escapes its canonical directory") from exc
+    if relative.parent != Path("."):
+        raise ForwardPolicyError(f"{label} must be a direct canonical child")
+    return candidate
+
+
+def _require_available_cohort_kind(value: Any, label: str) -> str:
+    kind = _require_cohort_kind(value, label)
+    if kind == PROMOTABLE_CONFIRMATION_KIND:
+        raise ForwardPolicyError(
+            f"{PROMOTABLE_CONFIRMATION_KIND} is unavailable; missing required "
+            f"adapters: {', '.join(MISSING_PROMOTABLE_ADAPTERS)}"
+        )
+    return kind
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -288,17 +382,39 @@ def _runtime_policy() -> dict[str, Any]:
     }
 
 
+def _confirmation_contract(cohort_kind: str) -> dict[str, Any]:
+    return {
+        "cohort_type": "untouched_live_forward",
+        "cohort_kind": _require_cohort_kind(cohort_kind, "policy cohort_kind"),
+        "untouched_confirmation_eligible_scope": UNTOUCHED_ELIGIBILITY_SCOPE,
+        "promotion_requires_cohort_kind": PROMOTABLE_CONFIRMATION_KIND,
+        "local_shadow_promotion_eligible": False,
+        "retrospective_records_allowed": False,
+        "parameter_or_threshold_changes_allowed": False,
+        "prediction_affecting_bugfix_starts_new_cohort": True,
+        "non_prediction_affecting_fix_requires_audited_new_commit": True,
+        "clean_head_required_at_freeze_and_cohort_start": True,
+        "explicit_final_merge_commit_required": True,
+        "all_candidates_abstentions_and_unavailable_markets_required": True,
+        "executable_timestamped_prices_required_for_market_comparison": True,
+        "promotion_is_manual": True,
+        "promotion_requirements": list(PROMOTION_REQUIREMENTS),
+    }
+
+
 def build_policy_manifest(
     *,
     repo_root: str | Path,
     dataset_manifest: str | Path,
     model_registry: str | Path,
     expected_final_merge_commit: str,
+    cohort_kind: str,
     created_at: str | datetime | None = None,
     code_commit: str | None = None,
     protected_files: Sequence[str] = DEFAULT_PROTECTED_FILES,
 ) -> dict[str, Any]:
     root = Path(repo_root).resolve()
+    frozen_cohort_kind = _require_cohort_kind(cohort_kind, "policy cohort_kind")
     dataset_path = Path(dataset_manifest).resolve()
     registry_path = Path(model_registry).resolve()
     dataset = _read_json(dataset_path, "dataset manifest")
@@ -365,26 +481,7 @@ def build_policy_manifest(
             ),
         },
         "policy": _runtime_policy(),
-        "confirmation_contract": {
-            "cohort_type": "untouched_live_forward",
-            "retrospective_records_allowed": False,
-            "parameter_or_threshold_changes_allowed": False,
-            "prediction_affecting_bugfix_starts_new_cohort": True,
-            "non_prediction_affecting_fix_requires_audited_new_commit": True,
-            "clean_head_required_at_freeze_and_cohort_start": True,
-            "explicit_final_merge_commit_required": True,
-            "all_candidates_abstentions_and_unavailable_markets_required": True,
-            "executable_timestamped_prices_required_for_market_comparison": True,
-            "promotion_is_manual": True,
-            "promotion_requirements": [
-                "proper_scores_vs_same_time_bookmaker_no_vig",
-                "calibration_without_material_misfit",
-                "coverage_and_abstention_reported",
-                "league_market_and_lead_time_stability",
-                "clustered_confidence_intervals_support_improvement",
-                "positive_performance_at_executable_prices_after_slippage",
-            ],
-        },
+        "confirmation_contract": _confirmation_contract(frozen_cohort_kind),
     }
     manifest["policy_hash"] = _hash_json(manifest)
     manifest["policy_id"] = (
@@ -406,9 +503,17 @@ def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
     value = deepcopy(dict(manifest))
     schema_version = value.get("schema_version")
-    if schema_version not in {LEGACY_POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION}:
+    if schema_version not in {
+        LEGACY_POLICY_SCHEMA_VERSION,
+        PREVIOUS_POLICY_SCHEMA_VERSION,
+        POLICY_SCHEMA_VERSION,
+    }:
         raise ForwardPolicyError("unsupported forward policy schema_version")
-    provenance_policy = schema_version == POLICY_SCHEMA_VERSION
+    provenance_policy = schema_version in {
+        PREVIOUS_POLICY_SCHEMA_VERSION,
+        POLICY_SCHEMA_VERSION,
+    }
+    current_policy = schema_version == POLICY_SCHEMA_VERSION
     supplied_hash = value.pop("policy_hash", None)
     policy_id = value.pop("policy_id", None)
     expected_hash = _hash_json(value)
@@ -508,6 +613,16 @@ def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     confirmation = value.get("confirmation_contract")
     if not isinstance(confirmation, Mapping):
         raise ForwardPolicyError("forward policy confirmation contract is missing")
+    if current_policy:
+        frozen_cohort_kind = _require_cohort_kind(
+            confirmation.get("cohort_kind"), "forward policy cohort_kind"
+        )
+        if dict(confirmation) != _confirmation_contract(frozen_cohort_kind):
+            raise ForwardPolicyError(
+                "forward-policy/3.0.0 confirmation contract does not match runtime"
+            )
+    elif "cohort_kind" in confirmation:
+        raise ForwardPolicyError("pre-v3 forward policies cannot carry cohort_kind")
     required_true = (
         "prediction_affecting_bugfix_starts_new_cohort",
         "all_candidates_abstentions_and_unavailable_markets_required",
@@ -551,6 +666,15 @@ def validate_active_runtime_policy_manifest(
         raise ForwardPolicyError(
             "legacy forward policies cannot be activated by the current runtime"
         )
+    confirmation = value["confirmation_contract"]
+    _require_available_cohort_kind(
+        confirmation["cohort_kind"], "forward policy cohort_kind"
+    )
+    if value["policy"] != _runtime_policy():
+        raise ForwardPolicyError(
+            "forward policy runtime selectors, thresholds, market status, display, "
+            "or validation protocol do not match the installed runtime"
+        )
     package_version = _require_package_version(
         value["software"]["package_version"], "forward policy package_version"
     )
@@ -587,20 +711,23 @@ def validate_active_runtime_policy_manifest(
     return value
 
 
-def build_provenance_binding(
+def _reproduce_provenance_binding(
     policy_manifest: Mapping[str, Any], *, cohort_id: str
 ) -> dict[str, Any]:
     policy = validate_policy_manifest(policy_manifest)
-    if policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+    if policy.get("schema_version") not in PROVENANCE_POLICY_SCHEMA_VERSIONS:
         raise ForwardPolicyError(
-            "legacy forward policies cannot create provenance-complete bindings"
+            "forward-policy/1.0.0 cannot create provenance-complete bindings"
         )
-    clean_cohort_id = str(cohort_id or "").strip()
-    if not clean_cohort_id or any(character.isspace() for character in clean_cohort_id):
-        raise ForwardPolicyError("provenance binding cohort_id is invalid")
+    clean_cohort_id = _require_cohort_id(cohort_id, "provenance binding cohort_id")
     runtime = policy["policy"]
+    current_policy = policy["schema_version"] == POLICY_SCHEMA_VERSION
     binding: dict[str, Any] = {
-        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "schema_version": (
+            PROVENANCE_SCHEMA_VERSION
+            if current_policy
+            else PREVIOUS_PROVENANCE_SCHEMA_VERSION
+        ),
         "package_version": _require_package_version(
             policy["software"]["package_version"], "provenance package_version"
         ),
@@ -628,8 +755,36 @@ def build_provenance_binding(
         ),
         "cohort_id": clean_cohort_id,
     }
+    if current_policy:
+        cohort_kind = _require_cohort_kind(
+            policy["confirmation_contract"].get("cohort_kind"),
+            "provenance cohort_kind",
+        )
+        binding.update(
+            {
+                "cohort_kind": cohort_kind,
+                "assurance_scope": (
+                    LOCAL_ASSURANCE_SCOPE
+                    if cohort_kind == LOCAL_INTEGRITY_SHADOW_KIND
+                    else PROMOTABLE_ASSURANCE_SCOPE
+                ),
+                "promotion_evidence_eligible": False,
+            }
+        )
     binding["provenance_hash"] = _hash_json(binding)
     return binding
+
+
+def build_provenance_binding(
+    policy_manifest: Mapping[str, Any], *, cohort_id: str
+) -> dict[str, Any]:
+    policy = validate_policy_manifest(policy_manifest)
+    if policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "historical forward policies are read-only and cannot create a new "
+            "provenance binding"
+        )
+    return _reproduce_provenance_binding(policy, cohort_id=cohort_id)
 
 
 def validate_provenance_binding(
@@ -641,6 +796,8 @@ def validate_provenance_binding(
     if not isinstance(binding, Mapping):
         raise ForwardPolicyError("forward provenance binding must be an object")
     value = deepcopy(dict(binding))
+    policy = validate_policy_manifest(policy_manifest)
+    current_policy = policy["schema_version"] == POLICY_SCHEMA_VERSION
     required = {
         "schema_version",
         "package_version",
@@ -653,9 +810,18 @@ def validate_provenance_binding(
         "cohort_id",
         "provenance_hash",
     }
+    if current_policy:
+        required.update(
+            {"cohort_kind", "assurance_scope", "promotion_evidence_eligible"}
+        )
     if set(value) != required:
         raise ForwardPolicyError("forward provenance binding fields are incomplete")
-    if value.get("schema_version") != PROVENANCE_SCHEMA_VERSION:
+    expected_schema = (
+        PROVENANCE_SCHEMA_VERSION
+        if current_policy
+        else PREVIOUS_PROVENANCE_SCHEMA_VERSION
+    )
+    if value.get("schema_version") != expected_schema:
         raise ForwardPolicyError("unsupported forward provenance schema_version")
     _require_package_version(value.get("package_version"), "provenance package_version")
     _require_git_commit(value.get("git_commit_sha"), "provenance git_commit_sha")
@@ -668,7 +834,8 @@ def validate_provenance_binding(
         "provenance_hash",
     ):
         _require_sha256(value.get(field), f"provenance {field}")
-    expected = build_provenance_binding(policy_manifest, cohort_id=cohort_id)
+    _require_cohort_id(value.get("cohort_id"), "provenance cohort_id")
+    expected = _reproduce_provenance_binding(policy, cohort_id=cohort_id)
     if value != expected:
         raise ForwardPolicyError(
             "forward provenance binding does not reproduce from the frozen policy/cohort"
@@ -680,12 +847,61 @@ def policy_directory(base_dir: str | Path) -> Path:
     return Path(base_dir).resolve() / ".codex" / "soccer-predict" / "forward-policies"
 
 
+def policy_manifest_path(base_dir: str | Path, policy_id: str) -> Path:
+    clean_policy_id = _require_policy_id(policy_id, "forward policy_id")
+    return _safe_child_path(
+        policy_directory(base_dir), f"{clean_policy_id}.json", "forward policy path"
+    )
+
+
+def _require_canonical_policy_file(
+    base_dir: str | Path,
+    policy_file: str | Path,
+    *,
+    policy_id: str | None = None,
+) -> Path:
+    candidate = Path(policy_file).resolve()
+    root = policy_directory(base_dir).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ForwardPolicyError(
+            "forward policy file is outside the canonical policy directory"
+        ) from exc
+    if relative.parent != Path(".") or candidate.suffix != ".json":
+        raise ForwardPolicyError(
+            "forward policy file must be a direct canonical JSON child"
+        )
+    filename_policy_id = _require_policy_id(
+        candidate.stem, "forward policy filename policy_id"
+    )
+    if policy_id is not None and filename_policy_id != _require_policy_id(policy_id):
+        raise ForwardPolicyError(
+            "forward policy filename does not match its content-addressed policy_id"
+        )
+    return candidate
+
+
 def cohort_directory(base_dir: str | Path) -> Path:
     return Path(base_dir).resolve() / ".codex" / "soccer-predict" / "forward-cohorts"
 
 
 def cohort_manifest_path(base_dir: str | Path, cohort_id: str) -> Path:
-    return cohort_directory(base_dir) / f"{cohort_id}.json"
+    clean_cohort_id = _require_cohort_id(cohort_id)
+    return _safe_child_path(
+        cohort_directory(base_dir),
+        f"{clean_cohort_id}.json",
+        "live-forward cohort manifest path",
+    )
+
+
+def cohort_closure_path(base_dir: str | Path, cohort_id: str) -> Path:
+    clean_cohort_id = _require_cohort_id(cohort_id)
+    return _safe_child_path(
+        cohort_directory(base_dir),
+        f"{clean_cohort_id}-closure.json",
+        "live-forward cohort closure path",
+    )
 
 
 def active_cohort_path(base_dir: str | Path) -> Path:
@@ -709,8 +925,12 @@ def freeze_policy(
     dataset_manifest: str | Path,
     model_registry: str | Path,
     expected_final_merge_commit: str,
+    cohort_kind: str,
 ) -> tuple[Path, dict[str, Any]]:
     root = Path(repo_root).resolve()
+    frozen_cohort_kind = _require_available_cohort_kind(
+        cohort_kind, "freeze cohort_kind"
+    )
     expected_commit = _require_git_commit(
         expected_final_merge_commit, "expected final merge commit"
     )
@@ -732,11 +952,12 @@ def freeze_policy(
             dataset_manifest=dataset_manifest,
             model_registry=model_registry,
             expected_final_merge_commit=expected_commit,
+            cohort_kind=frozen_cohort_kind,
             code_commit=head_commit,
         ),
         repo_root=root,
     )
-    path = policy_directory(base_dir) / f"{manifest['policy_id']}.json"
+    path = policy_manifest_path(base_dir, str(manifest["policy_id"]))
     if path.exists():
         existing = validate_active_runtime_policy_manifest(
             _read_json(path, "existing policy"), repo_root=root
@@ -753,10 +974,14 @@ def start_cohort(
     base_dir: str | Path,
     policy_file: str | Path,
     cohort_id: str,
+    cohort_kind: str,
     repo_root: str | Path,
     starts_at: str | datetime | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     root = Path(repo_root).resolve()
+    requested_cohort_kind = _require_cohort_kind(
+        cohort_kind, "cohort start cohort_kind"
+    )
     dirty = _git(root, "status", "--porcelain", "--untracked-files=normal")
     if dirty:
         raise ForwardPolicyError(
@@ -769,15 +994,30 @@ def start_cohort(
             raise ForwardPolicyError(
                 "an active live-forward cohort already exists; close it before starting another"
             )
-    clean_id = str(cohort_id or "").strip()
-    if not clean_id or any(character.isspace() for character in clean_id):
-        raise ForwardPolicyError(
-            "cohort_id must be a non-empty token without whitespace"
-        )
-    policy_path = Path(policy_file).resolve()
-    policy = validate_active_runtime_policy_manifest(
-        _read_json(policy_path, "policy file"), repo_root=root
+    clean_id = _require_cohort_id(cohort_id)
+    policy_path = _require_canonical_policy_file(base_dir, policy_file)
+    raw_policy = _read_json(policy_path, "policy file")
+    historical_policy = validate_policy_manifest(raw_policy)
+    policy_path = _require_canonical_policy_file(
+        base_dir,
+        policy_path,
+        policy_id=str(historical_policy["policy_id"]),
     )
+    if historical_policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "only forward-policy/3.0.0 can start a new active cohort; "
+            "v1/v2 policies are historical read-only"
+        )
+    frozen_cohort_kind = historical_policy["confirmation_contract"].get("cohort_kind")
+    frozen_cohort_kind = _require_cohort_kind(
+        frozen_cohort_kind, "forward policy cohort_kind"
+    )
+    if requested_cohort_kind != frozen_cohort_kind:
+        raise ForwardPolicyError(
+            "cohort start cohort_kind does not match the frozen policy"
+        )
+    _require_available_cohort_kind(requested_cohort_kind, "cohort start cohort_kind")
+    policy = validate_active_runtime_policy_manifest(raw_policy, repo_root=root)
     if policy.get("schema_version") != POLICY_SCHEMA_VERSION:
         raise ForwardPolicyError("legacy forward policies cannot start a new cohort")
     head_commit = _require_git_commit(
@@ -798,6 +1038,7 @@ def start_cohort(
         "schema_version": COHORT_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort",
         "cohort_id": clean_id,
+        "kind": requested_cohort_kind,
         "status": "active",
         "starts_at": started.replace(microsecond=0).isoformat(),
         "policy_file": str(policy_path),
@@ -847,14 +1088,11 @@ def validate_record_manifest(
         raise ForwardPolicyError(
             "live-forward record manifest artifact_type is invalid"
         )
-    cohort_id = str(value.get("cohort_id") or "")
-    if not cohort_id or any(character.isspace() for character in cohort_id):
-        raise ForwardPolicyError("live-forward record manifest cohort_id is invalid")
+    _require_cohort_id(value.get("cohort_id"), "live-forward record manifest cohort_id")
     _require_sha256(
         value.get("cohort_hash"), "live-forward record manifest cohort_hash"
     )
-    if not str(value.get("policy_id") or "").startswith(POLICY_ID_PREFIX + "-"):
-        raise ForwardPolicyError("live-forward record manifest policy_id is invalid")
+    _require_policy_id(value.get("policy_id"), "live-forward record manifest policy_id")
     _require_sha256(
         value.get("policy_hash"), "live-forward record manifest policy_hash"
     )
@@ -922,14 +1160,50 @@ def close_cohort(
     closed_at: str | datetime | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     active_path = active_cohort_path(base_dir)
-    cohort = validate_cohort(_read_json(active_path, "active cohort"))
-    if cohort["status"] != "active":
-        raise ForwardPolicyError("no active live-forward cohort is available to close")
-    closed = _aware_datetime(closed_at or _now_iso(), "closed_at")
+    pointer = validate_cohort(_read_json(active_path, "active cohort"))
+    already_closed = pointer["status"] == "closed"
+    if already_closed:
+        immutable_path = cohort_manifest_path(base_dir, str(pointer["cohort_id"]))
+        cohort = validate_cohort(
+            _read_json(immutable_path, "immutable live-forward cohort")
+        )
+        expected_pointer = deepcopy(cohort)
+        expected_pointer.pop("cohort_hash", None)
+        expected_pointer["status"] = "closed"
+        expected_pointer["closed_at"] = pointer["closed_at"]
+        expected_pointer["cohort_hash"] = _hash_json(expected_pointer)
+        if pointer != expected_pointer:
+            raise ForwardPolicyError(
+                "closed live-forward cohort pointer does not reproduce"
+            )
+    else:
+        cohort = pointer
+    manifest = validate_record_manifest(record_manifest, cohort=cohort)
+    closure_path = cohort_closure_path(base_dir, str(cohort["cohort_id"]))
+    existing: dict[str, Any] | None = None
+    if closure_path.exists():
+        existing = validate_closure(
+            _read_json(closure_path, "existing live-forward cohort closure"),
+            cohort=cohort,
+            require_record_manifest=True,
+        )
+        if already_closed and pointer["closed_at"] != existing["closed_at"]:
+            raise ForwardPolicyError(
+                "closed live-forward cohort pointer does not match immutable closure"
+            )
+    elif already_closed:
+        raise ForwardPolicyError(
+            "closed live-forward cohort pointer has no immutable closure"
+        )
+    effective_closed_at: str | datetime
+    if closed_at is None and existing is not None:
+        effective_closed_at = str(existing["closed_at"])
+    else:
+        effective_closed_at = closed_at or _now_iso()
+    closed = _aware_datetime(effective_closed_at, "closed_at")
     started = _aware_datetime(str(cohort["starts_at"]), "cohort.starts_at")
     if closed < started:
         raise ForwardPolicyError("live-forward cohort cannot close before it started")
-    manifest = validate_record_manifest(record_manifest, cohort=cohort)
     closure: dict[str, Any] = {
         "schema_version": CLOSURE_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort_closure",
@@ -944,10 +1218,16 @@ def close_cohort(
         "record_manifest": manifest,
     }
     closure["closure_hash"] = _hash_json(closure)
-    closure_path = cohort_directory(base_dir) / f"{cohort['cohort_id']}-closure.json"
-    if closure_path.exists():
-        raise ForwardPolicyError("live-forward cohort closure already exists")
-    _atomic_json(closure_path, closure)
+    if existing is not None:
+        if existing != closure:
+            raise ForwardPolicyError(
+                "live-forward cohort closure already exists with different content"
+            )
+        closure = existing
+    else:
+        _atomic_json(closure_path, closure)
+    if already_closed:
+        return closure_path, closure
     closed_pointer = deepcopy(cohort)
     closed_pointer.pop("cohort_hash", None)
     closed_pointer["status"] = "closed"
@@ -959,7 +1239,8 @@ def close_cohort(
 
 def validate_cohort(cohort: Mapping[str, Any]) -> dict[str, Any]:
     value = deepcopy(dict(cohort))
-    if value.get("schema_version") != COHORT_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {LEGACY_COHORT_SCHEMA_VERSION, COHORT_SCHEMA_VERSION}:
         raise ForwardPolicyError("unsupported live-forward cohort schema_version")
     supplied_hash = value.pop("cohort_hash", None)
     if supplied_hash != _hash_json(value):
@@ -968,13 +1249,25 @@ def validate_cohort(cohort: Mapping[str, Any]) -> dict[str, Any]:
     started = _aware_datetime(str(value.get("starts_at") or ""), "cohort.starts_at")
     if value.get("artifact_type") != "soccer_untouched_live_forward_cohort":
         raise ForwardPolicyError("live-forward cohort artifact_type is invalid")
-    cohort_id = str(value.get("cohort_id") or "")
-    if not cohort_id or any(character.isspace() for character in cohort_id):
-        raise ForwardPolicyError("live-forward cohort_id is invalid")
-    if not str(value.get("policy_file") or "").strip():
+    _require_cohort_id(value.get("cohort_id"), "live-forward cohort_id")
+    if schema_version == COHORT_SCHEMA_VERSION:
+        _require_cohort_kind(value.get("kind"), "live-forward cohort kind")
+    elif "kind" in value:
+        raise ForwardPolicyError(
+            "legacy live-forward cohorts cannot carry a cohort kind"
+        )
+    policy_file = str(value.get("policy_file") or "")
+    if not policy_file:
         raise ForwardPolicyError("live-forward cohort policy_file is missing")
-    if not str(value.get("policy_id") or "").startswith(POLICY_ID_PREFIX + "-"):
-        raise ForwardPolicyError("live-forward cohort policy_id is invalid")
+    policy_id = _require_policy_id(
+        value.get("policy_id"), "live-forward cohort policy_id"
+    )
+    if schema_version == COHORT_SCHEMA_VERSION:
+        policy_path = Path(policy_file)
+        if not policy_path.is_absolute() or policy_path.name != f"{policy_id}.json":
+            raise ForwardPolicyError(
+                "current live-forward cohort policy_file is not canonical"
+            )
     _require_sha256(value.get("policy_hash"), "live-forward cohort policy_hash")
     if value.get("status") not in {"active", "closed"}:
         raise ForwardPolicyError("live-forward cohort status is invalid")
@@ -1030,12 +1323,10 @@ def validate_closure(
     value["closure_hash"] = supplied_hash
     if value.get("artifact_type") != "soccer_untouched_live_forward_cohort_closure":
         raise ForwardPolicyError("live-forward cohort closure artifact_type is invalid")
-    if not str(value.get("cohort_id") or "").strip():
-        raise ForwardPolicyError("live-forward cohort closure cohort_id is missing")
+    _require_cohort_id(value.get("cohort_id"), "live-forward cohort closure cohort_id")
     _require_sha256(value.get("cohort_hash"), "live-forward closure cohort_hash")
     _require_sha256(value.get("policy_hash"), "live-forward closure policy_hash")
-    if not str(value.get("policy_id") or "").startswith(POLICY_ID_PREFIX + "-"):
-        raise ForwardPolicyError("live-forward cohort closure policy_id is invalid")
+    _require_policy_id(value.get("policy_id"), "live-forward cohort closure policy_id")
     started = _aware_datetime(str(value.get("starts_at") or ""), "closure.starts_at")
     closed = _aware_datetime(str(value.get("closed_at") or ""), "closure.closed_at")
     if closed < started:
@@ -1089,7 +1380,18 @@ def load_active_binding(
     cohort = validate_cohort(_read_json(path, "active cohort"))
     if cohort["status"] != "active":
         return None
-    policy_file = Path(str(cohort.get("policy_file") or ""))
+    if cohort.get("schema_version") != COHORT_SCHEMA_VERSION:
+        raise ForwardPolicyError(
+            "active cohort without an explicit kind is historical read-only"
+        )
+    active_cohort_kind = _require_available_cohort_kind(
+        cohort.get("kind"), "active cohort kind"
+    )
+    policy_file = _require_canonical_policy_file(
+        base_dir,
+        str(cohort.get("policy_file") or ""),
+        policy_id=str(cohort.get("policy_id") or ""),
+    )
     policy = validate_active_runtime_policy_manifest(
         _read_json(policy_file, "active cohort policy"), repo_root=repo_root
     )
@@ -1101,6 +1403,8 @@ def load_active_binding(
         "policy_hash"
     ] != cohort.get("policy_hash"):
         raise ForwardPolicyError("active cohort does not bind its policy exactly")
+    if policy["confirmation_contract"].get("cohort_kind") != active_cohort_kind:
+        raise ForwardPolicyError("active cohort kind does not match its frozen policy")
     archived = _aware_datetime(archived_at, "archived_at")
     start = _aware_datetime(str(cohort["starts_at"]), "cohort.starts_at")
     if archived < start:
@@ -1132,7 +1436,9 @@ def load_active_binding(
         "policy_snapshot": policy,
         "recorded_code_commit": current_commit,
         "archived_at": archived.replace(microsecond=0).isoformat(),
-        "untouched_confirmation_eligible": True,
+        "cohort_kind": active_cohort_kind,
+        "assurance_scope": LOCAL_ASSURANCE_SCOPE,
+        "promotion_evidence_eligible": False,
         "provenance_binding": build_provenance_binding(
             policy, cohort_id=str(cohort["cohort_id"])
         ),
@@ -1159,6 +1465,14 @@ def bind_observation_commitment(
     value = validate_record_binding(binding)
     if value is None:
         raise ForwardPolicyError("forward policy binding is required")
+    if value.get("schema_version") not in {
+        PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+        PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+    }:
+        raise ForwardPolicyError(
+            "historical forward policy bindings are read-only and cannot receive "
+            "a new observation commitment"
+        )
     commitment_hash = _require_sha256(
         observation_commitment_hash,
         "observation commitment hash",
@@ -1169,15 +1483,7 @@ def bind_observation_commitment(
             "forward policy binding already commits to a different observation"
         )
     value.pop("binding_hash", None)
-    provenance_complete = value.get("schema_version") in {
-        PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
-        PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
-    }
-    value["schema_version"] = (
-        PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
-        if provenance_complete
-        else COMMITTED_RECORD_BINDING_SCHEMA_VERSION
-    )
+    value["schema_version"] = PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
     value["observation_commitment_hash"] = commitment_hash
     value["binding_hash"] = _hash_json(value)
     return value
@@ -1193,6 +1499,8 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
     if schema_version not in {
         RECORD_BINDING_SCHEMA_VERSION,
         COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        PREVIOUS_PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+        PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
         PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
         PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
     }:
@@ -1200,8 +1508,7 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
     supplied = value.pop("binding_hash", None)
     if supplied != _hash_json(value):
         raise ForwardPolicyError("forward policy binding hash is invalid")
-    if not str(value.get("cohort_id") or "").strip():
-        raise ForwardPolicyError("forward policy binding cohort_id is missing")
+    _require_cohort_id(value.get("cohort_id"), "forward policy binding cohort_id")
     _require_sha256(value.get("cohort_hash"), "forward policy binding cohort_hash")
     _require_sha256(value.get("policy_hash"), "forward policy binding policy_hash")
     recorded_commit = _require_git_commit(
@@ -1213,14 +1520,24 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
         or value.get("policy_hash") != policy["policy_hash"]
     ):
         raise ForwardPolicyError("record binding does not match its policy snapshot")
-    provenance_complete = schema_version in {
+    previous_provenance = schema_version in {
+        PREVIOUS_PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+        PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+    }
+    current_provenance = schema_version in {
         PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
         PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
     }
+    provenance_complete = previous_provenance or current_provenance
     if provenance_complete:
-        if policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+        expected_policy_schema = (
+            POLICY_SCHEMA_VERSION
+            if current_provenance
+            else PREVIOUS_POLICY_SCHEMA_VERSION
+        )
+        if policy.get("schema_version") != expected_policy_schema:
             raise ForwardPolicyError(
-                "provenance-complete binding requires a current forward policy"
+                "forward policy binding schema does not match its policy schema"
             )
         if recorded_commit != policy["code"]["commit"]:
             raise ForwardPolicyError(
@@ -1243,12 +1560,56 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
     )
     if archived < started:
         raise ForwardPolicyError("record binding predates its untouched cohort")
-    if value.get("untouched_confirmation_eligible") is not True:
-        raise ForwardPolicyError(
-            "record binding is not untouched-confirmation eligible"
+    current_assurance_fields = {
+        "cohort_kind",
+        "assurance_scope",
+        "promotion_evidence_eligible",
+    }
+    if current_provenance:
+        if "untouched_confirmation_eligible" in value:
+            raise ForwardPolicyError(
+                "current record binding cannot carry the legacy untouched "
+                "confirmation flag"
+            )
+        cohort_kind = _require_cohort_kind(
+            value.get("cohort_kind"), "forward policy binding cohort_kind"
         )
+        if cohort_kind != policy["confirmation_contract"].get("cohort_kind"):
+            raise ForwardPolicyError(
+                "record binding cohort_kind does not match its policy snapshot"
+            )
+        expected_scope = (
+            LOCAL_ASSURANCE_SCOPE
+            if cohort_kind == LOCAL_INTEGRITY_SHADOW_KIND
+            else PROMOTABLE_ASSURANCE_SCOPE
+        )
+        if (
+            value.get("assurance_scope") != expected_scope
+            or value.get("promotion_evidence_eligible") is not False
+        ):
+            raise ForwardPolicyError(
+                "record binding assurance and promotion scope are invalid"
+            )
+        provenance = value["provenance_binding"]
+        if any(
+            provenance.get(field) != value.get(field)
+            for field in current_assurance_fields
+        ):
+            raise ForwardPolicyError(
+                "record binding assurance fields do not match provenance"
+            )
+    else:
+        if any(field in value for field in current_assurance_fields):
+            raise ForwardPolicyError(
+                "historical record binding cannot carry current assurance fields"
+            )
+        if value.get("untouched_confirmation_eligible") is not True:
+            raise ForwardPolicyError(
+                "historical record binding is not untouched-confirmation eligible"
+            )
     if schema_version in {
         COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
         PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
     }:
         _require_sha256(
@@ -1273,6 +1634,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     freeze.add_argument("--dataset-manifest", required=True)
     freeze.add_argument("--model-registry", required=True)
+    freeze.add_argument("--cohort-kind", required=True, choices=COHORT_KINDS)
     freeze.add_argument(
         "--expected-final-merge-commit",
         required=True,
@@ -1286,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--policy-file", required=True)
     start.add_argument("--cohort-id", required=True)
+    start.add_argument("--cohort-kind", required=True, choices=COHORT_KINDS)
     start.add_argument("--starts-at")
     close = subparsers.add_parser(
         "close", help="close the active cohort at an explicit policy boundary"
@@ -1310,6 +1673,7 @@ def main() -> int:
                 dataset_manifest=arguments.dataset_manifest,
                 model_registry=arguments.model_registry,
                 expected_final_merge_commit=arguments.expected_final_merge_commit,
+                cohort_kind=arguments.cohort_kind,
             )
         elif arguments.command == "start":
             path, artifact = start_cohort(
@@ -1317,6 +1681,7 @@ def main() -> int:
                 repo_root=arguments.repo_root,
                 policy_file=arguments.policy_file,
                 cohort_id=arguments.cohort_id,
+                cohort_kind=arguments.cohort_kind,
                 starts_at=arguments.starts_at,
             )
         elif arguments.command == "close":

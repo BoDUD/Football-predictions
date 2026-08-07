@@ -84,13 +84,13 @@ python scripts/score_model.py backtest --input history.csv --output backtest.jso
 
 ### 历史工作簿与半全场模型
 
-供应的 14 项赛事工作簿先经过严格转换，范围为巴甲、挪超、日职、美职联、五大联赛、韩 K1、瑞典超、芬超、欧冠和亚冠；原始 XLSX、逐场 CSV 和最终模型默认保存在被 Git 忽略的本地运行目录：
+供应的 16 项赛事工作簿先经过严格转换，范围为巴甲、巴西杯、挪超、日职、美职联、五大联赛、韩 K1、瑞典超、芬超、欧冠、欧国联和亚冠；原始 XLSX、逐场 CSV 和最终模型默认保存在被 Git 忽略的本地运行目录：
 
 ```bash
 python scripts/history_importer.py "C:\path\to\workbooks" \
   --output-dir .codex/soccer-predict/datasets/league-history-expanded \
   --source-timezone Asia/Shanghai \
-  --as-of-date 2026-08-03
+  --as-of-date 2026-08-07
 
 python scripts/htft_model.py fit \
   --input .codex/soccer-predict/datasets/league-history-expanded/brazil-serie-a-scores.csv \
@@ -113,7 +113,7 @@ python scripts/league_model_manager.py inspect \
   --output .codex/soccer-predict/models/league-history-expanded/inspection.json
 ```
 
-半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。九格关联种子支持显式时间半衰期和有效样本量审计，但生产默认仍使用已经验证的均匀权重，只有时间顺序对比和未触碰前向样本共同支持后才允许切换。扩展导入覆盖 14 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。保存阶段标签不等于已经为每个阶段训练独立模型：当前注册 manager 只用 `competition_regime=regular` 拟合，其他赛制保留排除计数与漂移证据。
+半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。正式 evaluator 与 manager 将九格关联的指数时间半衰期冻结为 365 天，与全场边际的时间尺度一致，并把该值写入评估、模型与注册表后重放校验；缺失、非正或不同半衰期的制品会失败关闭。扩展导入覆盖 16 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。注册 manager 使用按赛事冻结的赛制白名单：常规联赛仍只用 `regular`，巴西杯只用自己的 `national_knockout_cup`，欧国联只用自己的 `national_team_league_and_knockout`；不同赛事始终分别拟合，不能把球队强度混在同一尺度。挪超赛程文本明确标记的保级/降级附加赛使用 `relegation_playoff` phase/regime，留在完整历史中审计，但不进入常规赛生产训练或晋级 cohort。其他未放行赛制保留排除计数与漂移证据。
 
 面向用户的比赛情景不是 HT/FT 九格与全场比分两个边际榜单的拼接。联合路径 artifact 必须在同一状态空间中表示半场进球和下半场进球，使全场比分由路径相加得到，并验证其全场比分、半场边际和 HT/FT 九格边际全部与绑定的 canonical artifacts 一致。新 artifact 使用紧凑四维路径 kernel，并在 IPF 前执行全部 Hall 支持可行性审计；验证器会从 kernel 重建 HT、下半场、FT、HT/FT、所有派生市场及排序事件，任一篡改都关闭输出。归档中冻结且通过重建校验的全局联合事件 Top 2 是半全场与波胆栏唯一允许展示的两项，按联合概率降序，并保留每项自身不可拆分的 HT/FT、全场比分与联合概率；即使两项拥有相同 HT/FT，也不得去重。验证器为两个事件都从比分确定性映射总进球区间，但公共卡片只展示 Rank 1 对应的一个区间，并从完整归档联合分布重算 Top-2 累计概率、其余质量和版本化熵不确定度；普通文字另列审计用的总进球边际第一，明确不能替代联合区间。联合概率必须从路径单元求和，不能用两个边际概率相乘，也不能为满足终场方向而替换任一结果。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件比分 Top 2 继续只作内部审计。历史冻结的有效 artifact 继续只读兼容；新版渲染器可从其 Rank 1 冻结比分投影区间并从完整冻结分布重算集中度，但不会修改档案、artifact 或 archive hash。
 
@@ -136,13 +136,13 @@ python scripts/joint_scenario_model.py validate --prediction joint-scenarios.jso
 
 角球采用独立的角球数模型和注册表。现阶段角球 manager 只绑定历史数据、模型和 walk-forward 回测，`formal_corner_total_eligible` 与 `formal_corner_handicap_eligible` 必须为 `false`；赛前可展示 `◇` 观察，但不能使用 `★` 或写入正式主推。除非未来另有通过严格样本外验证的进球—角球联合模型，否则角球只能放在独立面板，不能与某条比分/半全场路径相乘、配对或写成同一证据链。只有未来 manager 绑定独立 strict live-forward 评估并显式放行相应 formal flag，同时当前盘口、证据与结算审计全部通过，才允许进入正式候选池。
 
-同一份用户 Excel 可以保留角球审计数据并继续用于足球/HTFT 导入：赛事主表前 87 列仍是严格兼容区，后面只允许登记的 12 个角球审计列；`角球盘口` 与 `数据质量` 是只读辅助 sheet。`history_importer.py` 只把主表前 87 列导入足球/HTFT，不会把赛后角球或辅助 sheet 偷渡成同场特征。角球训练从采集器的 source-bound JSON 独立生成 CSV：
+同一份用户 Excel 可以保留角球审计数据并继续用于足球/HTFT 导入：赛事主表前 87 列仍是严格兼容区，后面只允许登记的 12 个角球审计列；`角球盘口` 与 `数据质量` 是只读辅助 sheet。`history_importer.py` 用前 87 列生成足球/HTFT 数据，并且只把追加列中的 `Titan比赛ID` 用作不可变比赛身份、重复和行政赛果排除；赛后角球、角球盘口和辅助 sheet 不会偷渡成同场特征。角球训练从采集器的 source-bound JSON 独立生成 CSV。Excel 中必须保留它实际使用的采集 bundle lineage；若后续合并训练 bundle 重新抓取了相同比赛，即使逐场比赛、阶段、90 分钟角球和排除状态完全一致，也不得把不同的采集时间或原始响应哈希宣称为同一 source lineage，必须单独记录语义对账结果：
 
 ```bash
 python scripts/corner_history_dataset_builder.py \
   --input .codex/soccer-predict/corner-history-expanded/corner_history.json \
   --output-dir .codex/soccer-predict/datasets/corner-history-expanded \
-  --as-of-date 2026-08-03
+  --as-of-date 2026-08-07
 
 python scripts/corner_model_manager.py train \
   --input .codex/soccer-predict/datasets/corner-history-expanded/finland_veikkausliiga-corners.csv \
@@ -153,10 +153,10 @@ python scripts/corner_model_manager.py train \
 
 完整扩展流程必须固定同一组 schedule 与 `as-of-date`，依次执行离线 schedule
 `--check`/`--in-place`、可迁移断点的角球赛果采集、company 8 单公司研究价格采集、
-source-bound dataset build、14 联赛顺序训练和统一 `inspect`，最后才导出工作簿并重跑
+source-bound dataset build、16 赛事顺序训练和统一 `inspect`，最后才导出工作簿并重跑
 football/HTFT import、evaluation 与 registry。company 8 不能满足三公司门槛；
-`2026-08-03` 冻结快照的两条 `fetch_error` 保持缺失并从训练排除，绝不能补零。训练命令不得并发写同一
-`registry.json`。命令、迁移规则和最终工作簿衔接见
+`2026-08-07` 冻结快照的七条 `fetch_error` 保持缺失并从训练排除，绝不能补零。训练命令不得并发写同一
+`corner-registry.json`。命令、迁移规则和最终工作簿衔接见
 [`references/expanded-history-runbook.md`](references/expanded-history-runbook.md)。
 
 半全场价格诊断还必须同时取得同一当前可执行快照的完整 9 路赔率、来源和赛前采集时间，并由 ranker 自行去水；完整 9 路赔率和 `league_key` 缺一不可，部分赔率加外部概率不能通过资格检查。工作簿开盘价格没有精确采集时间且只有全场市场，只能作为研究代理，不能验证半全场真实 EV 或 ROI。
@@ -167,21 +167,23 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 正常初盘与临场归档现在默认要求有效的 `--joint-scenario-file`；`record` 会以完整分析模式拒绝缺失、过期或身份不一致的联合路径，避免先生成一张“数据不足”的完成图。有效联合模型存在但正式盘口门槛未通过时，图片固定显示 `无正式主推`，并展示由冻结 Rank 1 比分映射的联合首选情景总球、从完整联合分布重算的集中度/不确定度，以及冻结且通过校验的全局联合事件 Top 2；每项的半全场与代表波胆保持原始配对，它们不计正式主推、注额或收益。独立 1X2 与总进球 marginal 首位只能作为分布审计。合格观察仅可在随附文字或审计中单独标注，不占主推栏。旧冻结版本若当时有有效联合制品，可从其 Rank 1 比分重渲染区间并重算集中度而不改档案或哈希；若当时没有联合制品，三栏仍如实显示 `数据不足`，不得用赛果或其他版本回填。
 
-新的正常初盘与临场归档还必须传入 `candidate-evaluation/2.0.0` 与 `--require-candidate-evaluations`，把亚盘、大小球、半场、半全场、总进球区间、BTTS 和两类角球市场逐一记为已评估或明确不可用。候选制品的生成时间不得早于其使用的盘口快照或联合/角球上游模型；系统从冻结 source payload、活动版本及模型/证据绑定重算完整盘口、五态 EV/edge、门槛、信心排序和 shadow 选择。四分盘的 edge 按半赢/半输各半注折算，push 不进入有效赢亏质量。只因市场发布政策暂停而失败的候选仍可进入每场每市场最多一个的 shadow 样本，但永远不占主推、不下注、不计战绩或 ROI。赛后复盘会按最终比分重新结算并核对冻结诊断；改派生字段后重算自哈希、或仅改变 JSON 格式/字节哈希复制同场样本，都不能污染 `stats`/`calibrate`。单市场达到 20 个已结算 shadow 只触发人工模型/政策复核，不会自动解禁、调参或回改旧档案。
+新的正常初盘与临场归档还必须传入当前 `candidate-evaluation/3.0.0` 与 `--require-candidate-evaluations`，把亚盘、大小球、半场、半全场、总进球区间、BTTS 和两类角球市场逐一记为已评估或明确不可用。候选制品的生成时间不得早于其使用的盘口快照或联合/角球上游模型；系统从冻结 source payload、活动版本及模型/证据绑定重算完整盘口、五态 EV/edge、门槛、信心排序和 shadow 选择。四分盘的 edge 按半赢/半输各半注折算，push 不进入有效赢亏质量。只因市场发布政策暂停而失败的候选仍可进入每场每市场最多一个的 shadow 样本，但永远不占主推、不下注、不计战绩或 ROI。赛后复盘会按最终比分重新结算并核对冻结诊断；改派生字段后重算自哈希、或仅改变 JSON 格式/字节哈希复制同场样本，都不能污染 `stats`/`calibrate`。单市场达到 20 个已结算 shadow 只触发人工模型/政策复核，不会自动解禁、调参或回改旧档案。旧 `candidate-evaluation/2.0.0` 仅用于历史隔离读取，不能进入新的活动 cohort 写入。
 
-真正的“未触碰前向验证”由 `scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先在干净且已评审的 Git 提交上冻结代码文件、数据 manifest、模型 registry、候选选择器、阈值、市场状态和显示策略，再启动只接受启动时刻之后比赛的 cohort。cohort 激活后，每场归档必须传入由可见赛前网页导出构建的 `--source-evidence-file`；系统保存内容寻址的原始 JSON、HTTP 元数据和解析器版本，并从完整公司赔率行重放候选价格，不能只保存二次加工结果。验证报告覆盖预测、弃赛和不可用市场，比较历史频率、独立 HT/FT、简单 Poisson/DC 和同时间 bookmaker no-vig 基线，输出 log loss、Brier、校准、覆盖率、按联赛/市场/提前量切片、以开球周聚类的置信区间，以及可执行入场价下的 ROI/CLV。报告永远不会自动解禁市场或改参数；代码、数据、模型、选择器、阈值或显示策略发生预测相关变化时必须结束旧口径并启动新 cohort。
+真正的“未触碰前向验证”由 `scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先在干净且已评审的 Git 提交上冻结代码文件、数据 manifest、模型 registry、候选选择器、阈值、市场状态和显示策略，再启动只接受启动时刻之后比赛的 cohort。当前运行时只允许 `local-integrity-shadow-v2`：它创建 `live-forward-cohort/2.0.0`，cohort 顶层 `kind` 必须与 policy 的 `confirmation_contract.cohort_kind` 一致，只能用于本地完整性与研究 shadow，不能作为 promotion 证据。`promotable-confirmation-v2` 在外部可信时间戳锚、baseline artifact 重放、入场价来源重放和收盘价来源重放适配器全部实现前，会在 policy freeze 和 cohort start 两处失败关闭；这四项不能由调用方布尔声明绕过。缺少 kind 的历史 policy/cohort 只读可验证，不能恢复为活动写入。cohort 激活后，每场归档必须传入当前 `source-evidence/2.0.0` 的 `--source-evidence-file`；系统保存内容寻址的原始 JSON、HTTP 元数据和解析器版本，并从完整公司赔率行重放候选价格，不能只保存二次加工结果。正式导出使用 `forward-observations/3.0.0`；旧 source v1 和 observations v1 仅可历史只读，存在缺陷的 observations v2 明确拒绝并隔离，三者都不能进入活动 cohort 或 promotion。验证报告覆盖预测、弃赛和不可用市场，比较历史频率、独立 HT/FT、简单 Poisson/DC 和同时间 bookmaker no-vig 基线，输出 log loss、Brier、校准、覆盖率、按联赛/市场/提前量切片、以开球周聚类的置信区间，以及可执行入场价下的 ROI/CLV。报告永远不会自动解禁市场或改参数；代码、数据、模型、选择器、阈值或显示策略发生预测相关变化时必须结束旧口径并启动新 cohort。
+
+当前活动 policy 是 `forward-policy/3.0.0`；kind-less 的 policy v2 与 v1 都只能做结构化历史重放。当前 record binding 为 `forward-policy-binding/3.0.0`/`3.1.0`，内含 `forward-provenance-binding/2.0.0`，显式写入 `cohort_kind`、`assurance_scope=local_integrity_only` 和 `promotion_evidence_eligible=false`。旧 binding 2.x/provenance 1.0 仍可验证既有不可变记录，但其旧 `untouched_confirmation_eligible=true` 只表示旧版赛前完整性，不表示可 promotion；这些记录在汇总中进入 defect quarantine，不能正式导出或续写承诺。observations v1 可以计算描述性统计，但完整性与 promotion 永远失败。当前本地 memory-store 也没有独立的赛前收盘快照重放适配器，因此真实 local shadow 的 execution/CLV/总体统计门槛保留 blocker；只有五态模型空间 proper-score 子门槛可以在冻结基线上如实评估。
 
 ```bash
 python scripts/source_evidence.py build --source-file visible-page-export.json --output-dir .codex/soccer-predict/source-evidence
 python scripts/source_evidence.py verify --evidence .codex/soccer-predict/source-evidence/MATCH-source-evidence.json
-python scripts/forward_policy.py --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA
-python scripts/forward_policy.py --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID
+python scripts/forward_policy.py --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA --cohort-kind local-integrity-shadow-v2
+python scripts/forward_policy.py --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID --cohort-kind local-integrity-shadow-v2
 python scripts/memory_store.py --base-dir . close-forward-cohort --cohort-id COHORT_ID --closed-at TIMEZONE_AWARE_ISO
 python scripts/memory_store.py --base-dir . export-forward-validation --cohort-id COHORT_ID --cohort-closure-file .codex/soccer-predict/forward-cohorts/COHORT_ID-closure.json --output forward-observations.json
 python scripts/forward_validation.py --input forward-observations.json --output forward-validation.json
 ```
 
-冻结政策要求工作树已经提交，因此本次代码修复本身不能作为未来效果证据；必须在合并/提交后再启动新的前向 cohort。外部可信时间戳锚定仍是可选增强，尚未配置外部服务时只能证明本地内容哈希与 Git 边界，不能声称第三方时间见证。SQLite 迁移和更多赛前协变量也仍属于后续工程，当前没有为了迎合 review 虚构完成状态。
+冻结政策要求工作树已经提交，因此本次代码修复本身不能作为未来效果证据；必须在最终 merge commit 上冻结 policy，再启动新的前向 cohort。外部可信时间戳服务可以不配置来运行 `local-integrity-shadow-v2`，但它不是 promotion 的可选增强：没有外部锚及其可验证适配器就不能冻结或启动 `promotable-confirmation-v2`，本地内容哈希与 Git 边界也不能冒充第三方时间见证。SQLite 迁移和更多赛前协变量仍属于后续工程，当前没有为了迎合 review 虚构完成状态。
 
 完整输入契约见 [`references/history-workbook-data.md`](references/history-workbook-data.md)，半全场构造与选择规则见 [`references/half-time-full-time.md`](references/half-time-full-time.md)。
 本地数据哈希、分联赛门槛、fallback 与赛制漂移的可执行核验见

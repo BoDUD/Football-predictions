@@ -33,20 +33,39 @@ except ImportError:  # Direct execution from scripts/.
     import source_evidence  # type: ignore[no-redef]
 
 LEGACY_INPUT_SCHEMA_VERSION = "forward-observations/1.0.0"
-INPUT_SCHEMA_VERSION = "forward-observations/2.0.0"
-QUEUE_SCHEMA_VERSION = "forward-eligibility-queue/1.0.0"
-COMMITMENT_SCHEMA_VERSION = "forward-observation-commitment/1.0.0"
-SETTLEMENT_SCHEMA_VERSION = "forward-observation-settlement/1.0.0"
-HISTORY_LEDGER_BINDING_SCHEMA_VERSION = "memory-forward-history-ledger-binding/2.0.0"
-HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/1.0.0"
+PREVIOUS_INPUT_SCHEMA_VERSION = "forward-observations/2.0.0"
+INPUT_SCHEMA_VERSION = "forward-observations/3.0.0"
+QUEUE_SCHEMA_VERSION = "forward-eligibility-queue/2.0.0"
+COMMITMENT_SCHEMA_VERSION = "forward-observation-commitment/2.0.0"
+SETTLEMENT_SCHEMA_VERSION = "forward-observation-settlement/2.0.0"
+PREVIOUS_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
+    "memory-forward-history-ledger-binding/2.0.0"
+)
+HISTORY_LEDGER_BINDING_SCHEMA_VERSION = "memory-forward-history-ledger-binding/3.0.0"
+PREVIOUS_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/1.0.0"
+HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/2.0.0"
 HISTORY_AGGREGATE_ARTIFACT_TYPE = "memory_store_forward_validation_cohort_export"
-REPORT_SCHEMA_VERSION = "forward-validation/2.0.0"
+REPORT_SCHEMA_VERSION = "forward-validation/3.0.0"
 BASELINE_NAMES = (
     "historical_frequency",
     "independent_htft",
     "simple_poisson_dc",
     "bookmaker_no_vig",
 )
+MODEL_SPACE_BASELINE_NAMES = BASELINE_NAMES[:-1]
+FIVE_STATE_SETTLEMENT_STATES = (
+    "full_win",
+    "half_win",
+    "push",
+    "half_loss",
+    "loss",
+)
+CATEGORICAL_PROPER_SCORE_SPACE = "categorical_same_outcome_space"
+FIVE_STATE_PROPER_SCORE_SPACE = "five_state_return"
+PROPER_SCORE_BASELINES_BY_SPACE = {
+    CATEGORICAL_PROPER_SCORE_SPACE: ("bookmaker_no_vig",),
+    FIVE_STATE_PROPER_SCORE_SPACE: MODEL_SPACE_BASELINE_NAMES,
+}
 EPSILON = 1e-15
 SAME_TIME_BASELINE_TOLERANCE_MINUTES = 5.0
 
@@ -118,6 +137,14 @@ def _losses(probabilities: Mapping[str, float], actual: str) -> tuple[float, flo
         for outcome, probability in probabilities.items()
     )
     return log_loss, brier
+
+
+def _observed_state(row: Mapping[str, Any]) -> Any:
+    """Read v3 settlement state while keeping legacy v1 reports read-only."""
+
+    if "observed_settlement_state" in row:
+        return row.get("observed_settlement_state")
+    return row.get("observed_outcome")
 
 
 def _lead_bucket(minutes: float) -> str:
@@ -407,12 +434,12 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> Non
         )
 
 
-def _queue_key(cohort_id: str, fixture_id: str, market: str) -> str:
+def _queue_key(cohort_id: str, fixture_id: str, market_identity_hash: str) -> str:
     return _hash(
         {
             "cohort_id": cohort_id,
             "fixture_id": fixture_id,
-            "market": market,
+            "market_identity_hash": market_identity_hash,
         }
     )
 
@@ -451,6 +478,43 @@ def _no_vig_from_complete_decimal_odds(
     return converted, {outcome: raw[outcome] / overround for outcome in outcomes}
 
 
+def _market_identity(
+    value: Any, identity_hash: Any, label: str
+) -> tuple[dict[str, Any], str]:
+    try:
+        identity = source_evidence.canonical_market_identity(value, label=label)
+        expected_hash = source_evidence.market_identity_hash(identity)
+    except source_evidence.SourceEvidenceError as exc:
+        raise ForwardValidationError(f"{label} is invalid") from exc
+    supplied_hash = _sha256(identity_hash, f"{label}_hash")
+    if supplied_hash != expected_hash:
+        raise ForwardValidationError(f"{label}_hash does not bind {label}")
+    return identity, supplied_hash
+
+
+def _model_expected_return(
+    probabilities: Mapping[str, float],
+    *,
+    selection: str,
+    decimal_odds: float,
+    settlement_semantics: str,
+) -> float:
+    win_profit = decimal_odds - 1.0
+    if settlement_semantics == "categorical":
+        win_probability = float(probabilities[selection])
+        return win_probability * win_profit - (1.0 - win_probability)
+    returns = {
+        "full_win": win_profit,
+        "half_win": win_profit / 2.0,
+        "push": 0.0,
+        "half_loss": -0.5,
+        "loss": -1.0,
+    }
+    return math.fsum(
+        float(probabilities[state]) * value for state, value in returns.items()
+    )
+
+
 def _validation_protocol(policy: Mapping[str, Any]) -> dict[str, Any]:
     runtime = policy.get("policy")
     protocol = (
@@ -458,7 +522,7 @@ def _validation_protocol(policy: Mapping[str, Any]) -> dict[str, Any]:
     )
     if not isinstance(protocol, Mapping):
         raise ForwardValidationError(
-            "v2 forward observations require a validation protocol frozen in policy"
+            "v3 forward observations require a validation protocol frozen in policy"
         )
     required = {
         "schema_version",
@@ -471,12 +535,15 @@ def _validation_protocol(policy: Mapping[str, Any]) -> dict[str, Any]:
         "same_time_tolerance_minutes",
         "maximum_calibration_error",
         "cluster_unit",
-        "required_baselines",
+        "required_model_space_baselines",
+        "bookmaker_price_baseline",
+        "bookmaker_proper_score_scope",
+        "five_state_evaluation_scope",
         "queue_contract",
         "external_timestamp_anchor_required_for_promotion",
     }
     _exact_keys(protocol, required, "policy.validation_protocol")
-    if protocol.get("schema_version") != "forward-validation-protocol/1.0.0":
+    if protocol.get("schema_version") != "forward-validation-protocol/2.0.0":
         raise ForwardValidationError("unsupported frozen validation protocol")
     integers: dict[str, int] = {}
     for field, minimum in (
@@ -516,13 +583,29 @@ def _validation_protocol(policy: Mapping[str, Any]) -> dict[str, Any]:
         raise ForwardValidationError(
             "frozen protocol must require an external timestamp anchor for promotion"
         )
-    required_baselines = protocol.get("required_baselines")
+    required_baselines = protocol.get("required_model_space_baselines")
     if (
         not isinstance(required_baselines, list)
-        or tuple(required_baselines) != BASELINE_NAMES
+        or tuple(required_baselines) != MODEL_SPACE_BASELINE_NAMES
     ):
         raise ForwardValidationError(
-            "frozen validation protocol does not require the canonical baselines"
+            "frozen validation protocol does not require the canonical model-space baselines"
+        )
+    if protocol.get("bookmaker_price_baseline") != "bookmaker_no_vig":
+        raise ForwardValidationError("frozen bookmaker price baseline is unsupported")
+    if (
+        protocol.get("bookmaker_proper_score_scope")
+        != "categorical_same_outcome_space_only"
+    ):
+        raise ForwardValidationError(
+            "frozen bookmaker proper-score scope is unsupported"
+        )
+    if (
+        protocol.get("five_state_evaluation_scope")
+        != "settlement_state_scores_ev_roi_plus_price_space_clv"
+    ):
+        raise ForwardValidationError(
+            "frozen five-state evaluation scope is unsupported"
         )
     return {
         **dict(protocol),
@@ -546,35 +629,33 @@ def _market_schemas(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(raw_schema, Mapping):
             raise ForwardValidationError(f"market_schemas.{market} must be an object")
         _exact_keys(
-            raw_schema, {"outcomes", "settlement_semantics"}, f"market_schemas.{market}"
+            raw_schema,
+            {"settlement_states", "settlement_semantics"},
+            f"market_schemas.{market}",
         )
-        outcomes = raw_schema.get("outcomes")
+        settlement_states = raw_schema.get("settlement_states")
         if (
-            not isinstance(outcomes, list)
-            or len(outcomes) < 2
-            or any(not isinstance(item, str) or not item for item in outcomes)
-            or len(set(outcomes)) != len(outcomes)
+            not isinstance(settlement_states, list)
+            or len(settlement_states) < 2
+            or any(not isinstance(item, str) or not item for item in settlement_states)
+            or len(set(settlement_states)) != len(settlement_states)
         ):
             raise ForwardValidationError(
-                f"market_schemas.{market}.outcomes must be unique strings"
+                f"market_schemas.{market}.settlement_states must be unique strings"
             )
         semantics = str(raw_schema.get("settlement_semantics") or "")
         if semantics not in {"categorical", "five_state_return"}:
             raise ForwardValidationError(
                 f"market_schemas.{market}.settlement_semantics is unsupported"
             )
-        if semantics == "five_state_return" and set(outcomes) != {
-            "win",
-            "half_win",
-            "push",
-            "half_loss",
-            "loss",
-        }:
+        if semantics == "five_state_return" and tuple(settlement_states) != (
+            FIVE_STATE_SETTLEMENT_STATES
+        ):
             raise ForwardValidationError(
-                f"market_schemas.{market} five-state outcomes are incomplete"
+                f"market_schemas.{market} five-state settlement_states are not canonical"
             )
         normalized[market] = {
-            "outcomes": list(outcomes),
+            "settlement_states": list(settlement_states),
             "settlement_semantics": semantics,
         }
     return normalized
@@ -582,6 +663,7 @@ def _market_schemas(value: Any) -> dict[str, dict[str, Any]]:
 
 def _prematch_ledger_view(payload: Mapping[str, Any]) -> dict[str, Any]:
     value = deepcopy(dict(payload))
+    historical = value.get("schema_version") == PREVIOUS_INPUT_SCHEMA_VERSION
     value.pop("history_ledger_binding", None)
     value["cohort_closure"] = None
     for settlement in value.get("settlements", []):
@@ -590,7 +672,9 @@ def _prematch_ledger_view(payload: Mapping[str, Any]) -> dict[str, Any]:
         settlement.update(
             {
                 "status": "pending",
-                "observed_outcome": None,
+                (
+                    "observed_outcome" if historical else "observed_settlement_state"
+                ): None,
                 "result_collected_at": None,
                 "result_source_evidence_hash": None,
             }
@@ -601,6 +685,7 @@ def _prematch_ledger_view(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _market_commitment_identities(payload: Mapping[str, Any]) -> list[dict[str, str]]:
+    historical = payload.get("schema_version") == PREVIOUS_INPUT_SCHEMA_VERSION
     identities: list[dict[str, str]] = []
     raw_commitments = payload.get("commitments")
     if not isinstance(raw_commitments, list):
@@ -612,18 +697,37 @@ def _market_commitment_identities(payload: Mapping[str, Any]) -> list[dict[str, 
             continue
         prediction = raw["prediction_payload"]
         binding = raw.get("forward_policy_binding")
-        identities.append(
-            {
-                "market": str(prediction.get("market") or "").lower(),
-                "observation_id": str(prediction.get("observation_id") or ""),
-                "prediction_hash": _hash(prediction),
-                "commitment_hash": str(raw.get("commitment_hash") or ""),
-                "binding_hash": str(
-                    binding.get("binding_hash") if isinstance(binding, Mapping) else ""
-                ),
-            }
+        identity = {
+            "observation_id": str(prediction.get("observation_id") or ""),
+            "prediction_hash": _hash(prediction),
+            "commitment_hash": str(raw.get("commitment_hash") or ""),
+            "binding_hash": str(
+                binding.get("binding_hash") if isinstance(binding, Mapping) else ""
+            ),
+        }
+        if historical:
+            identity["market"] = str(prediction.get("market") or "").lower()
+        else:
+            identity.update(
+                {
+                    "family": str(
+                        prediction.get("market_identity", {}).get("family")
+                        if isinstance(prediction.get("market_identity"), Mapping)
+                        else ""
+                    ).lower(),
+                    "market_identity_hash": str(
+                        prediction.get("market_identity_hash") or ""
+                    ),
+                }
+            )
+        identities.append(identity)
+    identities.sort(
+        key=(
+            (lambda item: (item["market"], item["observation_id"]))
+            if historical
+            else (lambda item: (item["market_identity_hash"], item["observation_id"]))
         )
-    identities.sort(key=lambda item: (item["market"], item["observation_id"]))
+    )
     return identities
 
 
@@ -665,8 +769,13 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
         "receipt_hash",
     }
     _exact_keys(value, required, "history record receipt")
-    if value.get("schema_version") != HISTORY_RECORD_RECEIPT_SCHEMA_VERSION:
+    receipt_schema = value.get("schema_version")
+    if receipt_schema not in {
+        PREVIOUS_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION,
+        HISTORY_RECORD_RECEIPT_SCHEMA_VERSION,
+    }:
         raise ForwardValidationError("history record receipt schema is unsupported")
+    historical = receipt_schema == PREVIOUS_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
     supplied_receipt_hash = value.pop("receipt_hash", None)
     if supplied_receipt_hash != _hash(value):
         raise ForwardValidationError("history record receipt hash is invalid")
@@ -731,8 +840,13 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
     }
     _exact_keys(commitment, expected_commitment_fields, "history record commitment")
     supplied_commitment_hash = commitment.pop("commitment_hash", None)
+    expected_commitment_schema = (
+        "memory-forward-commitment/1.0.0"
+        if historical
+        else "memory-forward-commitment/2.0.0"
+    )
     if (
-        record_commitment.get("schema_version") != "memory-forward-commitment/1.0.0"
+        record_commitment.get("schema_version") != expected_commitment_schema
         or supplied_commitment_hash != record_commitment_hash
         or supplied_commitment_hash != _hash(commitment)
     ):
@@ -740,6 +854,15 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
     prediction_payload = record_commitment.get("prediction_payload")
     if not isinstance(prediction_payload, Mapping):
         raise ForwardValidationError("history record prediction payload is missing")
+    expected_prediction_schema = (
+        "memory-forward-prediction/1.0.0"
+        if historical
+        else "memory-forward-prediction/2.0.0"
+    )
+    if prediction_payload.get("schema_version") != expected_prediction_schema:
+        raise ForwardValidationError(
+            "history record prediction schema does not match its receipt"
+        )
     prediction_hash = _hash(prediction_payload)
     if record_commitment.get("prediction_hash") != prediction_hash:
         raise ForwardValidationError("history record prediction hash is invalid")
@@ -751,10 +874,14 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
         raise ForwardValidationError(
             "history record policy binding is invalid"
         ) from exc
+    expected_binding_schema = (
+        forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        if historical
+        else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    )
     if (
         record_binding is None
-        or record_binding.get("schema_version")
-        != forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        or record_binding.get("schema_version") != expected_binding_schema
         or record_binding.get("binding_hash") != record_binding_hash
         or record_binding.get("observation_commitment_hash") != prediction_hash
         or snapshot.get("forward_policy_binding") != record_binding
@@ -791,8 +918,13 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
     archive_without_hash = deepcopy(dict(archive))
     supplied_archive_hash = archive_without_hash.pop("archive_hash", None)
     archived_ledger = archive.get("ledger_payload")
+    expected_archive_schema = (
+        "memory-forward-ledger-archive/1.0.0"
+        if historical
+        else "memory-forward-ledger-archive/2.0.0"
+    )
     if (
-        archive.get("schema_version") != "memory-forward-ledger-archive/1.0.0"
+        archive.get("schema_version") != expected_archive_schema
         or supplied_archive_hash != _hash(archive_without_hash)
         or str(archive.get("fixture_id") or "") != fixture_id
         or not isinstance(archived_ledger, Mapping)
@@ -829,7 +961,7 @@ def _validate_history_record_receipt(raw: Any) -> dict[str, Any]:
 def _validate_history_ledger_binding(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise ForwardValidationError(
-            "v2 evaluation requires a memory-store cohort aggregate binding"
+            "v3 evaluation requires a memory-store cohort aggregate binding"
         )
     value = deepcopy(dict(raw))
     required = {
@@ -843,11 +975,17 @@ def _validate_history_ledger_binding(raw: Any) -> dict[str, Any]:
         "binding_hash",
     }
     _exact_keys(value, required, "history_ledger_binding")
+    binding_schema = value.get("schema_version")
     if (
-        value.get("schema_version") != HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+        binding_schema
+        not in {
+            PREVIOUS_HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
+            HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
+        }
         or value.get("artifact_type") != HISTORY_AGGREGATE_ARTIFACT_TYPE
     ):
         raise ForwardValidationError("history_ledger_binding schema is unsupported")
+    historical = binding_schema == PREVIOUS_HISTORY_LEDGER_BINDING_SCHEMA_VERSION
     supplied_hash = value.pop("binding_hash", None)
     if supplied_hash != _hash(value):
         raise ForwardValidationError("history_ledger_binding hash is invalid")
@@ -855,6 +993,17 @@ def _validate_history_ledger_binding(raw: Any) -> dict[str, Any]:
     if not isinstance(raw_receipts, list) or not raw_receipts:
         raise ForwardValidationError("history_ledger_binding receipts are missing")
     receipts = [_validate_history_record_receipt(item) for item in raw_receipts]
+    expected_receipt_schema = (
+        PREVIOUS_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+        if historical
+        else HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+    )
+    if any(
+        receipt.get("schema_version") != expected_receipt_schema for receipt in receipts
+    ):
+        raise ForwardValidationError(
+            "history_ledger_binding mixes incompatible receipt schemas"
+        )
     fixture_ids = [receipt["fixture_id"] for receipt in receipts]
     if (
         fixture_ids != sorted(fixture_ids)
@@ -869,7 +1018,7 @@ def _validate_history_ledger_binding(raw: Any) -> dict[str, Any]:
     return value
 
 
-def _validate_v2_input(
+def _validate_v3_input(
     payload: Any, *, require_history_ledger_binding: bool = True
 ) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
@@ -879,7 +1028,7 @@ def _validate_v2_input(
         raise ForwardValidationError("unsupported forward-observations schema_version")
     if "records" in value or "outcomes" in value:
         raise ForwardValidationError(
-            "v2 separates pre-match commitments from settlements and uses market_schemas"
+            "v3 separates pre-match commitments from settlements and uses market_schemas"
         )
     try:
         policy = forward_policy.validate_policy_manifest(
@@ -892,7 +1041,7 @@ def _validate_v2_input(
         ) from exc
     if cohort.get("status") != "active" or cohort.get("closed_at") is not None:
         raise ForwardValidationError(
-            "v2 requires the original immutable active cohort manifest, "
+            "v3 requires the original immutable active cohort manifest, "
             "not a rewritten closed pointer"
         )
     raw_closure = value.get("cohort_closure")
@@ -916,6 +1065,21 @@ def _validate_v2_input(
     ):
         raise ForwardValidationError(
             "top-level policy/cohort assertions do not match the frozen manifests"
+        )
+    cohort_kind = str(cohort.get("kind") or "")
+    policy_confirmation = policy.get("confirmation_contract")
+    policy_cohort_kind = (
+        str(policy_confirmation.get("cohort_kind") or "")
+        if isinstance(policy_confirmation, Mapping)
+        else ""
+    )
+    if (
+        cohort.get("schema_version") != forward_policy.COHORT_SCHEMA_VERSION
+        or not cohort_kind
+        or cohort_kind != policy_cohort_kind
+    ):
+        raise ForwardValidationError(
+            "v3 forward observations require matching explicit policy/cohort kinds"
         )
     protocol = _validation_protocol(policy)
     schemas = _market_schemas(value.get("market_schemas"))
@@ -962,7 +1126,7 @@ def _validate_v2_input(
     if not isinstance(raw_entries, list) or not raw_entries:
         raise ForwardValidationError("queue_manifest.entries must be non-empty")
     entries: dict[str, dict[str, Any]] = {}
-    seen_fixture_market: set[tuple[str, str]] = set()
+    seen_fixture_market_identity: set[tuple[str, str]] = set()
     for index, raw_entry in enumerate(raw_entries):
         label = f"queue_manifest.entries[{index}]"
         if not isinstance(raw_entry, Mapping):
@@ -974,7 +1138,8 @@ def _validate_v2_input(
                 "home_team",
                 "away_team",
                 "league",
-                "market",
+                "market_identity",
+                "market_identity_hash",
                 "kickoff",
                 "queue_key",
             },
@@ -984,7 +1149,12 @@ def _validate_v2_input(
         home_team = str(raw_entry.get("home_team") or "").strip()
         away_team = str(raw_entry.get("away_team") or "").strip()
         league = str(raw_entry.get("league") or "").strip()
-        market = str(raw_entry.get("market") or "").strip().lower()
+        identity, identity_hash = _market_identity(
+            raw_entry.get("market_identity"),
+            raw_entry.get("market_identity_hash"),
+            f"{label}.market_identity",
+        )
+        market = identity["family"]
         if (
             not fixture_id
             or not home_team
@@ -994,11 +1164,13 @@ def _validate_v2_input(
             or market not in schemas
         ):
             raise ForwardValidationError(f"{label} fixture/league/market is invalid")
-        pair = (fixture_id, market)
-        if pair in seen_fixture_market:
-            raise ForwardValidationError("queue contains a duplicated fixture+market")
-        seen_fixture_market.add(pair)
-        expected_key = _queue_key(cohort["cohort_id"], fixture_id, market)
+        pair = (fixture_id, identity_hash)
+        if pair in seen_fixture_market_identity:
+            raise ForwardValidationError(
+                "queue contains a duplicated fixture+market identity"
+            )
+        seen_fixture_market_identity.add(pair)
+        expected_key = _queue_key(cohort["cohort_id"], fixture_id, identity_hash)
         if raw_entry.get("queue_key") != expected_key or expected_key in entries:
             raise ForwardValidationError(f"{label}.queue_key is invalid or duplicated")
         kickoff = _aware(raw_entry.get("kickoff"), f"{label}.kickoff")
@@ -1012,6 +1184,8 @@ def _validate_v2_input(
             "away_team": away_team,
             "league": league,
             "market": market,
+            "market_identity": identity,
+            "market_identity_hash": identity_hash,
             "kickoff": kickoff.isoformat(),
             "queue_key": expected_key,
         }
@@ -1036,11 +1210,13 @@ def _validate_v2_input(
         "away_team",
         "observation_id",
         "league",
-        "market",
+        "market_identity",
+        "market_identity_hash",
         "kickoff",
         "generated_at",
         "lead_time_minutes",
         "status",
+        "settlement_reference_outcome",
         "model_probabilities",
         "baselines",
         "baseline_lineage",
@@ -1122,7 +1298,6 @@ def _validate_v2_input(
             "home_team",
             "away_team",
             "league",
-            "market",
             "kickoff",
         ):
             expected = entry[field]
@@ -1131,14 +1306,24 @@ def _validate_v2_input(
                 actual = _aware(
                     actual, f"{label}.prediction_payload.kickoff"
                 ).isoformat()
-            elif field == "market":
-                actual = str(actual or "").strip().lower()
             else:
                 actual = str(actual or "").strip()
             if actual != expected:
                 raise ForwardValidationError(
                     f"{label} does not match queue field {field}"
                 )
+        prediction_identity, prediction_identity_hash = _market_identity(
+            prediction.get("market_identity"),
+            prediction.get("market_identity_hash"),
+            f"{label}.prediction_payload.market_identity",
+        )
+        if (
+            prediction_identity != entry["market_identity"]
+            or prediction_identity_hash != entry["market_identity_hash"]
+        ):
+            raise ForwardValidationError(
+                f"{label} does not match queue market identity"
+            )
         observation_id = str(prediction.get("observation_id") or "")
         if (
             observation_id != _observation_id(queue_key)
@@ -1147,7 +1332,18 @@ def _validate_v2_input(
             raise ForwardValidationError(f"{label}.observation_id is not canonical")
         market = entry["market"]
         market_schema = schemas[market]
-        outcomes = market_schema["outcomes"]
+        settlement_states = market_schema["settlement_states"]
+        price_outcomes = prediction_identity["price_outcomes"]
+        if market_schema["settlement_semantics"] == "categorical" and set(
+            settlement_states
+        ) != set(price_outcomes):
+            raise ForwardValidationError(
+                f"{label} categorical settlement states must exactly match quoted price outcome keys"
+            )
+        bookmaker_proper_score_comparable = bool(
+            market_schema["settlement_semantics"] == "categorical"
+            and set(settlement_states) == set(price_outcomes)
+        )
         kickoff = _aware(entry["kickoff"], f"{label}.kickoff")
         generated = _aware(prediction.get("generated_at"), f"{label}.generated_at")
         archived = _aware(binding.get("archived_at"), f"{label}.binding.archived_at")
@@ -1180,6 +1376,26 @@ def _validate_v2_input(
         ):
             raise ForwardValidationError(f"{label}.unavailable_reasons must be strings")
         model = prediction.get("model_probabilities")
+        raw_reference = prediction.get("settlement_reference_outcome")
+        if market_schema["settlement_semantics"] == "five_state_return":
+            if status == "unavailable":
+                if raw_reference is not None:
+                    raise ForwardValidationError(
+                        f"{label} unavailable status cannot carry a settlement reference"
+                    )
+                settlement_reference_outcome = None
+            else:
+                settlement_reference_outcome = str(raw_reference or "").strip()
+                if settlement_reference_outcome not in price_outcomes:
+                    raise ForwardValidationError(
+                        f"{label}.settlement_reference_outcome must be a quoted price outcome"
+                    )
+        elif raw_reference is not None:
+            raise ForwardValidationError(
+                f"{label} categorical market cannot carry a settlement reference"
+            )
+        else:
+            settlement_reference_outcome = None
         baselines_raw = prediction.get("baselines")
         lineage_raw = prediction.get("baseline_lineage")
         bookmaker_raw = prediction.get("bookmaker_snapshot")
@@ -1202,28 +1418,35 @@ def _validate_v2_input(
                     f"{label} modeled status cannot carry unavailable reasons"
                 )
             model_probabilities = _probabilities(
-                model, outcomes, f"{label}.model_probabilities"
+                model, settlement_states, f"{label}.model_probabilities"
+            )
+            proper_score_baselines = (
+                BASELINE_NAMES
+                if bookmaker_proper_score_comparable
+                else MODEL_SPACE_BASELINE_NAMES
             )
             if not isinstance(baselines_raw, Mapping) or set(baselines_raw) != set(
-                BASELINE_NAMES
+                proper_score_baselines
             ):
                 raise ForwardValidationError(
-                    f"{label}.baselines must contain every frozen required baseline"
+                    f"{label}.baselines must contain every compatible proper-score baseline"
                 )
             baselines = {
                 name: _probabilities(
-                    baselines_raw[name], outcomes, f"{label}.baselines.{name}"
+                    baselines_raw[name],
+                    settlement_states,
+                    f"{label}.baselines.{name}",
                 )
-                for name in BASELINE_NAMES
+                for name in proper_score_baselines
             }
             if not isinstance(lineage_raw, Mapping) or set(lineage_raw) != set(
-                BASELINE_NAMES
+                proper_score_baselines
             ):
                 raise ForwardValidationError(
-                    f"{label}.baseline_lineage must bind every required baseline"
+                    f"{label}.baseline_lineage must bind every compatible proper-score baseline"
                 )
             lineage = {}
-            for name in BASELINE_NAMES:
+            for name in proper_score_baselines:
                 raw_lineage = lineage_raw[name]
                 if not isinstance(raw_lineage, Mapping):
                     raise ForwardValidationError(
@@ -1278,7 +1501,7 @@ def _validate_v2_input(
             )
             if bookmaker_raw.get("odds_format") != "decimal":
                 raise ForwardValidationError(
-                    "v2 bookmaker snapshots require decimal odds"
+                    "v3 bookmaker snapshots require decimal odds"
                 )
             if bookmaker_raw.get("no_vig_method") != "multiplicative_normalization":
                 raise ForwardValidationError("unsupported bookmaker no-vig method")
@@ -1297,20 +1520,25 @@ def _validate_v2_input(
                 )
             complete_odds, derived_no_vig = _no_vig_from_complete_decimal_odds(
                 bookmaker_raw.get("complete_market_odds"),
-                outcomes,
+                price_outcomes,
                 f"{label}.bookmaker_snapshot.complete_market_odds",
             )
-            if any(
-                not math.isclose(
-                    baselines["bookmaker_no_vig"][outcome],
-                    derived_no_vig[outcome],
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                )
-                for outcome in outcomes
-            ):
+            if bookmaker_proper_score_comparable:
+                if any(
+                    not math.isclose(
+                        baselines["bookmaker_no_vig"][outcome],
+                        derived_no_vig[outcome],
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                    for outcome in price_outcomes
+                ):
+                    raise ForwardValidationError(
+                        f"{label}.bookmaker_no_vig does not recompute from complete odds"
+                    )
+            elif "bookmaker_no_vig" in baselines:
                 raise ForwardValidationError(
-                    f"{label}.bookmaker_no_vig does not recompute from complete odds"
+                    f"{label}.bookmaker_no_vig cannot score a different outcome space"
                 )
             source_hash = _sha256(
                 bookmaker_raw.get("source_evidence_hash"),
@@ -1329,6 +1557,13 @@ def _validate_v2_input(
                 raise ForwardValidationError(
                     f"{label}.bookmaker_snapshot source evidence cannot be replayed"
                 ) from exc
+            if (
+                replayed_evidence.get("schema_version")
+                != source_evidence.EVIDENCE_SCHEMA_VERSION
+            ):
+                raise ForwardValidationError(
+                    f"{label}.bookmaker_snapshot requires canonical source-evidence/2.0.0"
+                )
             if replayed_evidence.get("evidence_hash") != source_hash:
                 raise ForwardValidationError(
                     f"{label}.bookmaker_snapshot evidence hash does not match"
@@ -1361,7 +1596,8 @@ def _validate_v2_input(
                 source_binding = source_evidence.match_candidate(
                     replayed_evidence,
                     {
-                        "market": market,
+                        "market_identity": prediction_identity,
+                        "market_identity_hash": prediction_identity_hash,
                         "market_collected_at": bookmaker_collected.isoformat(),
                         "odds_format": "decimal",
                         "price_basis": bookmaker_raw.get("price_basis"),
@@ -1374,18 +1610,25 @@ def _validate_v2_input(
                 raise ForwardValidationError(
                     f"{label}.bookmaker_snapshot prices do not replay from evidence"
                 ) from exc
-            if (
-                lineage["bookmaker_no_vig"]["artifact_hash"] != source_hash
-                or _aware(
-                    lineage["bookmaker_no_vig"]["generated_at"],
-                    f"{label}.bookmaker lineage generated_at",
-                )
-                != bookmaker_collected
-            ):
-                raise ForwardValidationError(
-                    f"{label}.bookmaker baseline lineage does not bind its snapshot"
-                )
+            if bookmaker_proper_score_comparable:
+                if (
+                    lineage["bookmaker_no_vig"]["artifact_hash"] != source_hash
+                    or _aware(
+                        lineage["bookmaker_no_vig"]["generated_at"],
+                        f"{label}.bookmaker lineage generated_at",
+                    )
+                    != bookmaker_collected
+                ):
+                    raise ForwardValidationError(
+                        f"{label}.bookmaker baseline lineage does not bind its snapshot"
+                    )
             bookmaker_snapshot = {
+                "market_identity": prediction_identity,
+                "market_identity_hash": prediction_identity_hash,
+                "market_period": prediction_identity["period"],
+                "market_family_period": (
+                    f"{prediction_identity['family']}:{prediction_identity['period']}"
+                ),
                 "collected_at": bookmaker_collected.isoformat(),
                 "source_evidence_hash": source_hash,
                 "source_evidence_file": str(Path(evidence_file).resolve()),
@@ -1394,6 +1637,11 @@ def _validate_v2_input(
                 "complete_market_odds": complete_odds,
                 "derived_no_vig": derived_no_vig,
                 "no_vig_method": "multiplicative_normalization",
+                "proper_score_status": (
+                    "available_same_outcome_space"
+                    if bookmaker_proper_score_comparable
+                    else "unavailable_price_and_settlement_spaces_differ"
+                ),
             }
         execution_entry_raw = prediction.get("execution_entry")
         execution_entry = None
@@ -1421,12 +1669,16 @@ def _validate_v2_input(
                 raise ForwardValidationError(
                     f"{label}.execution_entry.selection is required"
                 )
-            if (
-                market_schema["settlement_semantics"] == "categorical"
-                and selection not in outcomes
-            ):
+            if selection not in price_outcomes:
                 raise ForwardValidationError(
                     f"{label}.execution_entry.selection is invalid"
+                )
+            if (
+                market_schema["settlement_semantics"] == "five_state_return"
+                and selection != settlement_reference_outcome
+            ):
+                raise ForwardValidationError(
+                    f"{label}.execution_entry.selection must equal the settlement reference outcome"
                 )
             entry_collected = _aware(
                 execution_entry_raw.get("entry_collected_at"),
@@ -1457,17 +1709,6 @@ def _validate_v2_input(
                 raise ForwardValidationError(f"{label}.entry_price_kind is invalid")
             if execution_entry_raw.get("limit_verified") is not True:
                 raise ForwardValidationError(f"{label}.entry limit must be verified")
-            raw_entry_market = execution_entry_raw.get("entry_complete_market_odds")
-            if market_schema["settlement_semantics"] == "categorical":
-                price_outcomes = outcomes
-            elif isinstance(raw_entry_market, Mapping):
-                price_outcomes = list(raw_entry_market)
-            else:
-                price_outcomes = []
-            if not price_outcomes or selection not in price_outcomes:
-                raise ForwardValidationError(
-                    f"{label}.execution entry market is incomplete"
-                )
             entry_complete_odds, entry_no_vig = _no_vig_from_complete_decimal_odds(
                 execution_entry_raw.get("entry_complete_market_odds"),
                 price_outcomes,
@@ -1486,16 +1727,48 @@ def _validate_v2_input(
                 raise ForwardValidationError(
                     f"{label}.entry price is not in complete market odds"
                 )
+            entry_source_hash = _sha256(
+                execution_entry_raw.get("entry_source_evidence_hash"),
+                f"{label}.execution_entry.entry_source_evidence_hash",
+            )
+            if entry_source_hash != source_hash:
+                raise ForwardValidationError(
+                    f"{label}.execution_entry source evidence does not bind the replayed bookmaker snapshot"
+                )
+            if entry_collected != bookmaker_collected:
+                raise ForwardValidationError(
+                    f"{label}.execution_entry time does not bind the replayed bookmaker snapshot"
+                )
+            for outcome in price_outcomes:
+                quoted_price = complete_odds[outcome]
+                executable_price = entry_complete_odds[outcome]
+                if outcome == selection:
+                    if executable_price > quoted_price + 1e-12:
+                        raise ForwardValidationError(
+                            f"{label}.execution_entry cannot improve the selected replayed price"
+                        )
+                elif not math.isclose(
+                    executable_price,
+                    quoted_price,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ):
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry may only apply conservative slippage to the selected price"
+                    )
             execution_entry = {
                 "selection": selection,
                 "entry_decimal_odds": entry_price,
                 "entry_complete_market_odds": entry_complete_odds,
                 "entry_no_vig_probability": entry_no_vig[selection],
-                "entry_collected_at": entry_collected.isoformat(),
-                "entry_source_evidence_hash": _sha256(
-                    execution_entry_raw.get("entry_source_evidence_hash"),
-                    f"{label}.execution_entry.entry_source_evidence_hash",
+                "model_expected_roi": _model_expected_return(
+                    model_probabilities,
+                    selection=selection,
+                    decimal_odds=entry_price,
+                    settlement_semantics=market_schema["settlement_semantics"],
                 ),
+                "entry_collected_at": entry_collected.isoformat(),
+                "entry_source_evidence_hash": entry_source_hash,
                 "entry_price_kind": "executable_after_slippage",
                 "limit_verified": True,
                 "stake_units": stake,
@@ -1504,6 +1777,10 @@ def _validate_v2_input(
             "commitment_hash": supplied_commitment_hash,
             "entry": entry,
             "market_schema": market_schema,
+            "market_identity": prediction_identity,
+            "market_identity_hash": prediction_identity_hash,
+            "settlement_reference_outcome": settlement_reference_outcome,
+            "bookmaker_proper_score_comparable": bookmaker_proper_score_comparable,
             "execution_entry": execution_entry,
             "kickoff": kickoff,
         }
@@ -1515,7 +1792,20 @@ def _validate_v2_input(
                 "observation_id": observation_id,
                 "league": entry["league"],
                 "market": market,
+                "market_identity": prediction_identity,
+                "market_identity_hash": prediction_identity_hash,
+                "market_period": prediction_identity["period"],
+                "market_family_period": (
+                    f"{prediction_identity['family']}:{prediction_identity['period']}"
+                ),
                 "market_semantics": market_schema["settlement_semantics"],
+                "settlement_states": settlement_states,
+                "settlement_reference_outcome": settlement_reference_outcome,
+                "bookmaker_proper_score_status": (
+                    "available_same_outcome_space"
+                    if bookmaker_proper_score_comparable
+                    else "unavailable_price_and_settlement_spaces_differ"
+                ),
                 "kickoff": kickoff.isoformat(),
                 "generated_at": generated.isoformat(),
                 "lead_time_minutes": lead,
@@ -1530,8 +1820,12 @@ def _validate_v2_input(
                 "provenance_binding": provenance_binding,
                 "execution_entry": execution_entry,
                 "execution": None,
-                "observed_outcome": None,
+                "observed_settlement_state": None,
+                "unverified_observed_settlement_state": None,
                 "settlement_status": "pending",
+                "formal_evaluation_eligible": False,
+                "formal_evaluation_blockers": [],
+                "unverified_execution_diagnostic": None,
             }
         )
     if committed_queue_keys != set(entries):
@@ -1551,7 +1845,7 @@ def _validate_v2_input(
         "observation_id",
         "commitment_hash",
         "status",
-        "observed_outcome",
+        "observed_settlement_state",
         "result_collected_at",
         "result_source_evidence_hash",
         "closing_snapshot",
@@ -1581,7 +1875,7 @@ def _validate_v2_input(
             )
         row = rows_by_id[observation_id]
         status = str(raw_settlement.get("status") or "")
-        actual = raw_settlement.get("observed_outcome")
+        actual = raw_settlement.get("observed_settlement_state")
         result_collected_raw = raw_settlement.get("result_collected_at")
         result_hash_raw = raw_settlement.get("result_source_evidence_hash")
         if status == "pending":
@@ -1594,9 +1888,11 @@ def _validate_v2_input(
                     f"{label} pending settlement carries a result"
                 )
         elif status == "settled":
-            outcomes = metadata["market_schema"]["outcomes"]
-            if actual not in outcomes:
-                raise ForwardValidationError(f"{label}.observed_outcome is invalid")
+            settlement_states = metadata["market_schema"]["settlement_states"]
+            if actual not in settlement_states:
+                raise ForwardValidationError(
+                    f"{label}.observed_settlement_state is invalid"
+                )
             result_collected = _aware(
                 result_collected_raw, f"{label}.result_collected_at"
             )
@@ -1605,8 +1901,11 @@ def _validate_v2_input(
                     f"{label} result was collected before kickoff"
                 )
             _sha256(result_hash_raw, f"{label}.result_source_evidence_hash")
-            row["observed_outcome"] = actual
-            row["settlement_status"] = "settled"
+            row["unverified_observed_settlement_state"] = actual
+            row["settlement_status"] = "quarantined_unreplayable_result"
+            row["formal_evaluation_blockers"].append(
+                "result_evidence_replay_unavailable"
+            )
         else:
             raise ForwardValidationError(f"{label}.status must be pending or settled")
         closing_raw = raw_settlement.get("closing_snapshot")
@@ -1645,10 +1944,10 @@ def _validate_v2_input(
             settlement_state = None
             if status == "settled":
                 if metadata["market_schema"]["settlement_semantics"] == "categorical":
-                    settlement_state = "win" if selection == actual else "loss"
+                    settlement_state = "full_win" if selection == actual else "loss"
                 else:
                     settlement_state = str(actual)
-            row["execution"] = {
+            row["unverified_execution_diagnostic"] = {
                 **entry,
                 "closing_decimal_odds": closing_odds[selection],
                 "closing_complete_market_odds": closing_odds,
@@ -1660,6 +1959,9 @@ def _validate_v2_input(
                 ),
                 "settlement_state": settlement_state,
             }
+            row["formal_evaluation_blockers"].append(
+                "closing_evidence_replay_unavailable"
+            )
     if settled_ids != set(by_observation):
         missing = sorted(set(by_observation) - settled_ids)
         raise ForwardValidationError(
@@ -1667,7 +1969,7 @@ def _validate_v2_input(
         )
     if require_history_ledger_binding:
         raise ForwardValidationError(
-            "formal v2 evaluation requires a memory-store cohort aggregate export"
+            "formal v3 evaluation requires a memory-store cohort aggregate export"
         )
     value["policy_manifest"] = policy
     value["cohort_manifest"] = cohort
@@ -1679,11 +1981,15 @@ def _validate_v2_input(
     value["validation_protocol"] = protocol
     value["provenance_binding"] = rows[0]["provenance_binding"]
     value["history_ledger_binding"] = None
-    value["evidence_contract"] = "v2_pre_match_commitment_and_post_match_settlement"
+    value["evidence_contract"] = (
+        "v3_pre_match_replay_with_learning_only_unreplayable_result_quarantine"
+    )
     value["legacy_uncommitted"] = False
     value["external_timestamp_anchor"] = False
     value["baseline_artifact_replay_complete"] = False
     value["execution_price_source_replay_complete"] = False
+    value["result_source_replay_complete"] = False
+    value["closing_price_source_replay_complete"] = False
     return value
 
 
@@ -1708,12 +2014,12 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         or value.get("artifact_type") != HISTORY_AGGREGATE_ARTIFACT_TYPE
     ):
         raise ForwardValidationError(
-            "formal v2 evaluation requires a memory-store cohort aggregate export"
+            "formal v3 evaluation requires a memory-store cohort aggregate export"
         )
     raw_closure = value.get("cohort_closure")
     if not isinstance(raw_closure, Mapping):
         raise ForwardValidationError(
-            "formal v2 evaluation requires a closed cohort with a complete record manifest"
+            "formal v3 evaluation requires a closed cohort with a complete record manifest"
         )
     try:
         closure = forward_policy.validate_closure(
@@ -1723,7 +2029,7 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         )
     except forward_policy.ForwardPolicyError as exc:
         raise ForwardValidationError(
-            "formal v2 cohort closure or complete record manifest is invalid"
+            "formal v3 cohort closure or complete record manifest is invalid"
         ) from exc
     value["cohort_closure"] = closure
     binding = _validate_history_ledger_binding(value.get("history_ledger_binding"))
@@ -1750,7 +2056,7 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
 
     normalized_ledgers: list[dict[str, Any]] = []
     for receipt in binding["receipts"]:
-        normalized = _validate_v2_input(
+        normalized = _validate_v3_input(
             receipt["ledger_payload"], require_history_ledger_binding=False
         )
         if (
@@ -1823,7 +2129,7 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
     value["provenance_binding"] = provenance_binding
     value["cohort_closed"] = True
     value["evidence_contract"] = (
-        "v2_memory_store_record_receipts_and_replayed_post_match_settlements"
+        "v3_memory_store_receipts_with_learning_only_result_quarantine"
     )
     value["legacy_uncommitted"] = False
     value["external_timestamp_anchor"] = False
@@ -1833,6 +2139,13 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
     )
     value["execution_price_source_replay_complete"] = all(
         item.get("execution_price_source_replay_complete") is True
+        for item in normalized_ledgers
+    )
+    value["result_source_replay_complete"] = all(
+        item.get("result_source_replay_complete") is True for item in normalized_ledgers
+    )
+    value["closing_price_source_replay_complete"] = all(
+        item.get("closing_price_source_replay_complete") is True
         for item in normalized_ledgers
     )
     return value
@@ -1850,7 +2163,7 @@ def validate_input(payload: Any) -> dict[str, Any]:
 
 
 def validate_prematch_input(payload: Any) -> dict[str, Any]:
-    """Validate an un-settled v2 ledger before it is atomically archived.
+    """Validate an un-settled v3 ledger before it is atomically archived.
 
     This entry point is intentionally narrower than :func:`validate_input`: every queue
     key must already have a content-addressed commitment and an explicit pending
@@ -1872,12 +2185,11 @@ def validate_prematch_input(payload: Any) -> dict[str, Any]:
         raise ForwardValidationError(
             "pre-match ledger cannot carry a later closing snapshot"
         )
-    normalized = _validate_v2_input(payload, require_history_ledger_binding=False)
+    normalized = _validate_v3_input(payload, require_history_ledger_binding=False)
     if normalized.get("cohort_closure") is not None:
         raise ForwardValidationError("pre-match ledger cannot carry a cohort closure")
     if any(
-        row.get("settlement_status") != "pending"
-        or row.get("observed_outcome") is not None
+        row.get("settlement_status") != "pending" or _observed_state(row) is not None
         for row in normalized.get("records", [])
     ):
         raise ForwardValidationError("pre-match ledger must contain only pending rows")
@@ -1902,7 +2214,7 @@ def _paired_deltas(
 ) -> list[tuple[str, float, float]]:
     values: list[tuple[str, float, float]] = []
     for row in rows:
-        actual = row.get("observed_outcome")
+        actual = _observed_state(row)
         model = row.get("model_probabilities")
         baseline_probabilities = row.get("baselines", {}).get(baseline)
         if actual is None or model is None or baseline_probabilities is None:
@@ -1967,7 +2279,7 @@ def _cluster_bootstrap(
 def _calibration(rows: Sequence[Mapping[str, Any]], bins: int = 10) -> dict[str, Any]:
     values: list[tuple[str, float, float]] = []
     for row in rows:
-        actual = row.get("observed_outcome")
+        actual = _observed_state(row)
         probabilities = row.get("model_probabilities")
         if actual is None or not isinstance(probabilities, Mapping):
             continue
@@ -2038,7 +2350,7 @@ def _execution(
         settlement_state = execution.get("settlement_state")
         win_profit = entry - 1.0
         profit = {
-            "win": win_profit,
+            "full_win": win_profit,
             "half_win": win_profit / 2.0,
             "push": 0.0,
             "half_loss": -0.5,
@@ -2105,32 +2417,318 @@ def _execution(
     }
 
 
+def _proper_score_space_rows(
+    graded: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Partition graded rows into outcome spaces that can share proper scores.
+
+    A bookmaker quote remains useful for price-space EV and CLV on a split-line
+    market, but its two quoted outcomes are not the same random variable as the
+    model's five settlement states.  Keeping the spaces explicit prevents a
+    missing bookmaker proper score from becoming a permanent statistical blocker
+    for Asian-handicap, total, or corner cohorts.
+    """
+
+    return {
+        CATEGORICAL_PROPER_SCORE_SPACE: [
+            row
+            for row in graded
+            if row.get("market_semantics") == "categorical"
+            and row.get("bookmaker_proper_score_status")
+            == "available_same_outcome_space"
+        ],
+        FIVE_STATE_PROPER_SCORE_SPACE: [
+            row for row in graded if row.get("market_semantics") == "five_state_return"
+        ],
+    }
+
+
+def _proper_score_gate_report(
+    graded: Sequence[Mapping[str, Any]], *, repetitions: int, seed: int
+) -> dict[str, Any]:
+    rows_by_space = _proper_score_space_rows(graded)
+    report: dict[str, Any] = {}
+    for space_index, (space, required_baselines) in enumerate(
+        PROPER_SCORE_BASELINES_BY_SPACE.items()
+    ):
+        eligible = rows_by_space[space]
+        comparisons = {
+            baseline: _cluster_bootstrap(
+                _paired_deltas(eligible, baseline),
+                repetitions=repetitions,
+                seed=seed + space_index * 10007 + baseline_index * 101,
+            )
+            for baseline_index, baseline in enumerate(required_baselines)
+        }
+        missing = {
+            baseline: [
+                str(row.get("observation_id"))
+                for row in eligible
+                if row.get("baselines", {}).get(baseline) is None
+            ]
+            for baseline in required_baselines
+        }
+        if not eligible:
+            status = "unavailable_no_eligible_outcome_space"
+        elif any(missing.values()):
+            status = "incomplete_required_baselines"
+        else:
+            status = "available"
+        report[space] = {
+            "status": status,
+            "eligible_graded_outputs": len(eligible),
+            "eligible_observation_ids": [
+                str(row.get("observation_id")) for row in eligible
+            ],
+            "required_baselines": list(required_baselines),
+            "missing_baseline_ids": missing,
+            "comparisons": comparisons,
+            "gate_scope": (
+                "bookmaker proper score on the identical categorical outcome space"
+                if space == CATEGORICAL_PROPER_SCORE_SPACE
+                else "model-space proper scores against frozen five-state baselines"
+            ),
+            "promotion_gate": False,
+            "role": "pooled_descriptive_summary_only",
+        }
+    return report
+
+
+def _proper_score_outcome_space_signature(row: Mapping[str, Any]) -> dict[str, Any]:
+    semantics = str(row.get("market_semantics") or "")
+    states = sorted(str(item) for item in row.get("settlement_states") or [])
+    payload = {"settlement_semantics": semantics, "settlement_states": states}
+    return {**payload, "signature_hash": _hash(payload)}
+
+
+def _proper_score_identity_gate_report(
+    graded: Sequence[Mapping[str, Any]], *, repetitions: int, seed: int
+) -> dict[str, Any]:
+    """Build promotion gates per exact canonical market identity.
+
+    Identity-level grouping is intentionally stricter than an outcome-space pool:
+    a strong 1X2 cohort cannot subsidize HT/FT or goal-range evidence, and one
+    split line/family cannot subsidize another.
+    """
+
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in graded:
+        identity_hash = str(row.get("market_identity_hash") or "")
+        identity = row.get("market_identity")
+        if identity_hash and isinstance(identity, Mapping):
+            grouped[identity_hash].append(row)
+    report: dict[str, Any] = {}
+    for identity_index, (identity_hash, eligible) in enumerate(sorted(grouped.items())):
+        first = eligible[0]
+        space = (
+            CATEGORICAL_PROPER_SCORE_SPACE
+            if first.get("market_semantics") == "categorical"
+            else FIVE_STATE_PROPER_SCORE_SPACE
+        )
+        required_baselines = PROPER_SCORE_BASELINES_BY_SPACE[space]
+        comparisons = {
+            baseline: _cluster_bootstrap(
+                _paired_deltas(eligible, baseline),
+                repetitions=repetitions,
+                seed=seed + identity_index * 10007 + baseline_index * 101,
+            )
+            for baseline_index, baseline in enumerate(required_baselines)
+        }
+        missing = {
+            baseline: [
+                str(row.get("observation_id"))
+                for row in eligible
+                if row.get("baselines", {}).get(baseline) is None
+            ]
+            for baseline in required_baselines
+        }
+        status = (
+            "incomplete_required_baselines" if any(missing.values()) else "available"
+        )
+        report[identity_hash] = {
+            "status": status,
+            "promotion_gate": True,
+            "market_identity_hash": identity_hash,
+            "market_identity": dict(first["market_identity"]),
+            "market_family_period": str(first.get("market_family_period") or "unknown"),
+            "outcome_space_kind": space,
+            "outcome_space_signature": _proper_score_outcome_space_signature(first),
+            "eligible_graded_outputs": len(eligible),
+            "eligible_observation_ids": [
+                str(row.get("observation_id")) for row in eligible
+            ],
+            "required_baselines": list(required_baselines),
+            "missing_baseline_ids": missing,
+            "comparisons": comparisons,
+            "calibration": _calibration(eligible),
+            "execution": _execution(
+                [
+                    row
+                    for row in eligible
+                    if row.get("status") == "predicted"
+                    and isinstance(row.get("execution"), Mapping)
+                ],
+                repetitions=repetitions,
+                seed=seed + identity_index * 10007 + 7901,
+            ),
+        }
+    return report
+
+
+def _assess_identity_proper_score_gates(
+    identity_gates: Mapping[str, Any],
+    *,
+    minimum_samples: int,
+    minimum_clusters: int,
+    maximum_calibration_error: float,
+) -> tuple[list[str], list[str]]:
+    statistical: list[str] = []
+    integrity: list[str] = []
+    for identity_hash, raw_gate in identity_gates.items():
+        gate = raw_gate
+        eligible_count = int(gate["eligible_graded_outputs"])
+        gate_blockers: list[str] = []
+        if gate["status"] != "available":
+            gate["statistical_gate_available"] = False
+            gate["statistical_gate_passed"] = None
+            gate["statistical_blockers"] = []
+            continue
+        gate["statistical_gate_available"] = True
+        short_identity = identity_hash.split(":", 1)[-1][:16]
+        space = str(gate["outcome_space_kind"])
+        for baseline, comparison in gate["comparisons"].items():
+            if comparison.get("sample_count") != eligible_count:
+                integrity.append(
+                    f"identity_{short_identity}_{baseline}_pairing_is_incomplete"
+                )
+            if comparison["sample_count"] < minimum_samples:
+                gate_blockers.append(
+                    f"identity_{short_identity}_{baseline}_samples_are_insufficient"
+                )
+                if space == CATEGORICAL_PROPER_SCORE_SPACE:
+                    statistical.append(
+                        "insufficient_paired_same_time_bookmaker_samples"
+                    )
+            if comparison.get("cluster_count", 0) < minimum_clusters:
+                gate_blockers.append(
+                    f"identity_{short_identity}_{baseline}_iso_week_clusters_are_insufficient"
+                )
+                if space == CATEGORICAL_PROPER_SCORE_SPACE:
+                    statistical.append("insufficient_independent_iso_week_clusters")
+            for metric in ("log_loss_delta", "brier_delta"):
+                block = comparison.get(metric)
+                if not isinstance(block, Mapping) or block.get("ci95_high") is None:
+                    gate_blockers.append(
+                        f"identity_{short_identity}_{baseline}_{metric}_ci_is_unavailable"
+                    )
+                elif float(block["ci95_high"]) >= 0.0:
+                    gate_blockers.append(
+                        f"identity_{short_identity}_{baseline}_{metric}_ci_does_not_improve"
+                    )
+        calibration = gate["calibration"]
+        calibration_error = calibration.get("expected_calibration_error")
+        if (
+            calibration_error is None
+            or float(calibration_error) > maximum_calibration_error
+        ):
+            gate_blockers.append(
+                f"identity_{short_identity}_calibration_error_exceeds_threshold"
+            )
+        outcome_calibration = calibration.get("by_outcome")
+        if (
+            not isinstance(outcome_calibration, Mapping)
+            or not outcome_calibration
+            or any(
+                not isinstance(block, Mapping)
+                or block.get("expected_calibration_error") is None
+                or float(block["expected_calibration_error"])
+                > maximum_calibration_error
+                for block in outcome_calibration.values()
+            )
+        ):
+            gate_blockers.append(
+                f"identity_{short_identity}_classwise_calibration_exceeds_threshold"
+            )
+        execution = gate["execution"]
+        if execution.get("sample_count", 0) < minimum_samples:
+            gate_blockers.append(
+                f"identity_{short_identity}_executable_price_samples_are_insufficient"
+            )
+        for field, blocker_suffix in (
+            ("roi_ci95", "roi_ci_is_not_positive"),
+            ("realized_roi_ci95", "realized_roi_ci_is_not_positive"),
+            ("clv_ci95", "clv_ci_is_not_positive"),
+        ):
+            interval = execution.get(field)
+            if (
+                not isinstance(interval, Mapping)
+                or interval.get("low") is None
+                or float(interval["low"]) <= 0.0
+            ):
+                gate_blockers.append(f"identity_{short_identity}_{blocker_suffix}")
+        gate["statistical_blockers"] = gate_blockers
+        gate["statistical_gate_passed"] = not gate_blockers
+        statistical.extend(gate_blockers)
+    return list(dict.fromkeys(statistical)), list(dict.fromkeys(integrity))
+
+
 def _segment_report(
     rows: Sequence[Mapping[str, Any]], *, repetitions: int, seed: int
 ) -> dict[str, Any]:
     predicted = [row for row in rows if row.get("status") == "predicted"]
+    formal_rows = [
+        row for row in rows if row.get("formal_evaluation_eligible", True) is True
+    ]
     modeled = [
         row
         for row in rows
         if row.get("status") in {"predicted", "abstained"}
         and row.get("model_probabilities") is not None
     ]
-    graded = [row for row in modeled if row.get("observed_outcome") is not None]
+    graded = [
+        row
+        for row in formal_rows
+        if row.get("status") in {"predicted", "abstained"}
+        and row.get("model_probabilities") is not None
+        and _observed_state(row) is not None
+    ]
     executed_graded = [
         row
-        for row in predicted
-        if row.get("observed_outcome") is not None
+        for row in formal_rows
+        if row.get("status") == "predicted"
+        if _observed_state(row) is not None
         and isinstance(row.get("execution"), Mapping)
     ]
-    missing_outcome_ids = [
+    missing_settlement_state_ids = [
+        str(row.get("observation_id")) for row in rows if _observed_state(row) is None
+    ]
+    quarantined_observation_ids = [
         str(row.get("observation_id"))
         for row in rows
-        if row.get("observed_outcome") is None
+        if row.get("formal_evaluation_blockers")
     ]
+    replay_unavailable_blockers = list(
+        dict.fromkeys(
+            str(blocker)
+            for row in rows
+            for blocker in row.get("formal_evaluation_blockers", [])
+            if str(blocker).strip()
+        )
+    )
+    baseline_eligible_rows = {
+        baseline: [
+            row
+            for row in graded
+            if baseline != "bookmaker_no_vig"
+            or row.get("bookmaker_proper_score_status")
+            == "available_same_outcome_space"
+        ]
+        for baseline in BASELINE_NAMES
+    }
     missing_baseline_ids = {
         baseline: [
             str(row.get("observation_id"))
-            for row in graded
+            for row in baseline_eligible_rows[baseline]
             if row.get("baselines", {}).get(baseline) is None
         ]
         for baseline in BASELINE_NAMES
@@ -2138,7 +2736,7 @@ def _segment_report(
     missing_execution_ids = [
         str(row.get("observation_id"))
         for row in predicted
-        if row.get("observed_outcome") is not None
+        if _observed_state(row) is not None
         and not isinstance(row.get("execution"), Mapping)
     ]
     comparisons = {
@@ -2149,21 +2747,52 @@ def _segment_report(
         )
         for index, baseline in enumerate(BASELINE_NAMES)
     }
+    proper_score_gates = _proper_score_gate_report(
+        graded, repetitions=repetitions, seed=seed + 1703
+    )
+    proper_score_identity_gates = _proper_score_identity_gate_report(
+        graded, repetitions=repetitions, seed=seed + 3203
+    )
     return {
         "eligible_fixtures": len(rows),
+        "formal_evaluation_eligible_fixtures": len(formal_rows),
+        "quarantined_observation_ids": quarantined_observation_ids,
+        "replay_unavailable_blockers": replay_unavailable_blockers,
         "predicted_fixtures": len(predicted),
         "model_available_fixtures": len(modeled),
         "graded_model_outputs": len(graded),
         "graded_predictions": sum(
-            row.get("observed_outcome") is not None for row in predicted
+            _observed_state(row) is not None for row in predicted
         ),
-        "settled_fixtures": len(rows) - len(missing_outcome_ids),
-        "missing_outcome_ids": missing_outcome_ids,
+        "settled_fixtures": len(rows) - len(missing_settlement_state_ids),
+        "missing_settlement_state_ids": missing_settlement_state_ids,
         "missing_baseline_ids": missing_baseline_ids,
+        "proper_score_availability": {
+            baseline: {
+                "eligible_graded_outputs": len(baseline_eligible_rows[baseline]),
+                "unavailable_graded_outputs": len(graded)
+                - len(baseline_eligible_rows[baseline]),
+                "unavailable_observation_ids": [
+                    str(row.get("observation_id"))
+                    for row in graded
+                    if row not in baseline_eligible_rows[baseline]
+                ],
+                "status": (
+                    "available"
+                    if baseline_eligible_rows[baseline]
+                    else "unavailable_no_compatible_outcome_space"
+                ),
+            }
+            for baseline in BASELINE_NAMES
+        },
         "baseline_paired_coverage": {
             baseline: (
-                (len(graded) - len(missing_baseline_ids[baseline])) / len(graded)
-                if graded
+                (
+                    len(baseline_eligible_rows[baseline])
+                    - len(missing_baseline_ids[baseline])
+                )
+                / len(baseline_eligible_rows[baseline])
+                if baseline_eligible_rows[baseline]
                 else None
             )
             for baseline in BASELINE_NAMES
@@ -2182,6 +2811,8 @@ def _segment_report(
             else None
         ),
         "comparisons": comparisons,
+        "proper_score_gates": proper_score_gates,
+        "proper_score_identity_gates": proper_score_identity_gates,
         "calibration": _calibration(graded),
         "execution": _execution(
             executed_graded, repetitions=repetitions, seed=seed + 701
@@ -2260,7 +2891,7 @@ def evaluate(
         rows, repetitions=bootstrap_repetitions, seed=bootstrap_seed
     )
     segments: dict[str, Any] = {}
-    for field in ("league", "market", "lead_time_bucket"):
+    for field in ("league", "market_family_period", "lead_time_bucket"):
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             grouped[str(row.get(field) or "unknown")].append(row)
@@ -2272,72 +2903,148 @@ def evaluate(
             )
             for index, (key, subset) in enumerate(sorted(grouped.items()))
         }
-    bookmaker = overall["comparisons"]["bookmaker_no_vig"]
     calibration_error = overall["calibration"]["expected_calibration_error"]
     execution = overall["execution"]
     segment_stability: dict[str, Any] = {}
     for dimension, blocks in segments.items():
-        eligible_blocks: dict[str, Any] = {}
-        failures: list[str] = []
-        for key, block in blocks.items():
-            comparison = block["comparisons"]["bookmaker_no_vig"]
-            if (
-                comparison["sample_count"] < minimum_segment_samples
-                or comparison.get("cluster_count", 0) < minimum_segment_clusters
-            ):
-                continue
-            eligible_blocks[key] = comparison
-            for metric in ("log_loss_delta", "brier_delta"):
-                interval = comparison.get(metric)
-                if (
-                    not isinstance(interval, Mapping)
-                    or interval.get("ci95_high") is None
-                    or float(interval["ci95_high"]) >= 0.0
+        identity_blocks: dict[str, Any] = {}
+        active_identities = sorted(overall["proper_score_identity_gates"])
+        for identity_hash in active_identities:
+            overall_gate = overall["proper_score_identity_gates"][identity_hash]
+            eligible_blocks: dict[str, Any] = {}
+            failures: list[str] = []
+            for key, block in blocks.items():
+                gate = block["proper_score_identity_gates"].get(identity_hash)
+                if not isinstance(gate, Mapping):
+                    continue
+                if gate["status"] != "available":
+                    continue
+                comparisons = gate["comparisons"]
+                if any(
+                    comparison["sample_count"] < minimum_segment_samples
+                    or comparison.get("cluster_count", 0) < minimum_segment_clusters
+                    for comparison in comparisons.values()
                 ):
-                    failures.append(f"{key}:{metric}")
+                    continue
+                eligible_blocks[key] = comparisons
+                for baseline, comparison in comparisons.items():
+                    for metric in ("log_loss_delta", "brier_delta"):
+                        interval = comparison.get(metric)
+                        if (
+                            not isinstance(interval, Mapping)
+                            or interval.get("ci95_high") is None
+                            or float(interval["ci95_high"]) >= 0.0
+                        ):
+                            failures.append(f"{key}:{baseline}:{metric}")
+                calibration = gate["calibration"]
+                if (
+                    calibration.get("expected_calibration_error") is None
+                    or float(calibration["expected_calibration_error"])
+                    > maximum_calibration_error
+                ):
+                    failures.append(f"{key}:calibration")
+                outcome_calibration = calibration.get("by_outcome")
+                if (
+                    not isinstance(outcome_calibration, Mapping)
+                    or not outcome_calibration
+                    or any(
+                        not isinstance(outcome_block, Mapping)
+                        or outcome_block.get("expected_calibration_error") is None
+                        or float(outcome_block["expected_calibration_error"])
+                        > maximum_calibration_error
+                        for outcome_block in outcome_calibration.values()
+                    )
+                ):
+                    failures.append(f"{key}:classwise_calibration")
+                execution_block = gate["execution"]
+                if execution_block.get("sample_count", 0) < minimum_segment_samples:
+                    failures.append(f"{key}:execution_samples")
+                for interval_name in (
+                    "roi_ci95",
+                    "realized_roi_ci95",
+                    "clv_ci95",
+                ):
+                    interval = execution_block.get(interval_name)
+                    if (
+                        not isinstance(interval, Mapping)
+                        or interval.get("low") is None
+                        or float(interval["low"]) <= 0.0
+                    ):
+                        failures.append(f"{key}:{interval_name}")
+            identity_blocks[identity_hash] = {
+                "status": overall_gate["status"],
+                "market_identity": deepcopy(overall_gate["market_identity"]),
+                "market_family_period": overall_gate["market_family_period"],
+                "outcome_space_signature": deepcopy(
+                    overall_gate["outcome_space_signature"]
+                ),
+                "required_baselines": list(overall_gate["required_baselines"]),
+                "eligible_segments": sorted(eligible_blocks),
+                "failed_segments": failures,
+                "demonstrated": bool(eligible_blocks) and not failures,
+            }
         segment_stability[dimension] = {
             "minimum_paired_samples": minimum_segment_samples,
             "minimum_iso_week_clusters": minimum_segment_clusters,
-            "eligible_segments": sorted(eligible_blocks),
-            "failed_segments": failures,
-            "demonstrated": bool(eligible_blocks) and not failures,
+            "active_market_identities": active_identities,
+            "market_identities": identity_blocks,
+            "eligible_segments": sorted(
+                {
+                    key
+                    for block in identity_blocks.values()
+                    for key in block["eligible_segments"]
+                }
+            ),
+            "failed_segments": [
+                f"{identity_hash}:{failure}"
+                for identity_hash, block in identity_blocks.items()
+                for failure in block["failed_segments"]
+            ],
+            "demonstrated": bool(active_identities)
+            and all(block["demonstrated"] for block in identity_blocks.values()),
         }
-    blockers: list[str] = []
+    statistical_blockers: list[str] = []
+    integrity_blockers: list[str] = []
+    assurance_blockers: list[str] = []
+    manual_blockers = ["manual_independent_review_required_even_when_gates_pass"]
     if legacy:
-        blockers.append("legacy_uncommitted_observations_are_read_only")
+        integrity_blockers.append("legacy_uncommitted_observations_are_read_only")
     if protocol_overrides:
-        blockers.append("validation_protocol_override_is_experimental")
+        integrity_blockers.append("validation_protocol_override_is_experimental")
     if data.get("external_timestamp_anchor") is not True:
-        blockers.append("external_timestamp_anchor_not_configured")
+        assurance_blockers.append("external_timestamp_anchor_not_configured")
     if data.get("baseline_artifact_replay_complete") is not True:
-        blockers.append("baseline_artifact_replay_not_demonstrated")
+        assurance_blockers.append("baseline_artifact_replay_not_demonstrated")
     if data.get("execution_price_source_replay_complete") is not True:
-        blockers.append("execution_price_source_replay_not_demonstrated")
+        assurance_blockers.append("execution_price_source_replay_not_demonstrated")
+    if data.get("result_source_replay_complete") is not True:
+        assurance_blockers.append("result_source_replay_not_demonstrated")
+    if data.get("closing_price_source_replay_complete") is not True:
+        assurance_blockers.append("closing_price_source_replay_not_demonstrated")
     if data.get("cohort_closed") is not True:
-        blockers.append("forward_cohort_is_not_closed")
-    if overall["missing_outcome_ids"]:
-        blockers.append("incomplete_settlement_outcomes")
+        integrity_blockers.append("forward_cohort_is_not_closed")
+    integrity_blockers.extend(overall.get("replay_unavailable_blockers", []))
+    if overall["missing_settlement_state_ids"]:
+        integrity_blockers.append("incomplete_settlement_states")
     if any(overall["missing_baseline_ids"].values()):
-        blockers.append("incomplete_paired_baselines")
+        integrity_blockers.append("incomplete_paired_baselines")
     if overall["missing_execution_ids"]:
-        blockers.append("incomplete_executable_price_evidence")
-    if bookmaker["sample_count"] < minimum_confirmation_samples:
-        blockers.append("insufficient_paired_same_time_bookmaker_samples")
-    if bookmaker.get("sample_count") != overall["graded_model_outputs"]:
-        blockers.append("bookmaker_pairing_does_not_cover_every_graded_model_output")
-    if bookmaker.get("cluster_count", 0) < minimum_iso_week_clusters:
-        blockers.append("insufficient_independent_iso_week_clusters")
-    for metric in ("log_loss_delta", "brier_delta"):
-        block = bookmaker.get(metric)
-        if not isinstance(block, Mapping) or block.get("ci95_high") is None:
-            blockers.append(f"bookmaker_{metric}_confidence_interval_unavailable")
-        elif float(block["ci95_high"]) >= 0.0:
-            blockers.append(f"bookmaker_{metric}_ci95_does_not_support_improvement")
+        integrity_blockers.append("incomplete_executable_price_evidence")
+    identity_statistical, identity_integrity = _assess_identity_proper_score_gates(
+        overall["proper_score_identity_gates"],
+        minimum_samples=minimum_confirmation_samples,
+        minimum_clusters=minimum_iso_week_clusters,
+        maximum_calibration_error=maximum_calibration_error,
+    )
+    statistical_blockers.extend(identity_statistical)
+    integrity_blockers.extend(identity_integrity)
     if (
         calibration_error is None
         or float(calibration_error) > maximum_calibration_error
     ):
-        blockers.append("calibration_error_exceeds_5_percent_or_is_unavailable")
+        statistical_blockers.append(
+            "calibration_error_exceeds_5_percent_or_is_unavailable"
+        )
     outcome_calibration = overall["calibration"].get("by_outcome", {})
     if (
         not isinstance(outcome_calibration, Mapping)
@@ -2349,48 +3056,158 @@ def evaluate(
             for block in outcome_calibration.values()
         )
     ):
-        blockers.append(
+        statistical_blockers.append(
             "classwise_calibration_error_exceeds_5_percent_or_is_unavailable"
         )
     if overall["coverage"] is None:
-        blockers.append("coverage_unavailable")
+        statistical_blockers.append("coverage_unavailable")
     if execution["sample_count"] < minimum_confirmation_samples:
-        blockers.append("insufficient_executable_price_samples")
+        statistical_blockers.append("insufficient_executable_price_samples")
     roi_ci = execution.get("roi_ci95")
     if (
         not isinstance(roi_ci, Mapping)
         or roi_ci.get("low") is None
         or float(roi_ci["low"]) <= 0
     ):
-        blockers.append("executable_price_roi_ci95_not_positive")
+        statistical_blockers.append("executable_price_roi_ci95_not_positive")
     realized_roi_ci = execution.get("realized_roi_ci95")
     if (
         not isinstance(realized_roi_ci, Mapping)
         or realized_roi_ci.get("low") is None
         or float(realized_roi_ci["low"]) <= 0
     ):
-        blockers.append("realized_stake_weighted_roi_ci95_not_positive")
+        statistical_blockers.append("realized_stake_weighted_roi_ci95_not_positive")
     clv_ci = execution.get("clv_ci95")
     if (
         not isinstance(clv_ci, Mapping)
         or clv_ci.get("low") is None
         or float(clv_ci["low"]) <= 0
     ):
-        blockers.append("clv_ci95_not_positive")
+        statistical_blockers.append("clv_ci95_not_positive")
     for dimension, block in segment_stability.items():
         if not block["demonstrated"]:
-            blockers.append(f"{dimension}_stability_not_demonstrated")
+            statistical_blockers.append(f"{dimension}_stability_not_demonstrated")
+    cohort_kind = str(data.get("cohort_manifest", {}).get("kind") or "")
+    local_shadow_kind = getattr(
+        forward_policy, "LOCAL_INTEGRITY_SHADOW_KIND", "local-integrity-shadow-v2"
+    )
+    promotable_kind = getattr(
+        forward_policy, "PROMOTABLE_CONFIRMATION_KIND", "promotable-confirmation-v2"
+    )
+    if cohort_kind == local_shadow_kind:
+        assurance_blockers.append("local_integrity_shadow_has_no_external_assurance")
+    elif not cohort_kind and not legacy:
+        assurance_blockers.append("cohort_kind_is_unspecified")
+    blocker_categories = {
+        "statistical": statistical_blockers,
+        "integrity": integrity_blockers,
+        "assurance": assurance_blockers,
+        "manual": manual_blockers,
+    }
+    flattened_blockers = [
+        blocker
+        for category in ("statistical", "integrity", "assurance")
+        for blocker in blocker_categories[category]
+    ]
+    identity_audit: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity_hash = str(row.get("market_identity_hash") or "")
+        identity = row.get("market_identity")
+        if not identity_hash or not isinstance(identity, Mapping):
+            continue
+        gate_space = (
+            CATEGORICAL_PROPER_SCORE_SPACE
+            if row.get("market_semantics") == "categorical"
+            else FIVE_STATE_PROPER_SCORE_SPACE
+        )
+        identity_gate = overall["proper_score_identity_gates"].get(identity_hash)
+        item = identity_audit.setdefault(
+            identity_hash,
+            {
+                "market_identity_hash": identity_hash,
+                "market_identity": dict(identity),
+                "market_semantics": row.get("market_semantics"),
+                "proper_score_gate_space": gate_space,
+                "required_proper_score_baselines": list(
+                    PROPER_SCORE_BASELINES_BY_SPACE[gate_space]
+                ),
+                "outcome_space_signature": _proper_score_outcome_space_signature(row),
+                "identity_gate_status": (
+                    identity_gate["status"]
+                    if isinstance(identity_gate, Mapping)
+                    else "unavailable_no_graded_model_output"
+                ),
+                "identity_statistical_gate_available": (
+                    identity_gate.get("statistical_gate_available")
+                    if isinstance(identity_gate, Mapping)
+                    else False
+                ),
+                "identity_statistical_gate_passed": (
+                    identity_gate.get("statistical_gate_passed")
+                    if isinstance(identity_gate, Mapping)
+                    else None
+                ),
+                "identity_statistical_blockers": (
+                    list(identity_gate.get("statistical_blockers") or [])
+                    if isinstance(identity_gate, Mapping)
+                    else []
+                ),
+                "bookmaker_proper_score_status": row.get(
+                    "bookmaker_proper_score_status"
+                ),
+                "settlement_states": list(row.get("settlement_states") or []),
+                "observation_count": 0,
+                "settlement_reference_outcomes": set(),
+            },
+        )
+        item["observation_count"] += 1
+        reference = row.get("settlement_reference_outcome")
+        if reference is not None:
+            item["settlement_reference_outcomes"].add(str(reference))
+    market_identity_audit = []
+    for identity_hash in sorted(identity_audit):
+        item = identity_audit[identity_hash]
+        item["settlement_reference_outcomes"] = sorted(
+            item["settlement_reference_outcomes"]
+        )
+        market_identity_audit.append(item)
+    statistical_gate_passed = not statistical_blockers
+    local_integrity_gate_passed = not integrity_blockers
+    assurance_gate_passed = not assurance_blockers
+    promotion_eligible = bool(
+        cohort_kind == promotable_kind
+        and statistical_gate_passed
+        and local_integrity_gate_passed
+        and assurance_gate_passed
+    )
     report: dict[str, Any] = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_forward_validation",
         "cohort_id": data["cohort_id"],
         "cohort_hash": data["cohort_manifest"]["cohort_hash"],
+        "cohort_kind": cohort_kind or None,
         "policy_id": data["policy_id"],
         "policy_hash": data["policy_hash"],
         "input_hash": _hash(data),
         "outcomes": data.get("outcomes"),
         "market_schemas": data.get("market_schemas"),
+        "market_identity_audit": market_identity_audit,
+        "proper_score_gate_contract": {
+            "categorical_same_outcome_space": {
+                "required_baselines": ["bookmaker_no_vig"],
+                "bookmaker_proper_score": "available_only_when_price_and_model_outcomes_match",
+            },
+            "five_state_return": {
+                "required_baselines": list(MODEL_SPACE_BASELINE_NAMES),
+                "bookmaker_proper_score": "unavailable_not_a_statistical_failure",
+                "bookmaker_price_use": "execution_ev_and_clv_only",
+            },
+        },
         "evidence_contract": data.get("evidence_contract"),
+        "result_source_replay_complete": data.get("result_source_replay_complete"),
+        "closing_price_source_replay_complete": data.get(
+            "closing_price_source_replay_complete"
+        ),
         "provenance_binding": data.get("provenance_binding"),
         "history_ledger_binding": data.get("history_ledger_binding"),
         "queue_hash": (
@@ -2418,12 +3235,14 @@ def evaluate(
         if isinstance(frozen_protocol, Mapping)
         else None,
         "protocol_overrides": protocol_overrides,
-        "statistical_gate_passed": not blockers,
-        "promotion_eligible": False,
+        "statistical_gate_passed": statistical_gate_passed,
+        "local_integrity_gate_passed": local_integrity_gate_passed,
+        "assurance_gate_passed": assurance_gate_passed,
+        "blocker_categories": blocker_categories,
+        "promotion_eligible": promotion_eligible,
         "parameter_change_authorized": False,
         "manual_review_required": True,
-        "promotion_blockers": blockers
-        or ["manual_independent_review_required_even_when_statistical_gates_pass"],
+        "promotion_blockers": flattened_blockers or manual_blockers,
     }
     report["report_hash"] = _hash(report)
     return report

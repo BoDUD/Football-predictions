@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import tempfile
 import unittest
@@ -16,6 +17,15 @@ TEST_HASH = "sha256:" + "1" * 64
 REAL_GIT_COMMIT = forward_policy._git(
     Path(__file__).resolve().parents[1], "rev-parse", "HEAD"
 )
+
+
+ONE_X_TWO_IDENTITY = {
+    "family": "1x2",
+    "period": "full_time",
+    "line": None,
+    "price_outcomes": OUTCOMES,
+}
+ONE_X_TWO_IDENTITY_HASH = source_evidence.market_identity_hash(ONE_X_TWO_IDENTITY)
 
 
 def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
@@ -66,17 +76,9 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
             "display_policy": {"joint_event_count": 2},
             "validation_protocol": protocol,
         },
-        "confirmation_contract": {
-            "retrospective_records_allowed": False,
-            "parameter_or_threshold_changes_allowed": False,
-            "prediction_affecting_bugfix_starts_new_cohort": True,
-            "clean_head_required_at_freeze_and_cohort_start": True,
-            "explicit_final_merge_commit_required": True,
-            "all_candidates_abstentions_and_unavailable_markets_required": True,
-            "executable_timestamped_prices_required_for_market_comparison": True,
-            "promotion_is_manual": True,
-            "promotion_requirements": ["proper_scores"],
-        },
+        "confirmation_contract": forward_policy._confirmation_contract(
+            forward_policy.LOCAL_INTEGRITY_SHADOW_KIND
+        ),
     }
     value["policy_hash"] = forward_policy._hash_json(value)
     value["policy_id"] = (
@@ -90,9 +92,10 @@ def cohort_manifest(policy: dict, *, status: str = "active") -> dict:
         "schema_version": forward_policy.COHORT_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort",
         "cohort_id": "confirmation-a",
+        "kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
         "status": status,
         "starts_at": "2026-08-01T00:01:00+00:00",
-        "policy_file": "policy.json",
+        "policy_file": str(Path("C:/forward-policies") / f"{policy['policy_id']}.json"),
         "policy_id": policy["policy_id"],
         "policy_hash": policy["policy_hash"],
         "retrospective_records_allowed": False,
@@ -148,7 +151,9 @@ def base_policy_binding(policy: dict, cohort: dict, archived_at: str) -> dict:
         "policy_snapshot": policy,
         "recorded_code_commit": policy["code"]["commit"],
         "archived_at": archived_at,
-        "untouched_confirmation_eligible": True,
+        "cohort_kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+        "assurance_scope": forward_policy.LOCAL_ASSURANCE_SCOPE,
+        "promotion_evidence_eligible": False,
         "provenance_binding": forward_policy.build_provenance_binding(
             policy, cohort_id=cohort["cohort_id"]
         ),
@@ -177,7 +182,7 @@ def raw_snapshot(
         },
         "markets": [
             {
-                "market": "1x2",
+                "market_identity": ONE_X_TWO_IDENTITY,
                 "odds_format": "decimal",
                 "firms": [
                     {"name": name, "outcomes": prices} for name in ("A", "B", "C")
@@ -204,7 +209,10 @@ def build_payload(
     policy = policy_manifest(git_commit=git_commit)
     cohort = cohort_manifest(policy)
     market_schemas = {
-        "1x2": {"outcomes": OUTCOMES, "settlement_semantics": "categorical"}
+        "1x2": {
+            "settlement_states": OUTCOMES,
+            "settlement_semantics": "categorical",
+        }
     }
     frozen_at = datetime(2026, 8, 2, tzinfo=timezone.utc)
     entries: list[dict] = []
@@ -220,9 +228,8 @@ def build_payload(
         fixture_id = str(1000 + index)
         home_team = f"Home {index}"
         away_team = f"Away {index}"
-        market = "1x2"
         queue_key = forward_validation._queue_key(
-            cohort["cohort_id"], fixture_id, market
+            cohort["cohort_id"], fixture_id, ONE_X_TWO_IDENTITY_HASH
         )
         entries.append(
             {
@@ -230,7 +237,8 @@ def build_payload(
                 "home_team": home_team,
                 "away_team": away_team,
                 "league": "league-a" if index % 2 else "league-b",
-                "market": market,
+                "market_identity": ONE_X_TWO_IDENTITY,
+                "market_identity_hash": ONE_X_TWO_IDENTITY_HASH,
                 "kickoff": kickoff.isoformat(),
                 "queue_key": queue_key,
             }
@@ -321,11 +329,13 @@ def build_payload(
             "away_team": raw["away_team"],
             "observation_id": forward_validation._observation_id(raw["queue_key"]),
             "league": entries[offset]["league"],
-            "market": "1x2",
+            "market_identity": ONE_X_TWO_IDENTITY,
+            "market_identity_hash": ONE_X_TWO_IDENTITY_HASH,
             "kickoff": raw["kickoff"].isoformat(),
             "generated_at": generated_text,
             "lead_time_minutes": 30,
             "status": "predicted",
+            "settlement_reference_outcome": None,
             "model_probabilities": model,
             "baselines": {
                 "historical_frequency": {"H": 0.4, "D": 0.3, "A": 0.3},
@@ -347,9 +357,9 @@ def build_payload(
             },
             "execution_entry": {
                 "selection": actual,
-                "entry_decimal_odds": 2.2,
+                "entry_decimal_odds": 2.0,
                 "entry_complete_market_odds": {
-                    item: 2.2 if item == actual else 4.0 for item in OUTCOMES
+                    item: 2.0 if item == actual else 4.0 for item in OUTCOMES
                 },
                 "entry_collected_at": generated_text,
                 "entry_source_evidence_hash": raw["evidence"]["evidence_hash"],
@@ -379,7 +389,7 @@ def build_payload(
                     "observation_id": prediction["observation_id"],
                     "commitment_hash": commitment["commitment_hash"],
                     "status": "settled",
-                    "observed_outcome": actual,
+                    "observed_settlement_state": actual,
                     "result_collected_at": (
                         raw["kickoff"] + timedelta(hours=2)
                     ).isoformat(),
@@ -423,7 +433,7 @@ def history_receipt_from_micro_ledger(payload: dict) -> dict:
     fixture_id = fixture_ids.pop()
     archived_at = payload["commitments"][0]["forward_policy_binding"]["archived_at"]
     archive = {
-        "schema_version": "memory-forward-ledger-archive/1.0.0",
+        "schema_version": "memory-forward-ledger-archive/2.0.0",
         "fixture_id": fixture_id,
         "ledger_hash": forward_validation._hash(prematch),
         "ledger_payload": prematch,
@@ -444,7 +454,7 @@ def history_receipt_from_micro_ledger(payload: dict) -> dict:
     )
     first_prediction = predictions[0]
     record_prediction = {
-        "schema_version": "memory-forward-prediction/1.0.0",
+        "schema_version": "memory-forward-prediction/2.0.0",
         "archived_at": archived_at,
         "analysis_stage": "initial",
         "fixture": {
@@ -467,7 +477,7 @@ def history_receipt_from_micro_ledger(payload: dict) -> dict:
         committed_micro_binding, prediction_hash
     )
     record_commitment = {
-        "schema_version": "memory-forward-commitment/1.0.0",
+        "schema_version": "memory-forward-commitment/2.0.0",
         "prediction_payload": record_prediction,
         "prediction_hash": prediction_hash,
         "forward_policy_binding": record_binding,
@@ -598,7 +608,7 @@ def pending_micro_ledger(base: Path, *, start_index: int = 0) -> dict:
         {
             "commitment_hash": payload["commitments"][0]["commitment_hash"],
             "status": "pending",
-            "observed_outcome": None,
+            "observed_settlement_state": None,
             "result_collected_at": None,
             "result_source_evidence_hash": None,
             "closing_snapshot": None,
@@ -610,12 +620,929 @@ def pending_micro_ledger(base: Path, *, start_index: int = 0) -> dict:
     return payload
 
 
-def record_and_review_forward_fixture(base: Path, index: int) -> dict:
-    from test_memory_store import memory_store, record_args
+def five_state_pending_micro_ledger(
+    base: Path,
+    *,
+    start_index: int,
+    family: str,
+    line: float,
+    reference_outcome: str,
+    expected_state: str,
+    additional_source_line: float | None = None,
+) -> dict:
+    """Build a canonical split-line ledger by resealing every affected artifact."""
 
-    fixture_base = base / f"real-fixture-{index}"
+    payload = build_payload(base, 1, start_index=start_index)
+    payload["cohort_closure"] = None
+    policy = payload["policy_manifest"]
+    cohort = payload["cohort_manifest"]
+    original_prediction = payload["commitments"][0]["prediction_payload"]
+    kickoff = original_prediction["kickoff"]
+    generated = original_prediction["generated_at"]
+    fixture_id = original_prediction["fixture_id"]
+    home_team = "Alpha"
+    away_team = "Bravo"
+    league = "test_league"
+    price_outcomes = ["over", "under"] if family == "total" else ["home", "away"]
+    identity = {
+        "family": family,
+        "period": "full_time",
+        "line": line,
+        "price_outcomes": price_outcomes,
+    }
+    identity_hash = source_evidence.market_identity_hash(identity)
+    queue_key = forward_validation._queue_key(
+        cohort["cohort_id"], fixture_id, identity_hash
+    )
+    prices = {
+        outcome: 20.0 if outcome == reference_outcome else 1.01
+        for outcome in price_outcomes
+    }
+    source_url = f"https://zq.titan007.com/analysis/{fixture_id}cn.htm"
+    raw_file = base / f"raw-five-state-{fixture_id}.json"
+    raw_markets = [
+        {
+            "market_identity": identity,
+            "odds_format": "decimal",
+            "firms": [
+                {"name": name, "outcomes": prices} for name in ("A", "B", "C", "D", "E")
+            ],
+        }
+    ]
+    if additional_source_line is not None:
+        additional_identity = {
+            "family": family,
+            "period": "full_time",
+            "line": additional_source_line,
+            "price_outcomes": price_outcomes,
+        }
+        additional_prices = {outcome: 2.0 for outcome in price_outcomes}
+        raw_markets.append(
+            {
+                "market_identity": additional_identity,
+                "odds_format": "decimal",
+                "firms": [
+                    {"name": name, "outcomes": additional_prices}
+                    for name in ("A", "B", "C", "D", "E")
+                ],
+            }
+        )
+    raw_file.write_text(
+        json.dumps(
+            {
+                "schema_version": source_evidence.RAW_SCHEMA_VERSION,
+                "source_url": source_url,
+                "collected_at": generated,
+                "fixture": {
+                    "match_id": fixture_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "kickoff": kickoff,
+                },
+                "markets": raw_markets,
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence_file, evidence = source_evidence.build_evidence(
+        [raw_file], output_dir=base / f"evidence-five-state-{fixture_id}"
+    )
+    queue = seal(
+        {
+            "schema_version": forward_validation.QUEUE_SCHEMA_VERSION,
+            "artifact_type": "soccer_forward_eligibility_queue",
+            "queue_id": "queue-a",
+            "cohort_id": cohort["cohort_id"],
+            "policy_id": policy["policy_id"],
+            "policy_hash": policy["policy_hash"],
+            "frozen_at": payload["queue_manifest"]["frozen_at"],
+            "entries": [
+                {
+                    "fixture_id": fixture_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "league": league,
+                    "market_identity": identity,
+                    "market_identity_hash": identity_hash,
+                    "kickoff": kickoff,
+                    "queue_key": queue_key,
+                }
+            ],
+            "integrity_assurance": "local_content_hash_only_no_external_timestamp",
+        },
+        "queue_hash",
+    )
+    probabilities = {
+        state: 0.05 for state in forward_validation.FIVE_STATE_SETTLEMENT_STATES
+    }
+    probabilities[expected_state] = 0.8
+    baseline = {
+        state: 1.0 / len(forward_validation.FIVE_STATE_SETTLEMENT_STATES)
+        for state in forward_validation.FIVE_STATE_SETTLEMENT_STATES
+    }
+    lineage = {
+        name: {
+            "kind": "frozen_baseline_artifact",
+            "generated_at": generated,
+            "training_cutoff": generated,
+            "artifact_hash": TEST_HASH,
+        }
+        for name in forward_validation.MODEL_SPACE_BASELINE_NAMES
+    }
+    prediction = {
+        **deepcopy(original_prediction),
+        "home_team": home_team,
+        "away_team": away_team,
+        "league": league,
+        "queue_hash": queue["queue_hash"],
+        "queue_key": queue_key,
+        "observation_id": forward_validation._observation_id(queue_key),
+        "market_identity": identity,
+        "market_identity_hash": identity_hash,
+        "settlement_reference_outcome": reference_outcome,
+        "model_probabilities": probabilities,
+        "baselines": {
+            name: deepcopy(baseline)
+            for name in forward_validation.MODEL_SPACE_BASELINE_NAMES
+        },
+        "baseline_lineage": lineage,
+        "bookmaker_snapshot": {
+            "collected_at": generated,
+            "source_evidence_file": str(evidence_file),
+            "source_evidence_hash": evidence["evidence_hash"],
+            "source_url": source_url,
+            "firm_count": 5,
+            "price_basis": "median",
+            "odds_format": "decimal",
+            "complete_market_odds": prices,
+            "no_vig_method": "multiplicative_normalization",
+        },
+        "execution_entry": {
+            "selection": reference_outcome,
+            "entry_decimal_odds": prices[reference_outcome],
+            "entry_complete_market_odds": deepcopy(prices),
+            "entry_collected_at": generated,
+            "entry_source_evidence_hash": evidence["evidence_hash"],
+            "entry_price_kind": "executable_after_slippage",
+            "limit_verified": True,
+            "stake_units": 1.0,
+        },
+    }
+    archived_at = payload["commitments"][0]["forward_policy_binding"]["archived_at"]
+    binding = forward_policy.bind_observation_commitment(
+        base_policy_binding(policy, cohort, archived_at),
+        forward_validation._hash(prediction),
+    )
+    commitment = seal(
+        {
+            "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
+            "prediction_payload": prediction,
+            "forward_policy_binding": binding,
+        },
+        "commitment_hash",
+    )
+    payload.update(
+        {
+            "market_schemas": {
+                family: {
+                    "settlement_states": list(
+                        forward_validation.FIVE_STATE_SETTLEMENT_STATES
+                    ),
+                    "settlement_semantics": "five_state_return",
+                }
+            },
+            "queue_manifest": queue,
+            "commitments": [commitment],
+            "settlements": [
+                seal(
+                    {
+                        "schema_version": forward_validation.SETTLEMENT_SCHEMA_VERSION,
+                        "observation_id": prediction["observation_id"],
+                        "commitment_hash": commitment["commitment_hash"],
+                        "status": "pending",
+                        "observed_settlement_state": None,
+                        "result_collected_at": None,
+                        "result_source_evidence_hash": None,
+                        "closing_snapshot": None,
+                    },
+                    "settlement_hash",
+                )
+            ],
+        }
+    )
+    forward_validation.validate_prematch_input(payload)
+    return payload
+
+
+def categorical_half_time_pending_micro_ledger(
+    base: Path, *, start_index: int = 0, selection: str = "H"
+) -> dict:
+    payload = build_payload(base, 1, start_index=start_index)
+    payload["cohort_closure"] = None
+    policy = payload["policy_manifest"]
+    cohort = payload["cohort_manifest"]
+    original = payload["commitments"][0]["prediction_payload"]
+    fixture_id = original["fixture_id"]
+    kickoff = original["kickoff"]
+    generated = original["generated_at"]
+    home_team = "Alpha"
+    away_team = "Bravo"
+    league = "test_league"
+    identity = {
+        "family": "1x2",
+        "period": "first_half",
+        "line": None,
+        "price_outcomes": ["H", "D", "A"],
+    }
+    identity_hash = source_evidence.market_identity_hash(identity)
+    queue_key = forward_validation._queue_key(
+        cohort["cohort_id"], fixture_id, identity_hash
+    )
+    prices = {outcome: 20.0 if outcome == selection else 1.01 for outcome in OUTCOMES}
+    source_url = f"https://zq.titan007.com/analysis/{fixture_id}cn.htm"
+    raw_file = base / f"raw-half-time-{fixture_id}.json"
+    raw_file.write_text(
+        json.dumps(
+            {
+                "schema_version": source_evidence.RAW_SCHEMA_VERSION,
+                "source_url": source_url,
+                "collected_at": generated,
+                "fixture": {
+                    "match_id": fixture_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "kickoff": kickoff,
+                },
+                "markets": [
+                    {
+                        "market_identity": identity,
+                        "odds_format": "decimal",
+                        "firms": [
+                            {"name": name, "outcomes": prices}
+                            for name in ("A", "B", "C", "D", "E")
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence_file, evidence = source_evidence.build_evidence(
+        [raw_file], output_dir=base / f"evidence-half-time-{fixture_id}"
+    )
+    queue = seal(
+        {
+            "schema_version": forward_validation.QUEUE_SCHEMA_VERSION,
+            "artifact_type": "soccer_forward_eligibility_queue",
+            "queue_id": "queue-half-time",
+            "cohort_id": cohort["cohort_id"],
+            "policy_id": policy["policy_id"],
+            "policy_hash": policy["policy_hash"],
+            "frozen_at": payload["queue_manifest"]["frozen_at"],
+            "entries": [
+                {
+                    "fixture_id": fixture_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "league": league,
+                    "market_identity": identity,
+                    "market_identity_hash": identity_hash,
+                    "kickoff": kickoff,
+                    "queue_key": queue_key,
+                }
+            ],
+            "integrity_assurance": "local_content_hash_only_no_external_timestamp",
+        },
+        "queue_hash",
+    )
+    inverse = {outcome: 1.0 / price for outcome, price in prices.items()}
+    inverse_total = sum(inverse.values())
+    bookmaker_no_vig = {
+        outcome: probability / inverse_total for outcome, probability in inverse.items()
+    }
+    lineage = {
+        name: {
+            "kind": (
+                "replayable_source_snapshot"
+                if name == "bookmaker_no_vig"
+                else "frozen_baseline_artifact"
+            ),
+            "generated_at": generated,
+            "training_cutoff": generated,
+            "artifact_hash": (
+                evidence["evidence_hash"] if name == "bookmaker_no_vig" else TEST_HASH
+            ),
+        }
+        for name in forward_validation.BASELINE_NAMES
+    }
+    prediction = {
+        **deepcopy(original),
+        "queue_hash": queue["queue_hash"],
+        "queue_key": queue_key,
+        "home_team": home_team,
+        "away_team": away_team,
+        "league": league,
+        "observation_id": forward_validation._observation_id(queue_key),
+        "market_identity": identity,
+        "market_identity_hash": identity_hash,
+        "status": "predicted",
+        "settlement_reference_outcome": None,
+        "model_probabilities": {"H": 0.5, "D": 0.25, "A": 0.25},
+        "baselines": {
+            "historical_frequency": {"H": 0.4, "D": 0.3, "A": 0.3},
+            "independent_htft": {"H": 0.4, "D": 0.3, "A": 0.3},
+            "simple_poisson_dc": {"H": 0.45, "D": 0.3, "A": 0.25},
+            "bookmaker_no_vig": bookmaker_no_vig,
+        },
+        "baseline_lineage": lineage,
+        "bookmaker_snapshot": {
+            "collected_at": generated,
+            "source_evidence_file": str(evidence_file),
+            "source_evidence_hash": evidence["evidence_hash"],
+            "source_url": source_url,
+            "firm_count": 5,
+            "price_basis": "median",
+            "odds_format": "decimal",
+            "complete_market_odds": prices,
+            "no_vig_method": "multiplicative_normalization",
+        },
+        "execution_entry": None,
+        "unavailable_reasons": [],
+    }
+    archived_at = (datetime.fromisoformat(generated) + timedelta(minutes=1)).isoformat()
+    binding = forward_policy.bind_observation_commitment(
+        base_policy_binding(policy, cohort, archived_at),
+        forward_validation._hash(prediction),
+    )
+    commitment = seal(
+        {
+            "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
+            "prediction_payload": prediction,
+            "forward_policy_binding": binding,
+        },
+        "commitment_hash",
+    )
+    settlement = seal(
+        {
+            "schema_version": forward_validation.SETTLEMENT_SCHEMA_VERSION,
+            "observation_id": prediction["observation_id"],
+            "commitment_hash": commitment["commitment_hash"],
+            "status": "pending",
+            "observed_settlement_state": None,
+            "result_collected_at": None,
+            "result_source_evidence_hash": None,
+            "closing_snapshot": None,
+        },
+        "settlement_hash",
+    )
+    payload.update(
+        {
+            "market_schemas": {
+                "1x2": {
+                    "settlement_states": OUTCOMES,
+                    "settlement_semantics": "categorical",
+                }
+            },
+            "queue_manifest": queue,
+            "commitments": [commitment],
+            "settlements": [settlement],
+        }
+    )
+    forward_validation.validate_prematch_input(payload)
+    return payload
+
+
+_FORWARD_MEMORY_JOINT_MODEL: dict | None = None
+
+
+def active_record_args_for_five_state_ledger(
+    base: Path,
+    ledger: dict,
+    ledger_file: Path,
+    *,
+    history_base: Path | None = None,
+) -> SimpleNamespace:
+    """Build the real model and candidate-v3 inputs consumed by ``cmd_record``."""
+
+    from test_memory_store import JOINT_SAMPLE_ROWS, memory_store, record_args
+
+    from scripts import htft_model, joint_scenario_model, score_model
+
+    global _FORWARD_MEMORY_JOINT_MODEL
+    if _FORWARD_MEMORY_JOINT_MODEL is None:
+        history_file = base / "forward-joint-history.csv"
+        with history_file.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, lineterminator="\n")
+            writer.writerow(
+                [
+                    "date",
+                    "home_team",
+                    "away_team",
+                    "home_goals",
+                    "away_goals",
+                    "half_home_goals",
+                    "half_away_goals",
+                ]
+            )
+            writer.writerows(JOINT_SAMPLE_ROWS)
+        _FORWARD_MEMORY_JOINT_MODEL = htft_model.fit_model(
+            history_file,
+            iterations=30,
+            learning_rate=0.025,
+            regularization=0.03,
+            half_time_half_life_days=180.0,
+            second_half_half_life_days=180.0,
+            full_time_half_life_days=180.0,
+            competition_key="test_league",
+            dataset_manifest_hash="sha256:" + "a" * 64,
+        )
+        _FORWARD_MEMORY_JOINT_MODEL["generated_at"] = "2026-07-20T00:00:00Z"
+        for component in _FORWARD_MEMORY_JOINT_MODEL["components"].values():
+            component["generated_at"] = "2026-07-20T00:00:00Z"
+        htft_model.validate_model(_FORWARD_MEMORY_JOINT_MODEL)
+    model = deepcopy(_FORWARD_MEMORY_JOINT_MODEL)
+    prediction = ledger["commitments"][0]["prediction_payload"]
+    kickoff = str(prediction["kickoff"])
+    decision_time = datetime.fromisoformat(str(prediction["generated_at"]))
+    upstream_time = (decision_time - timedelta(minutes=1)).isoformat()
+    score = score_model.predict_model(
+        model["components"]["full_time"],
+        prediction["home_team"],
+        prediction["away_team"],
+        kickoff=kickoff,
+        generated_at=upstream_time,
+        max_goals=12,
+        hard_max_goals=30,
+    )
+    htft = htft_model.predict_model(
+        model,
+        prediction["home_team"],
+        prediction["away_team"],
+        kickoff=kickoff,
+        generated_at=upstream_time,
+        max_goals=12,
+        hard_max_goals=30,
+    )
+    joint = joint_scenario_model.predict_joint_scenarios(
+        model,
+        score,
+        htft,
+        generated_at=prediction["generated_at"],
+        expected_match_id=prediction["fixture_id"],
+    )
+    htft_matrix = htft["htft"]["code_probabilities"]
+    half = {
+        result: sum(htft_matrix[f"{result}{full}"] for full in "HDA")
+        for result in "HDA"
+    }
+    full = {
+        result: sum(htft_matrix[f"{half_result}{result}"] for half_result in "HDA")
+        for result in "HDA"
+    }
+    ranking = memory_store.htft_ranker.rank_htft(
+        htft_matrix,
+        half,
+        full,
+        league_key=prediction["league"],
+        model_hash=htft["model_hash"],
+    )
+    artifact_paths = {
+        "score_model_file": base / "active-score.json",
+        "htft_observation_model_file": base / "active-htft.json",
+        "htft_observation_ranker_file": base / "active-htft-ranker.json",
+        "joint_scenario_file": base / "active-joint.json",
+    }
+    for name, value in (
+        ("score_model_file", score),
+        ("htft_observation_model_file", htft),
+        ("htft_observation_ranker_file", ranking),
+        ("joint_scenario_file", joint),
+    ):
+        artifact_paths[name].write_text(
+            json.dumps(value, ensure_ascii=False), encoding="utf-8"
+        )
+
+    identity = prediction["market_identity"]
+    family = str(identity["family"])
+    bookmaker = prediction["bookmaker_snapshot"]
+    candidate_specs: list[dict] = []
+    if family in {"asian", "total"}:
+        candidate_market = family
+        reference = str(prediction["settlement_reference_outcome"])
+        for outcome in identity["price_outcomes"]:
+            raw_line = float(identity["line"])
+            if family == "asian" and outcome == "away":
+                raw_line = -raw_line
+            identity_fields = {
+                "market": family,
+                "side": outcome,
+                "line": raw_line,
+            }
+            distribution = memory_store.matrix_settlement_distribution(
+                joint["full_time_score_marginal"]["probabilities"],
+                family,
+                identity_fields,
+            )
+            candidate_specs.append(
+                {
+                    "identity_fields": identity_fields,
+                    "reference": outcome,
+                    "distribution": distribution,
+                }
+            )
+        selected_spec = next(
+            item for item in candidate_specs if item["reference"] == reference
+        )
+        prediction["model_probabilities"] = deepcopy(selected_spec["distribution"])
+    elif family == "1x2" and identity["period"] == "first_half":
+        candidate_market = "half_time"
+        reference = max(
+            identity["price_outcomes"],
+            key=lambda outcome: bookmaker["complete_market_odds"][outcome],
+        )
+        half_matrix = joint["half_time_score_marginal"]["probabilities"]
+        for outcome in identity["price_outcomes"]:
+            side = {"H": "home", "D": "draw", "A": "away"}[outcome]
+            identity_fields = {
+                "market": "half_time",
+                "submarket": "1x2",
+                "side": side,
+                "line": None,
+            }
+            distribution = memory_store.matrix_settlement_distribution(
+                half_matrix,
+                "half_time",
+                {"market": "1x2", "side": side, "line": None},
+            )
+            candidate_specs.append(
+                {
+                    "identity_fields": identity_fields,
+                    "reference": outcome,
+                    "distribution": distribution,
+                }
+            )
+        categorical = {"H": 0.0, "D": 0.0, "A": 0.0}
+        for home, row in enumerate(half_matrix):
+            for away, probability in enumerate(row):
+                outcome = "H" if home > away else "D" if home == away else "A"
+                categorical[outcome] += float(probability)
+        prediction["model_probabilities"] = categorical
+    else:
+        raise AssertionError(
+            "active candidate test helper received an unsupported identity"
+        )
+    previous_binding = ledger["commitments"][0]["forward_policy_binding"]
+    base_binding = deepcopy(previous_binding)
+    base_binding.pop("binding_hash")
+    base_binding.pop("observation_commitment_hash")
+    base_binding["schema_version"] = (
+        forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
+    )
+    base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
+    committed_binding = forward_policy.bind_observation_commitment(
+        base_binding, forward_validation._hash(prediction)
+    )
+    ledger["commitments"][0] = seal(
+        {
+            "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
+            "prediction_payload": prediction,
+            "forward_policy_binding": committed_binding,
+        },
+        "commitment_hash",
+    )
+    settlement = deepcopy(ledger["settlements"][0])
+    settlement.pop("settlement_hash")
+    settlement["observation_id"] = prediction["observation_id"]
+    settlement["commitment_hash"] = ledger["commitments"][0]["commitment_hash"]
+    ledger["settlements"][0] = seal(settlement, "settlement_hash")
+    forward_validation.validate_prematch_input(ledger)
+    ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    candidate_payload = {
+        "artifact_type": memory_store.CANDIDATE_EVALUATION_ARTIFACT_TYPE,
+        "schema_version": memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        "policy_version": memory_store.STRICT_OOS_POLICY_VERSION,
+        "selection_policy_version": memory_store.CONFIDENCE_POLICY_VERSION,
+        "generated_at": prediction["generated_at"],
+        "fixture": {
+            "match_id": prediction["fixture_id"],
+            "home_team": prediction["home_team"],
+            "away_team": prediction["away_team"],
+            "kickoff": prediction["kickoff"],
+        },
+        "market_manifest": [
+            {
+                "market": market,
+                "status": "evaluated" if market == candidate_market else "unavailable",
+                "reasons": []
+                if market == candidate_market
+                else [memory_store.ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING],
+            }
+            for market in memory_store.PRIMARY_MARKETS
+        ],
+        "candidates": [
+            {
+                **spec["identity_fields"],
+                "market_identity": identity,
+                "market_identity_hash": prediction["market_identity_hash"],
+                "settlement_reference_outcome": spec["reference"],
+                "probability": spec["distribution"]["full_win"]
+                + spec["distribution"]["half_win"],
+                "settlement_probabilities": spec["distribution"],
+                "odds": bookmaker["complete_market_odds"][spec["reference"]],
+                "odds_format": bookmaker["odds_format"],
+                "market_complete": True,
+                "complete_market_odds": bookmaker["complete_market_odds"],
+                "market_source": bookmaker["source_url"],
+                "market_collected_at": bookmaker["collected_at"],
+                "price_basis": bookmaker["price_basis"],
+                "firm_count": bookmaker["firm_count"],
+                "market_signal": "aligned",
+                "cover_distribution_validated": candidate_market == "asian",
+            }
+            for spec in candidate_specs
+        ],
+    }
+    candidate_file = base / "candidate-evaluation.json"
+    candidate_file.write_text(
+        json.dumps(candidate_payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    matrix = score["score_matrix"]["probabilities"]
+    ranked = sorted(
+        (
+            (float(probability), home, away)
+            for home, row in enumerate(matrix)
+            for away, probability in enumerate(row)
+        ),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    zero_zero_rank = next(
+        rank
+        for rank, (_probability, home, away) in enumerate(ranked, start=1)
+        if home == 0 and away == 0
+    )
+    one_x_two = score["one_x_two"]
+    args = record_args(
+        str(history_base or base.parent),
+        match_id=prediction["fixture_id"],
+        analysis_stage="initial",
+        league=prediction["league"],
+        kickoff=prediction["kickoff"],
+        source_kickoff=prediction["kickoff"],
+        source_timezone="UTC",
+        user_local_kickoff=prediction["kickoff"],
+        user_timezone="UTC",
+        home_team=prediction["home_team"],
+        away_team=prediction["away_team"],
+        predicted_score=f"{ranked[0][1]}-{ranked[0][2]}",
+        exact_score_pick=[
+            f"{home}-{away}:{probability:.17g}"
+            for probability, home, away in ranked[:2]
+        ],
+        zero_zero_probability=float(matrix[0][0]),
+        zero_zero_rank=zero_zero_rank,
+        source_url=bookmaker["source_url"],
+        source_evidence_file=bookmaker["source_evidence_file"],
+        forward_validation_ledger=str(ledger_file),
+        candidate_evaluation_file=str(candidate_file),
+        require_candidate_evaluations=False,
+        require_complete_analysis=True,
+        data_quality="high",
+        home_win_probability=float(one_x_two["home"]),
+        draw_probability=float(one_x_two["draw"]),
+        away_win_probability=float(one_x_two["away"]),
+        primary_market="total" if candidate_market == "total" else None,
+        total_side=reference if candidate_market == "total" else None,
+        total_line=(float(identity["line"]) if candidate_market == "total" else 2.5),
+        asian_side=None,
+        model_version=score["model_version"],
+        **{name: str(path) for name, path in artifact_paths.items()},
+    )
+    if candidate_market == "total":
+        selected_spec = next(
+            item for item in candidate_specs if item["reference"] == reference
+        )
+        distribution = selected_spec["distribution"]
+        selected_odds = float(bookmaker["complete_market_odds"][reference])
+        implied = {
+            outcome: 1.0 / float(price)
+            for outcome, price in bookmaker["complete_market_odds"].items()
+        }
+        implied_total = sum(implied.values())
+        market_probability = implied[reference] / implied_total
+        effective_probability = memory_store.effective_settlement_win_probability(
+            distribution, "active total test candidate"
+        )
+        args.primary_market = "total"
+        args.total_side = reference
+        args.total_line = float(identity["line"])
+        args.total_odds = selected_odds
+        args.total_odds_format = "decimal"
+        args.total_probability = distribution["full_win"] + distribution["half_win"]
+        args.total_ev = (
+            distribution["full_win"] * (selected_odds - 1.0)
+            + distribution["half_win"] * (selected_odds - 1.0) / 2.0
+            - distribution["half_loss"] / 2.0
+            - distribution["loss"]
+        )
+        args.total_edge_pp = (float(effective_probability) - market_probability) * 100.0
+        args.total_firm_count = bookmaker["firm_count"]
+        args.total_market_complete = True
+        args.total_market_odds = [
+            f"{outcome}:{price}"
+            for outcome, price in bookmaker["complete_market_odds"].items()
+        ]
+        args.total_market_probability = market_probability
+        args.total_market_source = bookmaker["source_url"]
+        args.total_market_collected_at = bookmaker["collected_at"]
+        args.total_price_basis = bookmaker["price_basis"]
+        args.total_full_win_probability = distribution["full_win"]
+        args.total_half_win_probability = distribution["half_win"]
+        args.total_push_probability = distribution["push"]
+        args.total_half_loss_probability = distribution["half_loss"]
+        args.total_loss_probability = distribution["loss"]
+        args.total_market_signal = "aligned"
+    return args
+
+
+def reseal_single_commitment_ledger(ledger: dict) -> dict:
+    """Reseal one current commitment after a deliberate test mutation."""
+
+    prediction = ledger["commitments"][0]["prediction_payload"]
+    previous_binding = ledger["commitments"][0]["forward_policy_binding"]
+    base_binding = deepcopy(previous_binding)
+    base_binding.pop("binding_hash")
+    base_binding.pop("observation_commitment_hash")
+    base_binding["schema_version"] = (
+        forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
+    )
+    base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
+    committed_binding = forward_policy.bind_observation_commitment(
+        base_binding, forward_validation._hash(prediction)
+    )
+    ledger["commitments"][0] = seal(
+        {
+            "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
+            "prediction_payload": prediction,
+            "forward_policy_binding": committed_binding,
+        },
+        "commitment_hash",
+    )
+    settlement = deepcopy(ledger["settlements"][0])
+    settlement.pop("settlement_hash")
+    settlement["observation_id"] = prediction["observation_id"]
+    settlement["commitment_hash"] = ledger["commitments"][0]["commitment_hash"]
+    ledger["settlements"][0] = seal(settlement, "settlement_hash")
+    forward_validation.validate_prematch_input(ledger)
+    return base_binding
+
+
+def all_unavailable_active_inputs(
+    base: Path, *, start_index: int = 0, unavailable_source: bool = True
+) -> tuple[dict, Path, SimpleNamespace, dict]:
+    """Build an honest all-unavailable denominator with one fixture sentinel."""
+
+    from test_memory_store import memory_store
+
+    ledger = five_state_pending_micro_ledger(
+        base,
+        start_index=start_index,
+        family="total",
+        line=2.5,
+        reference_outcome="over",
+        expected_state="full_win",
+    )
+    ledger_file = base / "prematch-forward-ledger.json"
+    ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    args = active_record_args_for_five_state_ledger(
+        base, ledger, ledger_file, history_base=base
+    )
+    prediction = ledger["commitments"][0]["prediction_payload"]
+    source_url = str(args.source_url)
+    if unavailable_source:
+        unavailable_raw = base / "raw-all-unavailable.json"
+        unavailable_raw.write_text(
+            json.dumps(
+                {
+                    "schema_version": source_evidence.RAW_SCHEMA_VERSION,
+                    "source_url": source_url,
+                    "collected_at": prediction["generated_at"],
+                    "fixture": {
+                        "match_id": prediction["fixture_id"],
+                        "home_team": prediction["home_team"],
+                        "away_team": prediction["away_team"],
+                        "kickoff": prediction["kickoff"],
+                    },
+                    "availability_status": "unavailable",
+                    "unavailable_reasons": ["provider market tables absent"],
+                    "markets": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        evidence_file, _evidence = source_evidence.build_evidence(
+            [unavailable_raw], output_dir=base / "evidence-all-unavailable"
+        )
+        args.source_evidence_file = str(evidence_file)
+
+    candidate_file = Path(args.candidate_evaluation_file)
+    candidate_payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+    candidate_payload["market_manifest"] = [
+        {
+            "market": market,
+            "status": "unavailable",
+            "reasons": [memory_store.ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING],
+        }
+        for market in memory_store.PRIMARY_MARKETS
+    ]
+    candidate_payload["candidates"] = []
+    candidate_file.write_text(
+        json.dumps(candidate_payload, ensure_ascii=False), encoding="utf-8"
+    )
+    args.total_side = None
+    args.primary_market = None
+    args.display_exact_score_pick = []
+    args.display_exact_score_event_probability = None
+
+    identity = {
+        "family": "1x2",
+        "period": "full_time",
+        "line": None,
+        "price_outcomes": ["H", "D", "A"],
+    }
+    identity_hash = source_evidence.market_identity_hash(identity)
+    queue = deepcopy(ledger["queue_manifest"])
+    queue.pop("queue_hash")
+    queue_key = forward_validation._queue_key(
+        queue["cohort_id"], prediction["fixture_id"], identity_hash
+    )
+    queue["entries"] = [
+        {
+            "fixture_id": prediction["fixture_id"],
+            "home_team": prediction["home_team"],
+            "away_team": prediction["away_team"],
+            "league": prediction["league"],
+            "market_identity": identity,
+            "market_identity_hash": identity_hash,
+            "kickoff": prediction["kickoff"],
+            "queue_key": queue_key,
+        }
+    ]
+    ledger["queue_manifest"] = seal(queue, "queue_hash")
+    prediction.update(
+        {
+            "queue_hash": ledger["queue_manifest"]["queue_hash"],
+            "queue_key": queue_key,
+            "observation_id": forward_validation._observation_id(queue_key),
+            "market_identity": identity,
+            "market_identity_hash": identity_hash,
+            "status": "unavailable",
+            "settlement_reference_outcome": None,
+            "model_probabilities": None,
+            "baselines": {},
+            "baseline_lineage": {},
+            "bookmaker_snapshot": None,
+            "execution_entry": None,
+            "unavailable_reasons": [
+                f"{market}:{memory_store.ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING}"
+                for market in memory_store.PRIMARY_MARKETS
+            ],
+        }
+    )
+    ledger["market_schemas"] = {
+        "1x2": {
+            "settlement_states": ["H", "D", "A"],
+            "settlement_semantics": "categorical",
+        }
+    }
+    base_binding = reseal_single_commitment_ledger(ledger)
+    ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    return ledger, ledger_file, args, base_binding
+
+
+def record_and_review_five_state_fixture(
+    base: Path,
+    *,
+    start_index: int,
+    family: str,
+    line: float,
+    reference_outcome: str,
+    expected_state: str,
+    home_score: int,
+    away_score: int,
+) -> dict:
+    from test_memory_store import memory_store
+
+    fixture_base = base / f"five-state-fixture-{start_index}"
     fixture_base.mkdir(parents=True, exist_ok=True)
-    ledger = pending_micro_ledger(fixture_base, start_index=index)
+    ledger = five_state_pending_micro_ledger(
+        fixture_base,
+        start_index=start_index,
+        family=family,
+        line=line,
+        reference_outcome=reference_outcome,
+        expected_state=expected_state,
+    )
     ledger_file = fixture_base / "prematch-forward-ledger.json"
     ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
     prediction = ledger["commitments"][0]["prediction_payload"]
@@ -628,28 +1555,65 @@ def record_and_review_forward_fixture(base: Path, index: int) -> dict:
     )
     base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
     archived_at = datetime.fromisoformat(base_binding["archived_at"])
-    args = record_args(
-        str(base),
-        match_id=prediction["fixture_id"],
-        analysis_stage="initial",
-        league=prediction["league"],
-        kickoff=prediction["kickoff"],
-        source_kickoff=prediction["kickoff"],
-        source_timezone="UTC",
-        user_local_kickoff=prediction["kickoff"],
-        user_timezone="UTC",
-        home_team=prediction["home_team"],
-        away_team=prediction["away_team"],
-        source_url=prediction["bookmaker_snapshot"]["source_url"],
-        source_evidence_file=prediction["bookmaker_snapshot"]["source_evidence_file"],
-        forward_validation_ledger=str(ledger_file),
-        home_win_probability=0.5,
-        draw_probability=0.25,
-        away_win_probability=0.25,
-        primary_market=None,
-        total_side=None,
-        asian_side=None,
+    args = active_record_args_for_five_state_ledger(fixture_base, ledger, ledger_file)
+    with (
+        mock.patch.object(
+            memory_store.forward_policy,
+            "load_active_binding",
+            return_value=deepcopy(base_binding),
+        ),
+        mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+    ):
+        memory_store.cmd_record(args)
+    result_collected = datetime.fromisoformat(prediction["kickoff"]) + timedelta(
+        hours=2
     )
+    review_args = SimpleNamespace(
+        base_dir=str(base),
+        verified_finished=True,
+        match_id=prediction["fixture_id"],
+        home_score=home_score,
+        away_score=away_score,
+        half_home_score=0,
+        half_away_score=0,
+        home_corners=None,
+        away_corners=None,
+        key_learning="canonical five-state settlement replay",
+        verification_source=f"https://example.test/final/{prediction['fixture_id']}",
+        verification_collected_at=result_collected.isoformat(),
+    )
+    with mock.patch.object(
+        memory_store, "utc_now", return_value=result_collected + timedelta(minutes=1)
+    ):
+        return memory_store.cmd_review(review_args)["record"]
+
+
+def record_and_review_forward_fixture(base: Path, index: int) -> dict:
+    from test_memory_store import memory_store
+
+    fixture_base = base / f"real-fixture-{index}"
+    fixture_base.mkdir(parents=True, exist_ok=True)
+    ledger = five_state_pending_micro_ledger(
+        fixture_base,
+        start_index=index,
+        family="total",
+        line=2.5,
+        reference_outcome="over",
+        expected_state="full_win",
+    )
+    ledger_file = fixture_base / "prematch-forward-ledger.json"
+    ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    prediction = ledger["commitments"][0]["prediction_payload"]
+    committed = ledger["commitments"][0]["forward_policy_binding"]
+    base_binding = deepcopy(committed)
+    base_binding.pop("binding_hash")
+    base_binding.pop("observation_commitment_hash")
+    base_binding["schema_version"] = (
+        forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
+    )
+    base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
+    archived_at = datetime.fromisoformat(base_binding["archived_at"])
+    args = active_record_args_for_five_state_ledger(fixture_base, ledger, ledger_file)
     with (
         mock.patch.object(
             memory_store.forward_policy,
@@ -696,6 +1660,1043 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
 
 
 class ForwardValidationTests(unittest.TestCase):
+    def test_execution_entry_cannot_invent_better_price_or_unreplayable_source_hash(
+        self,
+    ) -> None:
+        attacks = (
+            (
+                "unreplayable source hash",
+                lambda entry: entry.update(
+                    entry_source_evidence_hash="sha256:" + "f" * 64
+                ),
+                "source evidence does not bind the replayed bookmaker snapshot",
+            ),
+            (
+                "invented better price",
+                lambda entry: (
+                    entry.update(entry_decimal_odds=100.0),
+                    entry["entry_complete_market_odds"].update(over=100.0),
+                ),
+                "cannot improve the selected replayed price",
+            ),
+        )
+        for label, mutate, expected_error in attacks:
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                ledger = five_state_pending_micro_ledger(
+                    base,
+                    start_index=430,
+                    family="total",
+                    line=2.5,
+                    reference_outcome="over",
+                    expected_state="full_win",
+                )
+                entry = ledger["commitments"][0]["prediction_payload"][
+                    "execution_entry"
+                ]
+                mutate(entry)
+                with self.assertRaisesRegex(
+                    forward_validation.ForwardValidationError, expected_error
+                ):
+                    reseal_single_commitment_ledger(ledger)
+
+    def test_active_categorical_shadow_replays_without_fake_execution(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = categorical_half_time_pending_micro_ledger(
+                base, start_index=40, selection="H"
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+            ):
+                recorded = memory_store.cmd_record(args)["record"]
+
+            candidate_audit = next(
+                audit
+                for audit in recorded["candidate_audits"]
+                if audit.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            candidate = candidate_audit["candidates"][0]
+            committed_prediction = recorded["forward_validation_ledger"][
+                "ledger_payload"
+            ]["commitments"][0]["prediction_payload"]
+            self.assertTrue(candidate["shadow_selected"])
+            self.assertEqual(committed_prediction["status"], "predicted")
+            self.assertIsNone(committed_prediction["execution_entry"])
+            memory_store.validate_forward_record_prediction_commitment(recorded)
+
+            prediction = ledger["commitments"][0]["prediction_payload"]
+            result_collected = datetime.fromisoformat(
+                prediction["kickoff"]
+            ) + timedelta(hours=2)
+            review_args = SimpleNamespace(
+                base_dir=str(base),
+                verified_finished=True,
+                match_id=prediction["fixture_id"],
+                home_score=1,
+                away_score=0,
+                half_home_score=1,
+                half_away_score=0,
+                home_corners=None,
+                away_corners=None,
+                key_learning="categorical half-time shadow replay",
+                verification_source=(
+                    f"https://example.test/final/{prediction['fixture_id']}"
+                ),
+                verification_collected_at=result_collected.isoformat(),
+            )
+            with mock.patch.object(
+                memory_store,
+                "utc_now",
+                return_value=result_collected + timedelta(minutes=1),
+            ):
+                reviewed = memory_store.cmd_review(review_args)["record"]
+            _cohort, closure = closed_cohort_for_memory_records([reviewed])
+            exported = memory_store.forward_validation_input_for_records(
+                [reviewed], cohort_closure=closure
+            )
+            normalized = forward_validation.validate_input(exported)
+            report = forward_validation.evaluate(exported)
+
+        row = normalized["records"][0]
+        self.assertEqual(row["market_identity"]["period"], "first_half")
+        self.assertIsNone(row["observed_settlement_state"])
+        self.assertEqual(row["unverified_observed_settlement_state"], "H")
+        self.assertIsNone(row["execution_entry"])
+        self.assertEqual(
+            row["model_probabilities"], committed_prediction["model_probabilities"]
+        )
+        self.assertEqual(
+            report["overall"]["proper_score_gates"][
+                forward_validation.CATEGORICAL_PROPER_SCORE_SPACE
+            ]["eligible_graded_outputs"],
+            0,
+        )
+        self.assertIn(
+            "result_evidence_replay_unavailable", report["promotion_blockers"]
+        )
+
+    def test_active_record_requires_current_candidate_artifact_unconditionally(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=41,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            args.candidate_evaluation_file = None
+            args.require_candidate_evaluations = False
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError, "current --candidate-evaluation-file"
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_active_record_rejects_missing_manifest_market_and_shrunk_queue(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with self.subTest("missing one of eight market families"):
+            with tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                ledger = five_state_pending_micro_ledger(
+                    base,
+                    start_index=42,
+                    family="total",
+                    line=2.5,
+                    reference_outcome="over",
+                    expected_state="full_win",
+                )
+                ledger_file = base / "prematch-forward-ledger.json"
+                ledger_file.write_text(
+                    json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+                )
+                args = active_record_args_for_five_state_ledger(
+                    base, ledger, ledger_file, history_base=base
+                )
+                candidate_file = Path(args.candidate_evaluation_file)
+                candidate_payload = json.loads(
+                    candidate_file.read_text(encoding="utf-8")
+                )
+                candidate_payload["market_manifest"].pop()
+                candidate_file.write_text(
+                    json.dumps(candidate_payload, ensure_ascii=False), encoding="utf-8"
+                )
+                base_binding = reseal_single_commitment_ledger(ledger)
+                ledger_file.write_text(
+                    json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+                )
+                archived_at = datetime.fromisoformat(base_binding["archived_at"])
+                with (
+                    mock.patch.object(
+                        memory_store.forward_policy,
+                        "load_active_binding",
+                        return_value=deepcopy(base_binding),
+                    ),
+                    mock.patch.object(
+                        memory_store, "utc_now", return_value=archived_at
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError, "requires every supported market"
+                    ),
+                ):
+                    memory_store.cmd_record(args)
+
+        with self.subTest("source has two concrete lines but queue/candidate has one"):
+            with tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                ledger = five_state_pending_micro_ledger(
+                    base,
+                    start_index=43,
+                    family="total",
+                    line=2.5,
+                    reference_outcome="over",
+                    expected_state="full_win",
+                    additional_source_line=3.0,
+                )
+                ledger_file = base / "prematch-forward-ledger.json"
+                ledger_file.write_text(
+                    json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+                )
+                args = active_record_args_for_five_state_ledger(
+                    base, ledger, ledger_file, history_base=base
+                )
+                base_binding = reseal_single_commitment_ledger(ledger)
+                ledger_file.write_text(
+                    json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+                )
+                archived_at = datetime.fromisoformat(base_binding["archived_at"])
+                with (
+                    mock.patch.object(
+                        memory_store.forward_policy,
+                        "load_active_binding",
+                        return_value=deepcopy(base_binding),
+                    ),
+                    mock.patch.object(
+                        memory_store, "utc_now", return_value=archived_at
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError, "does not exactly cover source-visible identities"
+                    ),
+                ):
+                    memory_store.cmd_record(args)
+
+    def test_source_visible_replayable_identity_cannot_be_marked_unavailable(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=431,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            candidate_file = Path(args.candidate_evaluation_file)
+            candidate_payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+            total_manifest = next(
+                item
+                for item in candidate_payload["market_manifest"]
+                if item["market"] == "total"
+            )
+            total_manifest.update(
+                status="unavailable", reasons=["claimed_model_unavailable"]
+            )
+            candidate_payload["candidates"] = []
+            candidate_file.write_text(
+                json.dumps(candidate_payload, ensure_ascii=False), encoding="utf-8"
+            )
+            args.total_side = None
+            args.primary_market = None
+            args.display_exact_score_pick = []
+            args.display_exact_score_event_probability = None
+
+            prediction = ledger["commitments"][0]["prediction_payload"]
+            prediction.update(
+                status="unavailable",
+                settlement_reference_outcome=None,
+                model_probabilities=None,
+                baselines={},
+                baseline_lineage={},
+                bookmaker_snapshot=None,
+                execution_entry=None,
+                unavailable_reasons=["claimed_model_unavailable"],
+            )
+            evidence = source_evidence.validate_evidence_file(args.source_evidence_file)
+            self.assertIn(prediction["market_identity_hash"], evidence["market_index"])
+            self.assertTrue(Path(args.joint_scenario_file).is_file())
+
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "replayable canonical model and decision-time price must be evaluated",
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_active_formal_primary_must_match_candidate_source_and_ledger(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=432,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            score = json.loads(Path(args.score_model_file).read_text(encoding="utf-8"))
+            matrix = score["score_matrix"]["probabilities"]
+            probability = sum(
+                float(cell)
+                for home, row in enumerate(matrix)
+                for away, cell in enumerate(row)
+                if home > 0 and away > 0
+            )
+            yes_odds, no_odds = 10.0, 1.10
+            yes_implied, no_implied = 1.0 / yes_odds, 1.0 / no_odds
+            market_probability = yes_implied / (yes_implied + no_implied)
+            prediction = ledger["commitments"][0]["prediction_payload"]
+            args.total_side = None
+            args.primary_market = "btts"
+            args.display_exact_score_pick = []
+            args.display_exact_score_event_probability = None
+            args.btts_side = "yes"
+            args.btts_odds = yes_odds
+            args.btts_odds_format = "decimal"
+            args.btts_probability = probability
+            args.btts_ev = probability * yes_odds - 1.0
+            args.btts_edge_pp = (probability - market_probability) * 100.0
+            args.btts_firm_count = 1
+            args.btts_market_signal = "aligned"
+            args.btts_market_complete = True
+            args.btts_market_odds = [f"yes:{yes_odds}", f"no:{no_odds}"]
+            args.btts_market_probability = market_probability
+            args.btts_market_source = prediction["bookmaker_snapshot"]["source_url"]
+            args.btts_market_collected_at = prediction["generated_at"]
+            args.btts_price_basis = "median"
+
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "formal btts pick must match exactly one evaluated candidate",
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_formal_pick_cannot_change_frozen_candidate_signal_or_confidence(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=434,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            args.total_market_signal = "neutral"
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "does not match its frozen candidate source/price/model",
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_formal_eligible_selected_candidate_cannot_be_silently_suppressed(
+        self,
+    ) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=433,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            args.total_side = None
+            args.primary_market = None
+            args.display_exact_score_pick = []
+            args.display_exact_score_event_probability = None
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "formal-eligible selected candidates and official formal picks must match exactly",
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_active_record_rejects_resealed_model_probability_tamper(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=44,
+                family="asian",
+                line=-0.75,
+                reference_outcome="home",
+                expected_state="half_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            probabilities = ledger["commitments"][0]["prediction_payload"][
+                "model_probabilities"
+            ]
+            probabilities["full_win"] -= 0.01
+            probabilities["loss"] += 0.01
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError, "model probabilities do not match the frozen candidate"
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_candidate_cannot_bind_a_future_source_bundle_snapshot(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=45,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            original_evidence_file = Path(args.source_evidence_file)
+            original_evidence = json.loads(
+                original_evidence_file.read_text(encoding="utf-8")
+            )
+            raw_path = (
+                original_evidence_file.parent
+                / original_evidence["sources"][0]["raw_response_path"]
+            )
+            current_raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            future_raw = deepcopy(current_raw)
+            future_raw["collected_at"] = (
+                datetime.fromisoformat(current_raw["collected_at"])
+                + timedelta(seconds=1)
+            ).isoformat()
+            current_file = base / "current-source.json"
+            future_file = base / "future-source.json"
+            current_file.write_text(json.dumps(current_raw), encoding="utf-8")
+            future_file.write_text(json.dumps(future_raw), encoding="utf-8")
+            evidence_file, evidence = source_evidence.build_evidence(
+                [current_file, future_file], output_dir=base / "future-evidence"
+            )
+            args.source_evidence_file = str(evidence_file)
+            prediction = ledger["commitments"][0]["prediction_payload"]
+            prediction["bookmaker_snapshot"].update(
+                {
+                    "source_evidence_file": str(evidence_file),
+                    "source_evidence_hash": evidence["evidence_hash"],
+                }
+            )
+            prediction["execution_entry"]["entry_source_evidence_hash"] = evidence[
+                "evidence_hash"
+            ]
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError, "source evidence collected after its generated_at"
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_candidate_disposition_cannot_predate_the_frozen_queue(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=48,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            ledger_file = base / "prematch-forward-ledger.json"
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
+            )
+            candidate_payload = json.loads(
+                Path(args.candidate_evaluation_file).read_text(encoding="utf-8")
+            )
+            candidate_time = datetime.fromisoformat(candidate_payload["generated_at"])
+            queue = deepcopy(ledger["queue_manifest"])
+            queue.pop("queue_hash")
+            queue["frozen_at"] = (candidate_time + timedelta(seconds=1)).isoformat()
+            ledger["queue_manifest"] = seal(queue, "queue_hash")
+            prediction = ledger["commitments"][0]["prediction_payload"]
+            generated_at = candidate_time + timedelta(seconds=2)
+            prediction["generated_at"] = generated_at.isoformat()
+            prediction["lead_time_minutes"] = (
+                datetime.fromisoformat(prediction["kickoff"]) - generated_at
+            ).total_seconds() / 60.0
+            prediction["queue_hash"] = ledger["queue_manifest"]["queue_hash"]
+            base_binding = reseal_single_commitment_ledger(ledger)
+            ledger_file.write_text(
+                json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError, "cannot precede its frozen eligibility queue"
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_all_unavailable_denominator_requires_honest_empty_source(self) -> None:
+        from test_memory_store import memory_store
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            ledger, _ledger_file, args, base_binding = all_unavailable_active_inputs(
+                base, start_index=46
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+            ):
+                record = memory_store.cmd_record(args)["record"]
+            prediction = record["forward_validation_ledger"]["ledger_payload"][
+                "commitments"
+            ][0]["prediction_payload"]
+            candidate_audit = next(
+                audit
+                for audit in record["candidate_audits"]
+                if audit.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            self.assertEqual(prediction["status"], "unavailable")
+            self.assertIsNone(prediction["model_probabilities"])
+            self.assertEqual(len(candidate_audit["market_manifest"]), 8)
+            self.assertEqual(candidate_audit["candidates"], [])
+            memory_store.validate_forward_record_prediction_commitment(record)
+            self.assertEqual(
+                ledger["queue_manifest"]["entries"][0]["market_identity"]["family"],
+                "1x2",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            _ledger, _ledger_file, args, base_binding = all_unavailable_active_inputs(
+                base, start_index=47, unavailable_source=False
+            )
+            archived_at = datetime.fromisoformat(base_binding["archived_at"])
+            with (
+                mock.patch.object(
+                    memory_store.forward_policy,
+                    "load_active_binding",
+                    return_value=deepcopy(base_binding),
+                ),
+                mock.patch.object(memory_store, "utc_now", return_value=archived_at),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "replayable canonical model and decision-time price must be evaluated",
+                ),
+            ):
+                memory_store.cmd_record(args)
+
+    def test_identity_gates_prevent_cross_market_sample_subsidy(self) -> None:
+        categorical_specs = (
+            (
+                ONE_X_TWO_IDENTITY,
+                ["H", "D", "A"],
+                "H",
+                "1x2:full_time",
+                4,
+            ),
+            (
+                {
+                    "family": "goal_range",
+                    "period": "full_time",
+                    "line": None,
+                    "price_outcomes": ["0-1", "2-3", "4+"],
+                },
+                ["0-1", "2-3", "4+"],
+                "0-1",
+                "goal_range:full_time",
+                1,
+            ),
+        )
+        five_state_specs = (
+            (
+                {
+                    "family": "total",
+                    "period": "full_time",
+                    "line": 2.25,
+                    "price_outcomes": ["over", "under"],
+                },
+                "total:full_time",
+                4,
+            ),
+            (
+                {
+                    "family": "asian",
+                    "period": "full_time",
+                    "line": -0.75,
+                    "price_outcomes": ["home", "away"],
+                },
+                "asian:full_time",
+                1,
+            ),
+        )
+        rows: list[dict] = []
+        week_index = 1
+        categorical_hashes: list[str] = []
+        for identity, states, actual, family_period, count in categorical_specs:
+            identity_hash = source_evidence.market_identity_hash(identity)
+            categorical_hashes.append(identity_hash)
+            model = {state: 0.02 for state in states}
+            model[actual] = 0.96
+            baseline = {state: 0.3 for state in states}
+            baseline[actual] = 0.4
+            for sample_index in range(count):
+                rows.append(
+                    {
+                        "observation_id": f"cat-{identity_hash[-6:]}-{sample_index}",
+                        "status": "predicted",
+                        "market_semantics": "categorical",
+                        "market_identity": deepcopy(identity),
+                        "market_identity_hash": identity_hash,
+                        "market_family_period": family_period,
+                        "settlement_states": list(states),
+                        "bookmaker_proper_score_status": (
+                            "available_same_outcome_space"
+                        ),
+                        "kickoff_week": f"2026-W{week_index:02d}",
+                        "observed_settlement_state": actual,
+                        "model_probabilities": deepcopy(model),
+                        "baselines": {
+                            name: deepcopy(baseline)
+                            for name in forward_validation.BASELINE_NAMES
+                        },
+                        "execution": {
+                            "entry_decimal_odds": 2.0,
+                            "entry_no_vig_probability": 0.5,
+                            "closing_no_vig_probability": 0.55,
+                            "stake_units": 1.0,
+                            "settlement_state": "full_win",
+                        },
+                    }
+                )
+                week_index += 1
+        five_state_hashes: list[str] = []
+        states = list(forward_validation.FIVE_STATE_SETTLEMENT_STATES)
+        five_model = {state: 0.01 for state in states}
+        five_model["full_win"] = 0.96
+        five_baseline = {state: 0.2 for state in states}
+        for identity, family_period, count in five_state_specs:
+            identity_hash = source_evidence.market_identity_hash(identity)
+            five_state_hashes.append(identity_hash)
+            for sample_index in range(count):
+                rows.append(
+                    {
+                        "observation_id": f"five-{identity_hash[-6:]}-{sample_index}",
+                        "status": "predicted",
+                        "market_semantics": "five_state_return",
+                        "market_identity": deepcopy(identity),
+                        "market_identity_hash": identity_hash,
+                        "market_family_period": family_period,
+                        "settlement_states": states,
+                        "bookmaker_proper_score_status": (
+                            "unavailable_price_and_settlement_spaces_differ"
+                        ),
+                        "kickoff_week": f"2026-W{week_index:02d}",
+                        "observed_settlement_state": "full_win",
+                        "model_probabilities": deepcopy(five_model),
+                        "baselines": {
+                            name: deepcopy(five_baseline)
+                            for name in forward_validation.MODEL_SPACE_BASELINE_NAMES
+                        },
+                        "execution": {
+                            "entry_decimal_odds": 2.0,
+                            "entry_no_vig_probability": 0.5,
+                            "closing_no_vig_probability": 0.55,
+                            "stake_units": 1.0,
+                            "settlement_state": "full_win",
+                        },
+                    }
+                )
+                week_index += 1
+
+        block = forward_validation._segment_report(rows, repetitions=100, seed=7)
+        statistical, integrity = forward_validation._assess_identity_proper_score_gates(
+            block["proper_score_identity_gates"],
+            minimum_samples=4,
+            minimum_clusters=2,
+            maximum_calibration_error=0.05,
+        )
+        gates = block["proper_score_identity_gates"]
+        self.assertTrue(gates[categorical_hashes[0]]["statistical_gate_passed"])
+        self.assertFalse(gates[categorical_hashes[1]]["statistical_gate_passed"])
+        self.assertTrue(gates[five_state_hashes[0]]["statistical_gate_passed"])
+        self.assertFalse(gates[five_state_hashes[1]]["statistical_gate_passed"])
+        self.assertEqual(gates[categorical_hashes[1]]["eligible_graded_outputs"], 1)
+        self.assertEqual(gates[five_state_hashes[1]]["eligible_graded_outputs"], 1)
+        self.assertTrue(any("samples_are_insufficient" in item for item in statistical))
+        self.assertEqual(integrity, [])
+
+        strong_total_rows = [
+            deepcopy(row)
+            for row in rows
+            if row["market_identity_hash"] == five_state_hashes[0]
+        ]
+        asian_template = next(
+            row for row in rows if row["market_identity_hash"] == five_state_hashes[1]
+        )
+        bad_asian_rows: list[dict] = []
+        bad_model = {state: 0.05 for state in states}
+        bad_model["loss"] = 0.8
+        for index in range(4):
+            row = deepcopy(asian_template)
+            row["observation_id"] = f"bad-asian-{index}"
+            row["kickoff_week"] = f"2027-W{index + 1:02d}"
+            row["observed_settlement_state"] = "loss"
+            row["model_probabilities"] = deepcopy(bad_model)
+            row["execution"].update(
+                {
+                    "closing_no_vig_probability": 0.45,
+                    "settlement_state": "loss",
+                }
+            )
+            bad_asian_rows.append(row)
+        quality_block = forward_validation._segment_report(
+            strong_total_rows + bad_asian_rows,
+            repetitions=100,
+            seed=17,
+        )
+        quality_statistical, quality_integrity = (
+            forward_validation._assess_identity_proper_score_gates(
+                quality_block["proper_score_identity_gates"],
+                minimum_samples=4,
+                minimum_clusters=2,
+                maximum_calibration_error=0.05,
+            )
+        )
+        quality_gates = quality_block["proper_score_identity_gates"]
+        self.assertTrue(quality_gates[five_state_hashes[0]]["statistical_gate_passed"])
+        self.assertFalse(quality_gates[five_state_hashes[1]]["statistical_gate_passed"])
+        bad_blockers = quality_gates[five_state_hashes[1]]["statistical_blockers"]
+        self.assertTrue(any("calibration" in item for item in bad_blockers))
+        self.assertTrue(any("roi_ci_is_not_positive" in item for item in bad_blockers))
+        self.assertTrue(any("clv_ci_is_not_positive" in item for item in bad_blockers))
+        self.assertTrue(quality_statistical)
+        self.assertEqual(quality_integrity, [])
+
+    def test_split_line_markets_replay_both_reference_outcomes_end_to_end(self) -> None:
+        from test_memory_store import memory_store
+
+        specifications = [
+            {
+                "start_index": 8,
+                "family": "total",
+                "line": 2.25,
+                "reference_outcome": "over",
+                "expected_state": "half_loss",
+                "home_score": 1,
+                "away_score": 1,
+            },
+            {
+                "start_index": 9,
+                "family": "total",
+                "line": 2.25,
+                "reference_outcome": "under",
+                "expected_state": "half_win",
+                "home_score": 1,
+                "away_score": 1,
+            },
+            {
+                "start_index": 10,
+                "family": "asian",
+                "line": -0.75,
+                "reference_outcome": "home",
+                "expected_state": "half_win",
+                "home_score": 1,
+                "away_score": 0,
+            },
+            {
+                "start_index": 11,
+                "family": "asian",
+                "line": -0.75,
+                "reference_outcome": "away",
+                "expected_state": "half_loss",
+                "home_score": 1,
+                "away_score": 0,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            records = [
+                record_and_review_five_state_fixture(base, **specification)
+                for specification in specifications
+            ]
+            _cohort, closure = closed_cohort_for_memory_records(records)
+            exported = memory_store.forward_validation_input_for_records(
+                records, cohort_closure=closure
+            )
+            normalized = forward_validation.validate_input(exported)
+            report = forward_validation.evaluate(exported)
+
+        rows_by_reference = {
+            (row["market_identity"]["family"], row["settlement_reference_outcome"]): row
+            for row in normalized["records"]
+        }
+        expected = {
+            ("total", "over"): "half_loss",
+            ("total", "under"): "half_win",
+            ("asian", "home"): "half_win",
+            ("asian", "away"): "half_loss",
+        }
+        self.assertEqual(
+            {
+                key: row["unverified_observed_settlement_state"]
+                for key, row in rows_by_reference.items()
+            },
+            expected,
+        )
+        self.assertTrue(
+            all(
+                row["observed_settlement_state"] is None
+                for row in rows_by_reference.values()
+            )
+        )
+        self.assertEqual(
+            rows_by_reference[("asian", "home")]["market_identity"]["line"],
+            -0.75,
+        )
+        self.assertEqual(
+            rows_by_reference[("asian", "away")]["market_identity"]["line"],
+            -0.75,
+        )
+        self.assertEqual(
+            rows_by_reference[("asian", "away")]["execution_entry"]["selection"],
+            "away",
+        )
+        self.assertAlmostEqual(
+            rows_by_reference[("asian", "away")]["model_probabilities"]["half_loss"],
+            rows_by_reference[("asian", "home")]["model_probabilities"]["half_win"],
+        )
+        self.assertAlmostEqual(
+            rows_by_reference[("asian", "away")]["model_probabilities"]["half_win"],
+            rows_by_reference[("asian", "home")]["model_probabilities"]["half_loss"],
+        )
+        five_state_gate = report["overall"]["proper_score_gates"][
+            forward_validation.FIVE_STATE_PROPER_SCORE_SPACE
+        ]
+        categorical_gate = report["overall"]["proper_score_gates"][
+            forward_validation.CATEGORICAL_PROPER_SCORE_SPACE
+        ]
+        self.assertEqual(five_state_gate["eligible_graded_outputs"], 0)
+        self.assertEqual(
+            five_state_gate["required_baselines"],
+            list(forward_validation.MODEL_SPACE_BASELINE_NAMES),
+        )
+        self.assertFalse(five_state_gate["promotion_gate"])
+        self.assertEqual(five_state_gate["role"], "pooled_descriptive_summary_only")
+        identity_gates = report["overall"]["proper_score_identity_gates"]
+        self.assertEqual(identity_gates, {})
+        self.assertEqual(categorical_gate["eligible_graded_outputs"], 0)
+        self.assertEqual(
+            categorical_gate["status"], "unavailable_no_eligible_outcome_space"
+        )
+        self.assertFalse(
+            any(
+                blocker.startswith("bookmaker_")
+                or blocker == "insufficient_paired_same_time_bookmaker_samples"
+                for blocker in report["blocker_categories"]["statistical"]
+            )
+        )
+        self.assertIn(
+            "result_evidence_replay_unavailable", report["promotion_blockers"]
+        )
+
     def test_two_real_memory_records_export_and_evaluate_as_one_cohort(self) -> None:
         from test_memory_store import memory_store
 
@@ -743,8 +2744,16 @@ class ForwardValidationTests(unittest.TestCase):
         self.assertEqual(cli_result["receipt_count"], 2)
         self.assertEqual(cli_exported, exported)
         self.assertEqual(
+            report["overall"]["comparisons"]["historical_frequency"]["sample_count"],
+            0,
+        )
+        self.assertEqual(
             report["overall"]["comparisons"]["bookmaker_no_vig"]["sample_count"],
-            2,
+            0,
+        )
+        self.assertEqual(len(report["overall"]["quarantined_observation_ids"]), 2)
+        self.assertIn(
+            "result_evidence_replay_unavailable", report["promotion_blockers"]
         )
 
     def test_atomic_memory_store_close_seals_all_history_records(self) -> None:
@@ -795,11 +2804,18 @@ class ForwardValidationTests(unittest.TestCase):
         self.assertEqual(len(normalized["records"]), 2)
 
     def test_memory_record_review_evaluate_replays_archived_micro_ledger(self) -> None:
-        from test_memory_store import memory_store, record_args
+        from test_memory_store import memory_store
 
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            ledger = pending_micro_ledger(base)
+            ledger = five_state_pending_micro_ledger(
+                base,
+                start_index=0,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
             ledger_file = base / "prematch-forward-ledger.json"
             ledger_file.write_text(
                 json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
@@ -819,28 +2835,8 @@ class ForwardValidationTests(unittest.TestCase):
                 )
             )
             archived_at = datetime.fromisoformat(base_binding["archived_at"])
-            evidence_file = prediction["bookmaker_snapshot"]["source_evidence_file"]
-            args = record_args(
-                str(base),
-                match_id=prediction["fixture_id"],
-                analysis_stage="initial",
-                league=prediction["league"],
-                kickoff=prediction["kickoff"],
-                source_kickoff=prediction["kickoff"],
-                source_timezone="UTC",
-                user_local_kickoff=prediction["kickoff"],
-                user_timezone="UTC",
-                home_team=prediction["home_team"],
-                away_team=prediction["away_team"],
-                source_url=prediction["bookmaker_snapshot"]["source_url"],
-                source_evidence_file=evidence_file,
-                forward_validation_ledger=str(ledger_file),
-                home_win_probability=0.5,
-                draw_probability=0.25,
-                away_win_probability=0.25,
-                primary_market=None,
-                total_side=None,
-                asian_side=None,
+            args = active_record_args_for_five_state_ledger(
+                base, ledger, ledger_file, history_base=base
             )
             missing_ledger_args = deepcopy(args)
             missing_ledger_args.forward_validation_ledger = None
@@ -866,6 +2862,9 @@ class ForwardValidationTests(unittest.TestCase):
             ):
                 recorded = memory_store.cmd_record(args)
             record = recorded["record"]
+            self.assertEqual(record["primary_market"], "total")
+            self.assertEqual(record["total_pick"]["side"], "over")
+            self.assertEqual(record["primary_pick"]["confidence_rank"], 1)
             self.assertEqual(
                 record["forward_policy_binding"]["schema_version"],
                 forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
@@ -908,10 +2907,22 @@ class ForwardValidationTests(unittest.TestCase):
             )
             report = forward_validation.evaluate(replay)
             self.assertEqual(
-                report["overall"]["comparisons"]["bookmaker_no_vig"]["sample_count"],
-                1,
+                report["overall"]["comparisons"]["historical_frequency"][
+                    "sample_count"
+                ],
+                0,
             )
-            self.assertEqual(report["overall"]["missing_outcome_ids"], [])
+            self.assertEqual(
+                report["overall"]["comparisons"]["bookmaker_no_vig"]["sample_count"],
+                0,
+            )
+            self.assertEqual(
+                report["overall"]["quarantined_observation_ids"],
+                [prediction["observation_id"]],
+            )
+            self.assertIn(
+                "result_evidence_replay_unavailable", report["promotion_blockers"]
+            )
             self.assertEqual(
                 report["history_ledger_binding"]["receipts"][0]["archive_version_hash"],
                 record["archive_version_hash"],
@@ -950,7 +2961,7 @@ class ForwardValidationTests(unittest.TestCase):
         ):
             forward_validation.validate_prematch_input(value)
 
-    def test_v2_scores_committed_rows_but_never_claims_external_time_anchor(
+    def test_unreplayable_results_and_closing_prices_are_quarantined_from_scores(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -958,16 +2969,29 @@ class ForwardValidationTests(unittest.TestCase):
                 build_aggregate_payload(Path(temporary), 6)
             )
         bookmaker = report["overall"]["comparisons"]["bookmaker_no_vig"]
-        self.assertEqual(bookmaker["sample_count"], 6)
-        self.assertGreaterEqual(bookmaker["cluster_count"], 2)
-        self.assertEqual(report["overall"]["missing_outcome_ids"], [])
+        self.assertEqual(bookmaker["sample_count"], 0)
+        self.assertEqual(bookmaker["cluster_count"], 0)
+        self.assertEqual(len(report["overall"]["quarantined_observation_ids"]), 6)
+        self.assertIn(
+            "result_evidence_replay_unavailable", report["promotion_blockers"]
+        )
+        self.assertIn(
+            "closing_evidence_replay_unavailable", report["promotion_blockers"]
+        )
+        self.assertIn(
+            "result_source_replay_not_demonstrated", report["promotion_blockers"]
+        )
+        self.assertIn(
+            "closing_price_source_replay_not_demonstrated",
+            report["promotion_blockers"],
+        )
         self.assertFalse(report["statistical_gate_passed"])
         self.assertIn(
             "external_timestamp_anchor_not_configured", report["promotion_blockers"]
         )
         self.assertFalse(report["promotion_eligible"])
 
-    def test_formal_v2_rejects_an_open_cohort(self) -> None:
+    def test_formal_v3_rejects_an_open_cohort(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             value = build_aggregate_payload(Path(temporary), 1)
         value["cohort_closure"] = None
@@ -976,7 +3000,7 @@ class ForwardValidationTests(unittest.TestCase):
         ):
             forward_validation.evaluate(value)
 
-    def test_v2_evaluation_rejects_freely_constructed_unarchived_input(self) -> None:
+    def test_v3_evaluation_rejects_freely_constructed_unarchived_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             value = build_payload(Path(temporary), 2)
             with self.assertRaisesRegex(
@@ -1151,7 +3175,7 @@ class ForwardValidationTests(unittest.TestCase):
                 forward_validation.ForwardValidationError,
                 "cohort_closure is invalid|frozen cohort|does not commit this prediction payload",
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     replaced, require_history_ledger_binding=False
                 )
 
@@ -1160,7 +3184,9 @@ class ForwardValidationTests(unittest.TestCase):
             added = deepcopy(queue["entries"][0])
             added["fixture_id"] = "late-added-fixture"
             added["queue_key"] = forward_validation._queue_key(
-                late["cohort_id"], added["fixture_id"], added["market"]
+                late["cohort_id"],
+                added["fixture_id"],
+                added["market_identity_hash"],
             )
             queue["entries"].append(added)
             queue.pop("queue_hash")
@@ -1169,9 +3195,25 @@ class ForwardValidationTests(unittest.TestCase):
                 forward_validation.ForwardValidationError,
                 "frozen eligibility queue|exactly cover",
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     late, require_history_ledger_binding=False
                 )
+
+    def test_fully_rehashed_cohort_kind_must_still_match_frozen_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            value = build_payload(Path(temporary), 1)
+        value["cohort_closure"] = None
+        cohort = value["cohort_manifest"]
+        cohort["kind"] = forward_policy.PROMOTABLE_CONFIRMATION_KIND
+        cohort.pop("cohort_hash")
+        cohort["cohort_hash"] = forward_policy._hash_json(cohort)
+        with self.assertRaisesRegex(
+            forward_validation.ForwardValidationError,
+            "matching explicit policy/cohort kinds",
+        ):
+            forward_validation._validate_v3_input(
+                value, require_history_ledger_binding=False
+            )
 
     def test_prediction_payload_tamper_cannot_be_hidden_in_settlement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1187,7 +3229,7 @@ class ForwardValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 forward_validation.ForwardValidationError, "commitment_hash"
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     value, require_history_ledger_binding=False
                 )
 
@@ -1224,8 +3266,38 @@ class ForwardValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 forward_validation.ForwardValidationError, "does not recompute"
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     value, require_history_ledger_binding=False
+                )
+
+    def test_categorical_proper_score_comparability_is_key_based_not_order_based(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            value = build_payload(Path(temporary), 1)
+            value["market_schemas"]["1x2"]["settlement_states"] = ["A", "D", "H"]
+            normalized = forward_validation._validate_v3_input(
+                value, require_history_ledger_binding=False
+            )
+        row = normalized["records"][0]
+        self.assertEqual(
+            row["bookmaker_proper_score_status"], "available_same_outcome_space"
+        )
+        self.assertIn("bookmaker_no_vig", row["baselines"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            mismatched = build_payload(Path(temporary), 1)
+            mismatched["market_schemas"]["1x2"]["settlement_states"] = [
+                "H",
+                "D",
+                "X",
+            ]
+            with self.assertRaisesRegex(
+                forward_validation.ForwardValidationError,
+                "categorical settlement states must exactly match",
+            ):
+                forward_validation._validate_v3_input(
+                    mismatched, require_history_ledger_binding=False
                 )
 
     def test_snapshot_after_archive_and_duplicate_fixture_market_fail_closed(
@@ -1264,7 +3336,7 @@ class ForwardValidationTests(unittest.TestCase):
                 forward_validation.ForwardValidationError,
                 "temporal causality|archive time",
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     value, require_history_ledger_binding=False
                 )
 
@@ -1276,9 +3348,9 @@ class ForwardValidationTests(unittest.TestCase):
             value["queue_manifest"] = seal(value["queue_manifest"], "queue_hash")
             with self.assertRaisesRegex(
                 forward_validation.ForwardValidationError,
-                r"duplicated fixture\+market",
+                r"duplicated fixture\+market identity",
             ):
-                forward_validation._validate_v2_input(
+                forward_validation._validate_v3_input(
                     value, require_history_ledger_binding=False
                 )
 
@@ -1290,7 +3362,7 @@ class ForwardValidationTests(unittest.TestCase):
             settlement.update(
                 {
                     "status": "pending",
-                    "observed_outcome": None,
+                    "observed_settlement_state": None,
                     "result_collected_at": None,
                     "result_source_evidence_hash": None,
                 }
@@ -1309,14 +3381,13 @@ class ForwardValidationTests(unittest.TestCase):
                 value["history_ledger_binding"]
             )
             report = forward_validation.evaluate(value)
-        self.assertIn("incomplete_settlement_outcomes", report["promotion_blockers"])
+        self.assertIn("incomplete_settlement_states", report["promotion_blockers"])
         self.assertIn(
-            "insufficient_independent_iso_week_clusters",
-            report["promotion_blockers"],
+            "result_evidence_replay_unavailable", report["promotion_blockers"]
         )
-        self.assertEqual(
-            report["overall"]["missing_outcome_ids"],
-            [settlement["observation_id"]],
+        self.assertIn(
+            settlement["observation_id"],
+            report["overall"]["missing_settlement_state_ids"],
         )
 
     def test_protocol_override_is_experimental_and_report_is_deterministic(

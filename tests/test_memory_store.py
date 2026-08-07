@@ -21,6 +21,7 @@ from scripts import (
     prediction_card_renderer,
     review_card_renderer,
     score_model,
+    source_evidence,
 )
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_store.py"
@@ -1012,6 +1013,12 @@ class MemoryStoreTests(unittest.TestCase):
         )
         other = "away" if side == "home" else "home"
         distribution = distributions[side]
+        market_identity = {
+            "family": "asian",
+            "period": "full_time",
+            "line": 0.0,
+            "price_outcomes": ["home", "away"],
+        }
         payload = {
             "artifact_type": memory_store.CANDIDATE_EVALUATION_ARTIFACT_TYPE,
             "schema_version": memory_store.CANDIDATE_EVALUATION_SCHEMA_VERSION,
@@ -1037,6 +1044,11 @@ class MemoryStoreTests(unittest.TestCase):
                     "market": "asian",
                     "side": side,
                     "line": 0.0,
+                    "market_identity": market_identity,
+                    "market_identity_hash": source_evidence.market_identity_hash(
+                        market_identity
+                    ),
+                    "settlement_reference_outcome": side,
                     "probability": distribution["full_win"]
                     + distribution["half_win"]
                     + probability_offset,
@@ -1101,7 +1113,7 @@ class MemoryStoreTests(unittest.TestCase):
         defaulted = memory_store.build_parser().parse_args(arguments[:-1])
         self.assertTrue(defaulted.require_complete_analysis)
 
-    def test_candidate_evaluation_v2_archives_shadow_without_formal_pick(self):
+    def test_candidate_evaluation_v3_archives_shadow_without_formal_pick(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             created = memory_store.cmd_record(
@@ -1132,7 +1144,7 @@ class MemoryStoreTests(unittest.TestCase):
                 audit["shadow_selections"]["asian"], candidate["candidate_id"]
             )
 
-    def test_candidate_evaluation_v2_rejects_missing_or_tampered_input(self):
+    def test_candidate_evaluation_v3_rejects_missing_or_tampered_input(self):
         with tempfile.TemporaryDirectory() as base:
             with self.assertRaisesRegex(
                 ValueError, "requires --candidate-evaluation-file"
@@ -1174,7 +1186,7 @@ class MemoryStoreTests(unittest.TestCase):
                     )
                 )
 
-    def test_candidate_evaluation_v2_settles_shadow_and_triggers_review_only(self):
+    def test_candidate_evaluation_v3_settles_shadow_and_triggers_review_only(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             memory_store.cmd_record(
@@ -1305,7 +1317,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertTrue(threshold["asian"])
             self.assertFalse(threshold["total"])
 
-    def test_candidate_evaluation_v2_enforces_temporal_causality(self):
+    def test_candidate_evaluation_v3_enforces_temporal_causality(self):
         cases = (
             (
                 "market-after-candidate",
@@ -1362,7 +1374,7 @@ class MemoryStoreTests(unittest.TestCase):
                 memory_store.validated_candidate_evaluation_audit(audit, created)
             )
 
-    def test_candidate_evaluation_v2_uses_five_state_quarter_line_edge(self):
+    def test_candidate_evaluation_v3_uses_five_state_quarter_line_edge(self):
         matrix = self.joint_prediction["full_time_score_marginal"]["probabilities"]
         for line in (-0.25, -0.75):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as base:
@@ -1386,6 +1398,10 @@ class MemoryStoreTests(unittest.TestCase):
                         "complete_market_odds": {side: 2.0, other: 2.0},
                         "cover_distribution_validated": True,
                     }
+                )
+                raw["market_identity"]["line"] = line if side == "home" else -line
+                raw["market_identity_hash"] = source_evidence.market_identity_hash(
+                    raw["market_identity"]
                 )
                 Path(artifact).write_text(
                     json.dumps(payload, ensure_ascii=False), encoding="utf-8"
@@ -1426,7 +1442,62 @@ class MemoryStoreTests(unittest.TestCase):
             )
         )
 
-    def test_candidate_evaluation_v2_replays_derived_fields_and_diagnostics(self):
+    def test_candidate_evaluation_rejects_home_distribution_bound_to_away_quote(
+        self,
+    ) -> None:
+        matrix = self.joint_prediction["full_time_score_marginal"]["probabilities"]
+        home_distribution = memory_store.matrix_settlement_distribution(
+            matrix,
+            "asian",
+            {"market": "asian", "side": "home", "line": -0.75},
+        )
+        away_distribution = memory_store.matrix_settlement_distribution(
+            matrix,
+            "asian",
+            {"market": "asian", "side": "away", "line": 0.75},
+        )
+        self.assertNotEqual(home_distribution, away_distribution)
+        with tempfile.TemporaryDirectory() as base:
+            artifact = self.write_candidate_evaluation_file(base)
+            payload = json.loads(Path(artifact).read_text(encoding="utf-8"))
+            raw = payload["candidates"][0]
+            identity = {
+                "family": "asian",
+                "period": "full_time",
+                "line": -0.75,
+                "price_outcomes": ["home", "away"],
+            }
+            raw.update(
+                {
+                    "side": "away",
+                    "line": 0.75,
+                    "market_identity": identity,
+                    "market_identity_hash": source_evidence.market_identity_hash(
+                        identity
+                    ),
+                    "settlement_reference_outcome": "away",
+                    "probability": home_distribution["full_win"]
+                    + home_distribution["half_win"],
+                    "settlement_probabilities": home_distribution,
+                    "complete_market_odds": {"home": 2.0, "away": 2.0},
+                    "odds": 2.0,
+                }
+            )
+            Path(artifact).write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ValueError, "probability does not match the canonical model"
+            ):
+                memory_store.cmd_record(
+                    self.joint_record_args(
+                        base,
+                        candidate_evaluation_file=artifact,
+                        require_candidate_evaluations=True,
+                    )
+                )
+
+    def test_candidate_evaluation_v3_replays_derived_fields_and_diagnostics(self):
         with tempfile.TemporaryDirectory() as base:
             artifact = self.write_candidate_evaluation_file(base)
             memory_store.cmd_record(
@@ -1491,7 +1562,7 @@ class MemoryStoreTests(unittest.TestCase):
                 0,
             )
 
-    def test_candidate_evaluation_v2_deduplicates_same_match_market_across_artifact_hashes(
+    def test_candidate_evaluation_v3_deduplicates_same_match_market_across_artifact_hashes(
         self,
     ):
         records = []
@@ -4579,6 +4650,25 @@ class MemoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             memory_store.settle_goal_range({"selection": "2-3"}, 2, 2), "loss"
+        )
+        self.assertEqual(
+            memory_store._forward_observed_settlement_state(
+                {"final_score": "2-1", "half_time_score": "1-0"},
+                {
+                    "market_identity": {
+                        "family": "goal_range",
+                        "period": "full_time",
+                        "line": None,
+                        "price_outcomes": ["0-1", "2-3", "4-6", "7+"],
+                    },
+                    "settlement_reference_outcome": None,
+                },
+                {
+                    "settlement_states": ["0-1", "2-3", "4-6", "7+"],
+                    "settlement_semantics": "categorical",
+                },
+            ),
+            "2-3",
         )
         self.assertEqual(memory_store.settle_btts({"side": "yes"}, 1, 1), "win")
         self.assertEqual(memory_store.settle_btts({"side": "no"}, 2, 0), "win")

@@ -164,10 +164,19 @@ PRIMARY_SELECTION_BASIS = "highest_independent_settlement_risk_confidence"
 ADVERSE_MARKET_SIGNALS = {"against", "conflicting"}
 HTFT_OUTCOMES = tuple(f"{half}{full}" for half in "HDA" for full in "HDA")
 OBSERVATION_SCHEMA_VERSION = "candidate-observation/1.0.0"
-CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/2.0.0"
+CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/3.0.0"
+LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION = "candidate-evaluation/2.0.0"
 CANDIDATE_EVALUATION_ARTIFACT_TYPE = "soccer_candidate_evaluation"
 CANDIDATE_EVALUATION_KIND = "multi_market_candidate_evaluation"
 CANDIDATE_GATE_CATEGORIES = ("integrity", "value", "risk", "release")
+ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING = "source_market_identity_unavailable"
+ACTIVE_UNAVAILABLE_REASON_CORNER_MODEL_MISSING = "canonical_corner_observation_missing"
+ACTIVE_UNAVAILABLE_REASON_DECIMAL_PRICE_MISSING = (
+    "canonical_decimal_price_snapshot_unavailable"
+)
+ACTIVE_UNAVAILABLE_REASON_DECISION_TIME_PRICE_MISSING = (
+    "decision_time_price_snapshot_unavailable"
+)
 CANDIDATE_SETTLEMENT_STATES = (
     "full_win",
     "half_win",
@@ -175,13 +184,22 @@ CANDIDATE_SETTLEMENT_STATES = (
     "half_loss",
     "loss",
 )
-FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/1.0.0"
-FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/1.0.0"
-FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/1.0.0"
-FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
+PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/1.0.0"
+FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION = "memory-forward-ledger-archive/2.0.0"
+PREVIOUS_FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/1.0.0"
+FORWARD_RECORD_PREDICTION_SCHEMA_VERSION = "memory-forward-prediction/2.0.0"
+PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/1.0.0"
+FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION = "memory-forward-commitment/2.0.0"
+PREVIOUS_FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
     "memory-forward-history-ledger-binding/2.0.0"
 )
-FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/1.0.0"
+FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION = (
+    "memory-forward-history-ledger-binding/3.0.0"
+)
+PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = (
+    "memory-forward-record-receipt/1.0.0"
+)
+FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION = "memory-forward-record-receipt/2.0.0"
 FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE = (
     "memory_store_forward_validation_cohort_export"
 )
@@ -2978,7 +2996,9 @@ def _candidate_gate(
     }
 
 
-def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _normalize_candidate_identity(
+    raw: dict[str, Any], *, legacy_read_only: bool = False
+) -> tuple[dict[str, Any], str]:
     market = str(raw.get("market") or "").strip().lower()
     if market not in PRIMARY_MARKETS:
         raise ValueError(
@@ -3052,7 +3072,71 @@ def _normalize_candidate_identity(raw: dict[str, Any]) -> tuple[dict[str, Any], 
             raise ValueError("candidate evaluation BTTS side must be yes or no")
         candidate["side"] = side
         identity = f"{market}:{side}"
-    candidate["identity"] = identity
+    if legacy_read_only:
+        candidate["identity"] = identity
+        return candidate, identity
+    try:
+        market_identity = source_evidence.canonical_market_identity(
+            raw.get("market_identity"), label="candidate market_identity"
+        )
+    except source_evidence.SourceEvidenceError as exc:
+        raise ValueError("candidate evaluation market_identity is invalid") from exc
+    market_identity_hash = source_evidence.market_identity_hash(market_identity)
+    if raw.get("market_identity_hash") != market_identity_hash:
+        raise ValueError("candidate evaluation market_identity_hash is invalid")
+    if market in {"asian", "total", "corner_total", "corner_handicap"}:
+        expected_family = market
+        expected_period = "full_time"
+        expected_line = float(candidate["line"])
+        if market in {"asian", "corner_handicap"} and candidate["side"] == "away":
+            expected_line = -expected_line
+        reference_outcome = str(candidate["side"])
+    elif market == "half_time":
+        expected_family = str(candidate["submarket"])
+        expected_period = "first_half"
+        expected_line = candidate["line"]
+        if expected_family == "asian" and candidate["side"] == "away":
+            expected_line = -float(expected_line)
+        reference_outcome = {
+            "home": "H",
+            "draw": "D",
+            "away": "A",
+        }.get(str(candidate["side"]), str(candidate["side"]))
+    else:
+        expected_family = market
+        expected_period = "full_time"
+        expected_line = None
+        reference_outcome = str(
+            candidate.get("selection") or candidate.get("side") or ""
+        )
+    if (
+        market_identity["family"] != expected_family
+        or market_identity["period"] != expected_period
+        or market_identity["line"] != expected_line
+        or reference_outcome not in market_identity["price_outcomes"]
+    ):
+        raise ValueError(
+            "candidate evaluation market_identity does not match market/period/line/selection"
+        )
+    if raw.get("settlement_reference_outcome") != reference_outcome:
+        raise ValueError(
+            "candidate evaluation settlement_reference_outcome does not match its selection"
+        )
+    raw_complete_odds = raw.get("complete_market_odds")
+    if isinstance(raw_complete_odds, dict) and set(raw_complete_odds) != set(
+        market_identity["price_outcomes"]
+    ):
+        raise ValueError(
+            "candidate evaluation complete_market_odds do not match price_outcomes"
+        )
+    candidate.update(
+        {
+            "identity": identity,
+            "market_identity": market_identity,
+            "market_identity_hash": market_identity_hash,
+            "settlement_reference_outcome": reference_outcome,
+        }
+    )
     return candidate, identity
 
 
@@ -3060,6 +3144,21 @@ def _candidate_pick(candidate: dict[str, Any]) -> dict[str, Any]:
     pick = deepcopy(candidate)
     if candidate["market"] == "half_time":
         pick["market"] = candidate["submarket"]
+        if candidate["submarket"] == "1x2":
+            aliases = {"H": "home", "D": "draw", "A": "away"}
+            complete_odds = pick.get("complete_market_odds")
+            if isinstance(complete_odds, dict) and set(complete_odds) == set(aliases):
+                pick["complete_market_odds"] = {
+                    aliases[outcome]: price for outcome, price in complete_odds.items()
+                }
+            complete_probabilities = pick.get("complete_market_probabilities")
+            if isinstance(complete_probabilities, dict) and set(
+                complete_probabilities
+            ) == set(aliases):
+                pick["complete_market_probabilities"] = {
+                    aliases[outcome]: probability
+                    for outcome, probability in complete_probabilities.items()
+                }
     return pick
 
 
@@ -3226,8 +3325,12 @@ def _evaluate_candidate(
     observation_id: str,
     index: int,
     generated_at: datetime,
+    *,
+    legacy_read_only: bool = False,
 ) -> dict[str, Any]:
-    candidate, identity = _normalize_candidate_identity(raw)
+    candidate, identity = _normalize_candidate_identity(
+        raw, legacy_read_only=legacy_read_only
+    )
     market = candidate["market"]
     canonical_distribution, model_binding = _canonical_candidate_distribution(
         record, candidate
@@ -3733,6 +3836,13 @@ def load_source_evidence_audit(
         evidence = source_evidence.validate_evidence_file(evidence_path)
     except source_evidence.SourceEvidenceError as exc:
         raise ValueError("source evidence replay failed") from exc
+    if (
+        required
+        and evidence.get("schema_version") != source_evidence.EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "active untouched live-forward cohort requires canonical source-evidence/2.0.0"
+        )
     fixture = evidence.get("fixture")
     if not isinstance(fixture, dict):
         raise ValueError("source evidence fixture is missing")
@@ -3762,7 +3872,7 @@ def load_source_evidence_audit(
     if generated_at > archived_at:
         raise ValueError("source evidence cannot be generated after archive time")
     audit = {
-        "schema_version": source_evidence.EVIDENCE_SCHEMA_VERSION,
+        "schema_version": evidence["schema_version"],
         "kind": "replayable_source_evidence",
         "evidence_file": str(evidence_path),
         "evidence_hash": evidence["evidence_hash"],
@@ -3772,6 +3882,8 @@ def load_source_evidence_audit(
         "raw_sources_replayed": len(evidence.get("sources", [])),
         "counts_toward_primary_record": False,
     }
+    if evidence.get("schema_version") == source_evidence.EVIDENCE_SCHEMA_VERSION:
+        audit["evidence_scope"] = "canonical_market_identity_forward_eligible"
     audit["audit_hash"] = calculate_source_evidence_audit_hash(audit)
     return audit
 
@@ -3785,10 +3897,24 @@ def validated_source_evidence_audit(record: dict[str, Any]) -> dict[str, Any] | 
     if not isinstance(audit, dict):
         return None
     if (
-        audit.get("schema_version") != source_evidence.EVIDENCE_SCHEMA_VERSION
+        audit.get("schema_version")
+        not in {
+            source_evidence.EVIDENCE_SCHEMA_VERSION,
+            source_evidence.LEGACY_EVIDENCE_SCHEMA_VERSION,
+        }
         or audit.get("kind") != "replayable_source_evidence"
         or audit.get("counts_toward_primary_record") is not False
         or not isinstance(audit.get("bundle"), dict)
+    ):
+        return None
+    if (
+        audit.get("schema_version") == source_evidence.EVIDENCE_SCHEMA_VERSION
+        and audit.get("evidence_scope") != "canonical_market_identity_forward_eligible"
+    ):
+        return None
+    if (
+        audit.get("schema_version") == source_evidence.LEGACY_EVIDENCE_SCHEMA_VERSION
+        and "evidence_scope" in audit
     ):
         return None
     if audit.get("audit_hash") != calculate_source_evidence_audit_hash(audit):
@@ -3845,9 +3971,17 @@ def load_candidate_evaluation_audit(
     args: argparse.Namespace, record: dict[str, Any]
 ) -> dict[str, Any] | None:
     supplied = str(getattr(args, "candidate_evaluation_file", "") or "").strip()
-    required = bool(getattr(args, "require_candidate_evaluations", False))
+    active_forward_binding = record.get("forward_policy_binding") is not None
+    required = bool(getattr(args, "require_candidate_evaluations", False)) or bool(
+        active_forward_binding
+    )
     if not supplied:
         if required:
+            if active_forward_binding:
+                raise ValueError(
+                    "Active untouched cohorts require a current "
+                    "--candidate-evaluation-file (candidate-evaluation/3.0.0)"
+                )
             raise ValueError(
                 "--require-candidate-evaluations requires --candidate-evaluation-file"
             )
@@ -3861,7 +3995,7 @@ def load_candidate_evaluation_audit(
     ):
         raise ValueError(
             "candidate evaluation file must use soccer_candidate_evaluation "
-            "candidate-evaluation/2.0.0"
+            "candidate-evaluation/3.0.0"
         )
     if payload.get("policy_version") != STRICT_OOS_POLICY_VERSION:
         raise ValueError(
@@ -3946,7 +4080,7 @@ def load_candidate_evaluation_audit(
         manifest[market] = {"market": market, "status": status, "reasons": reasons}
     if set(manifest) != set(PRIMARY_MARKETS):
         raise ValueError(
-            "candidate-evaluation/2.0.0 requires every supported market in market_manifest"
+            "candidate-evaluation/3.0.0 requires every supported market in market_manifest"
         )
 
     candidates_raw = payload.get("candidates")
@@ -5920,6 +6054,15 @@ def _forward_validation_module():
 
 
 def _forward_market_commitments(ledger_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    schema_version = ledger_payload.get("schema_version")
+    historical = schema_version == "forward-observations/2.0.0"
+    if not historical and schema_version != "forward-observations/3.0.0":
+        raise ValueError("Forward validation ledger schema is unsupported")
+    expected_binding_schema = (
+        forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        if historical
+        else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    )
     commitments: list[dict[str, Any]] = []
     for raw in ledger_payload.get("commitments", []):
         if not isinstance(raw, dict) or not isinstance(
@@ -5930,27 +6073,209 @@ def _forward_market_commitments(ledger_payload: dict[str, Any]) -> list[dict[str
         binding = forward_policy.validate_record_binding(
             raw.get("forward_policy_binding")
         )
-        if binding is None:
+        if binding is None or binding.get("schema_version") != expected_binding_schema:
             raise ValueError(
-                "Forward validation ledger commitment has no policy binding"
+                "Forward validation ledger commitment has no compatible policy binding"
             )
-        commitments.append(
-            {
-                "market": str(prediction.get("market") or "").lower(),
-                "observation_id": str(prediction.get("observation_id") or ""),
-                "prediction_hash": forward_policy._hash_json(prediction),
-                "commitment_hash": require_sha256(
-                    raw.get("commitment_hash"), "forward commitment hash"
-                ),
-                "binding_hash": require_sha256(
-                    binding.get("binding_hash"), "forward commitment binding hash"
-                ),
-            }
+        identity = {
+            "observation_id": str(prediction.get("observation_id") or ""),
+            "prediction_hash": forward_policy._hash_json(prediction),
+            "commitment_hash": require_sha256(
+                raw.get("commitment_hash"), "forward commitment hash"
+            ),
+            "binding_hash": require_sha256(
+                binding.get("binding_hash"), "forward commitment binding hash"
+            ),
+        }
+        if historical:
+            identity["market"] = str(prediction.get("market") or "").lower()
+        else:
+            identity.update(
+                {
+                    "family": str(
+                        prediction.get("market_identity", {}).get("family")
+                        if isinstance(prediction.get("market_identity"), dict)
+                        else ""
+                    ).lower(),
+                    "market_identity_hash": require_sha256(
+                        prediction.get("market_identity_hash"),
+                        "forward market identity hash",
+                    ),
+                }
+            )
+        commitments.append(identity)
+    commitments.sort(
+        key=(
+            (lambda item: (item["market"], item["observation_id"]))
+            if historical
+            else (
+                lambda item: (
+                    item["market_identity_hash"],
+                    item["observation_id"],
+                )
+            )
         )
-    commitments.sort(key=lambda item: (item["market"], item["observation_id"]))
+    )
     if not commitments:
         raise ValueError("Forward validation ledger contains no market commitments")
     return commitments
+
+
+def _validate_previous_forward_ledger_read_only(
+    ledger_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Structurally replay the defective v2 ledger for quarantine display only.
+
+    This intentionally is not a formal forward-validation entry point.  It proves that an
+    already archived record still binds its old hashes, policy, cohort, commitments, and pending
+    settlements, while keeping the superseded observation contract out of active writes and
+    statistical evaluation.
+    """
+
+    if ledger_payload.get("schema_version") != "forward-observations/2.0.0":
+        raise ValueError("Historical forward ledger schema is unsupported")
+    try:
+        policy = forward_policy.validate_policy_manifest(
+            ledger_payload.get("policy_manifest") or {}
+        )
+        cohort = forward_policy.validate_cohort(
+            ledger_payload.get("cohort_manifest") or {}
+        )
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Historical forward ledger policy/cohort is invalid") from exc
+    if policy.get("schema_version") != forward_policy.PREVIOUS_POLICY_SCHEMA_VERSION:
+        raise ValueError("Historical forward ledger policy schema is incompatible")
+    if cohort.get("schema_version") != forward_policy.LEGACY_COHORT_SCHEMA_VERSION:
+        raise ValueError("Historical forward ledger cohort schema is incompatible")
+    if any(
+        ledger_payload.get(field) != expected
+        for field, expected in (
+            ("cohort_id", cohort.get("cohort_id")),
+            ("policy_id", policy.get("policy_id")),
+            ("policy_hash", policy.get("policy_hash")),
+        )
+    ) or any(
+        cohort.get(field) != policy.get(field) for field in ("policy_id", "policy_hash")
+    ):
+        raise ValueError("Historical forward ledger policy/cohort binding is invalid")
+
+    queue = ledger_payload.get("queue_manifest")
+    if not isinstance(queue, dict):
+        raise ValueError("Historical forward ledger queue is missing")
+    queue_without_hash = deepcopy(queue)
+    supplied_queue_hash = queue_without_hash.pop("queue_hash", None)
+    if (
+        queue.get("schema_version") != "forward-eligibility-queue/1.0.0"
+        or supplied_queue_hash != forward_policy._hash_json(queue_without_hash)
+        or queue.get("cohort_id") != cohort.get("cohort_id")
+        or queue.get("policy_id") != policy.get("policy_id")
+        or queue.get("policy_hash") != policy.get("policy_hash")
+    ):
+        raise ValueError("Historical forward ledger queue binding is invalid")
+    queue_keys = {
+        str(item.get("queue_key") or "")
+        for item in queue.get("entries", [])
+        if isinstance(item, dict)
+    }
+    if not queue_keys or "" in queue_keys:
+        raise ValueError("Historical forward ledger queue entries are invalid")
+
+    commitments = ledger_payload.get("commitments")
+    settlements = ledger_payload.get("settlements")
+    if not isinstance(commitments, list) or not commitments:
+        raise ValueError("Historical forward ledger commitments are missing")
+    if not isinstance(settlements, list):
+        raise ValueError("Historical forward ledger settlements are missing")
+    rows: list[dict[str, Any]] = []
+    commitments_by_observation: dict[str, str] = {}
+    committed_queue_keys: set[str] = set()
+    for raw in commitments:
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version",
+            "prediction_payload",
+            "forward_policy_binding",
+            "commitment_hash",
+        }:
+            raise ValueError("Historical forward ledger commitment is invalid")
+        without_hash = deepcopy(raw)
+        supplied_hash = without_hash.pop("commitment_hash", None)
+        if (
+            raw.get("schema_version") != "forward-observation-commitment/1.0.0"
+            or supplied_hash != forward_policy._hash_json(without_hash)
+        ):
+            raise ValueError("Historical forward ledger commitment hash is invalid")
+        prediction = raw.get("prediction_payload")
+        if not isinstance(prediction, dict):
+            raise ValueError("Historical forward ledger prediction is missing")
+        try:
+            binding = forward_policy.validate_record_binding(
+                raw.get("forward_policy_binding")
+            )
+        except forward_policy.ForwardPolicyError as exc:
+            raise ValueError("Historical forward ledger binding is invalid") from exc
+        prediction_hash = forward_policy._hash_json(prediction)
+        if (
+            binding is None
+            or binding.get("schema_version")
+            != forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+            or binding.get("observation_commitment_hash") != prediction_hash
+            or binding.get("cohort_id") != cohort.get("cohort_id")
+            or binding.get("policy_id") != policy.get("policy_id")
+            or binding.get("policy_hash") != policy.get("policy_hash")
+        ):
+            raise ValueError("Historical forward ledger binding does not replay")
+        observation_id = str(prediction.get("observation_id") or "")
+        queue_key = str(prediction.get("queue_key") or "")
+        if (
+            not observation_id
+            or observation_id in commitments_by_observation
+            or queue_key not in queue_keys
+            or queue_key in committed_queue_keys
+        ):
+            raise ValueError("Historical forward ledger identity is invalid")
+        commitments_by_observation[observation_id] = str(supplied_hash)
+        committed_queue_keys.add(queue_key)
+        rows.append(
+            {
+                "fixture_id": str(prediction.get("fixture_id") or ""),
+                "home_team": prediction.get("home_team"),
+                "away_team": prediction.get("away_team"),
+                "league": prediction.get("league"),
+                "market": prediction.get("market"),
+                "kickoff": prediction.get("kickoff"),
+                "forward_policy_binding": binding,
+                "settlement_status": "pending",
+                "observed_outcome": None,
+            }
+        )
+    if committed_queue_keys != queue_keys:
+        raise ValueError("Historical forward ledger does not cover its frozen queue")
+
+    settled_ids: set[str] = set()
+    for settlement in settlements:
+        if not isinstance(settlement, dict):
+            raise ValueError("Historical forward ledger settlement is invalid")
+        without_hash = deepcopy(settlement)
+        supplied_hash = without_hash.pop("settlement_hash", None)
+        observation_id = str(settlement.get("observation_id") or "")
+        if (
+            settlement.get("schema_version") != "forward-observation-settlement/1.0.0"
+            or supplied_hash != forward_policy._hash_json(without_hash)
+            or observation_id not in commitments_by_observation
+            or observation_id in settled_ids
+            or settlement.get("commitment_hash")
+            != commitments_by_observation[observation_id]
+            or settlement.get("status") != "pending"
+            or settlement.get("observed_outcome") is not None
+            or settlement.get("result_collected_at") is not None
+            or settlement.get("result_source_evidence_hash") is not None
+            or settlement.get("closing_snapshot") is not None
+        ):
+            raise ValueError("Historical forward ledger settlement does not replay")
+        settled_ids.add(observation_id)
+    if settled_ids != set(commitments_by_observation):
+        raise ValueError("Historical forward ledger settlements are incomplete")
+    return {"records": rows, "historical_read_only": True}
 
 
 def validate_forward_validation_ledger_archive(
@@ -5973,8 +6298,18 @@ def validate_forward_validation_ledger_archive(
     }
     if set(archive) != required:
         raise ValueError("Forward validation ledger archive fields are incomplete")
-    if archive.get("schema_version") != FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION:
+    archive_schema = archive.get("schema_version")
+    if archive_schema not in {
+        PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION,
+        FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION,
+    }:
         raise ValueError("Forward validation ledger archive schema is unsupported")
+    historical = archive_schema == PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    if historical and (active_binding is not None or archived_not_after is not None):
+        raise ValueError(
+            "Historical forward validation ledgers are read-only and cannot enter "
+            "an active archive write"
+        )
     supplied_archive_hash = archive.pop("archive_hash", None)
     if supplied_archive_hash != forward_policy._hash_json(archive):
         raise ValueError("Forward validation ledger archive hash is invalid")
@@ -5985,8 +6320,11 @@ def validate_forward_validation_ledger_archive(
         raise ValueError("Forward validation ledger content hash is invalid")
     forward_validation = _forward_validation_module()
     try:
-        normalized = forward_validation.validate_prematch_input(ledger_payload)
-    except forward_validation.ForwardValidationError as exc:
+        if historical:
+            normalized = _validate_previous_forward_ledger_read_only(ledger_payload)
+        else:
+            normalized = forward_validation.validate_prematch_input(ledger_payload)
+    except (forward_validation.ForwardValidationError, ValueError) as exc:
         raise ValueError("Forward validation ledger cannot be replayed") from exc
     expected_market_commitments = _forward_market_commitments(ledger_payload)
     if archive.get("market_commitments") != expected_market_commitments:
@@ -6018,8 +6356,11 @@ def validate_forward_validation_ledger_archive(
                 raise ValueError(
                     "Forward validation ledger fixture metadata does not match"
                 )
-            if row.get("market") == "1x2" and isinstance(
-                row.get("model_probabilities"), dict
+            if (
+                row.get("market") == "1x2"
+                and isinstance(row.get("market_identity"), dict)
+                and row["market_identity"].get("period") == "full_time"
+                and isinstance(row.get("model_probabilities"), dict)
             ):
                 expected_probabilities = {
                     "H": record.get("probabilities", {}).get("home_win"),
@@ -6048,6 +6389,15 @@ def validate_forward_validation_ledger_archive(
         binding = row.get("forward_policy_binding")
         if not isinstance(binding, dict):
             raise ValueError("Forward validation ledger row has no committed binding")
+        expected_binding_schema = (
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+            if historical
+            else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        )
+        if binding.get("schema_version") != expected_binding_schema:
+            raise ValueError(
+                "Forward validation ledger row binding schema is incompatible"
+            )
         if validated_active is not None and any(
             binding.get(field) != validated_active.get(field)
             for field in ("cohort_id", "cohort_hash", "policy_id", "policy_hash")
@@ -6105,13 +6455,878 @@ def load_forward_validation_ledger_archive(
     )
 
 
-def canonical_forward_record_prediction_payload(
+def _canonical_candidate_categorical_probabilities(
+    record: dict[str, Any], market_identity: dict[str, Any]
+) -> dict[str, float]:
+    snapshot = validated_joint_scenario_audit(record)
+    if not isinstance(snapshot, dict):
+        raise ValueError(
+            "Categorical forward candidates require the frozen canonical joint model"
+        )
+    family = str(market_identity.get("family") or "")
+    period = str(market_identity.get("period") or "")
+    outcomes = [str(item) for item in market_identity.get("price_outcomes", [])]
+    if family == "htft":
+        raw = snapshot.get("htft_marginal", {}).get("code_probabilities")
+        if not isinstance(raw, dict) or set(raw) != set(outcomes):
+            raise ValueError(
+                "Categorical HT/FT outcome space does not match the joint model"
+            )
+        return {outcome: float(raw[outcome]) for outcome in outcomes}
+
+    matrix_key = (
+        "half_time_score_marginal"
+        if period == "first_half"
+        else "full_time_score_marginal"
+    )
+    matrix_block = snapshot.get(matrix_key)
+    if not isinstance(matrix_block, dict):
+        raise ValueError("Categorical candidate score marginal is unavailable")
+    matrix = validate_probability_matrix(
+        matrix_block.get("probabilities"), "categorical candidate score marginal"
+    )
+    probabilities = {outcome: 0.0 for outcome in outcomes}
+    if family == "1x2" and set(outcomes) == {"H", "D", "A"}:
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                outcome = "H" if home > away else "D" if home == away else "A"
+                probabilities[outcome] += float(probability)
+    elif family == "goal_range":
+        parsed = {outcome: parse_goal_range_selection(outcome) for outcome in outcomes}
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                winners = [
+                    outcome
+                    for outcome, pick in parsed.items()
+                    if settle_goal_range(pick, home, away) == "win"
+                ]
+                if len(winners) != 1:
+                    raise ValueError(
+                        "Categorical goal-range outcomes do not form an exact partition"
+                    )
+                probabilities[winners[0]] += float(probability)
+    elif family == "btts" and {item.lower() for item in outcomes} == {"yes", "no"}:
+        lookup = {outcome.lower(): outcome for outcome in outcomes}
+        for home, row in enumerate(matrix):
+            for away, probability in enumerate(row):
+                outcome = lookup["yes" if home > 0 and away > 0 else "no"]
+                probabilities[outcome] += float(probability)
+    else:
+        raise ValueError(
+            "Candidate-bound categorical semantics are unsupported for this market identity"
+        )
+    total = math.fsum(probabilities.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=PROBABILITY_AUDIT_TOLERANCE):
+        raise ValueError("Categorical candidate probabilities do not sum to one")
+    return probabilities
+
+
+def _candidate_market_for_source_identity(
+    market_identity: dict[str, Any],
+) -> str | None:
+    family = str(market_identity.get("family") or "")
+    period = str(market_identity.get("period") or "")
+    if period == "first_half" and family in {"1x2", "asian", "total"}:
+        return "half_time"
+    if period == "full_time" and family in {
+        "asian",
+        "total",
+        "htft",
+        "goal_range",
+        "btts",
+        "corner_total",
+        "corner_handicap",
+    }:
+        return family
+    return None
+
+
+def _corner_identity_has_canonical_model(
+    record: dict[str, Any], market_identity: dict[str, Any]
+) -> bool:
+    """Return whether every quoted corner side has a replayable model candidate."""
+
+    market = _candidate_market_for_source_identity(market_identity)
+    if market not in CORNER_MARKETS:
+        return False
+    raw_line = market_identity.get("line")
+    if raw_line is None:
+        return False
+    for outcome in market_identity.get("price_outcomes", []):
+        side = str(outcome)
+        line = float(raw_line)
+        if market == "corner_handicap" and side == "away":
+            line = -line
+        if (
+            _matching_corner_candidate(
+                record, {"market": market, "side": side, "line": line}
+            )
+            is None
+        ):
+            return False
+    return True
+
+
+def _verified_source_identity_unavailable_reasons(
+    record: dict[str, Any],
+    market_identity: dict[str, Any],
+    snapshots: list[dict[str, Any]],
+    prediction: dict[str, Any],
+    *,
+    same_time_tolerance_minutes: float,
+) -> list[str]:
+    """Derive, rather than trust, why a source-visible identity is unavailable."""
+
+    market = _candidate_market_for_source_identity(market_identity)
+    if market in FOOTBALL_MODEL_MARKETS:
+        model_available = validated_joint_scenario_audit(record) is not None
+    elif market in CORNER_MARKETS:
+        model_available = _corner_identity_has_canonical_model(record, market_identity)
+    else:
+        model_available = False
+    if not model_available:
+        if market in CORNER_MARKETS:
+            return [ACTIVE_UNAVAILABLE_REASON_CORNER_MODEL_MISSING]
+        raise ValueError(
+            "Source-visible football identity has no replayable canonical model"
+        )
+
+    decimal_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if isinstance(snapshot, dict) and snapshot.get("odds_format") == "decimal"
+    ]
+    if not decimal_snapshots:
+        return [ACTIVE_UNAVAILABLE_REASON_DECIMAL_PRICE_MISSING]
+
+    prediction_generated_at = parse_aware_datetime(
+        str(prediction.get("generated_at") or ""),
+        "source-visible unavailable prediction generated_at",
+    ).astimezone(timezone.utc)
+    same_time_snapshots = []
+    for snapshot in decimal_snapshots:
+        collected_at = parse_aware_datetime(
+            str(snapshot.get("collected_at") or ""),
+            "source-visible market collected_at",
+        ).astimezone(timezone.utc)
+        if (
+            abs((collected_at - prediction_generated_at).total_seconds()) / 60.0
+            <= same_time_tolerance_minutes
+        ):
+            same_time_snapshots.append(snapshot)
+    if not same_time_snapshots:
+        return [ACTIVE_UNAVAILABLE_REASON_DECISION_TIME_PRICE_MISSING]
+    return []
+
+
+def _candidate_matches_formal_pick(
+    candidate: dict[str, Any], market: str, pick: dict[str, Any]
+) -> bool:
+    if candidate.get("market") != market:
+        return False
+    if market == "htft":
+        return (
+            str(candidate.get("selection") or "").upper()
+            == str(pick.get("selection") or "").upper()
+        )
+    if market == "goal_range":
+        return candidate.get("selection") == pick.get("selection")
+    if market == "half_time":
+        if candidate.get("submarket") != pick.get("market") or candidate.get(
+            "side"
+        ) != pick.get("side"):
+            return False
+    elif candidate.get("side") != pick.get("side"):
+        return False
+    candidate_line = candidate.get("line")
+    pick_line = pick.get("line")
+    if candidate_line is None or pick_line is None:
+        return candidate_line is pick_line
+    return math.isclose(
+        float(candidate_line), float(pick_line), rel_tol=0.0, abs_tol=1e-12
+    )
+
+
+def _same_numeric_mapping(
+    left: Any, right: Any, *, tolerance: float = PROBABILITY_AUDIT_TOLERANCE
+) -> bool:
+    if (
+        not isinstance(left, dict)
+        or not isinstance(right, dict)
+        or set(left) != set(right)
+    ):
+        return False
+    try:
+        return all(
+            math.isclose(
+                float(left[key]),
+                float(right[key]),
+                rel_tol=0.0,
+                abs_tol=tolerance,
+            )
+            for key in left
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_active_formal_pick_binding(
+    record: dict[str, Any],
+    audit: dict[str, Any],
+    predictions_by_hash: dict[str, dict[str, Any]],
+) -> None:
+    """Keep every official pick on the exact candidate/source/ledger chain."""
+
+    candidates = [
+        candidate
+        for candidate in audit.get("candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    bound_candidate_ids: set[str] = set()
+    for market, pick in formal_picks(record):
+        matches = [
+            candidate
+            for candidate in candidates
+            if _candidate_matches_formal_pick(candidate, market, pick)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Active formal {market} pick must match exactly one evaluated candidate"
+            )
+        candidate = matches[0]
+        if (
+            candidate.get("formal_eligible") is not True
+            or candidate.get("shadow_selected") is not True
+        ):
+            raise ValueError(
+                f"Active formal {market} pick is not the frozen formal-eligible selection"
+            )
+        bound_candidate_ids.add(str(candidate.get("candidate_id") or ""))
+        identity_hash = require_sha256(
+            candidate.get("market_identity_hash"),
+            f"active formal {market} candidate identity hash",
+        )
+        prediction = predictions_by_hash.get(identity_hash)
+        execution = (
+            prediction.get("execution_entry") if isinstance(prediction, dict) else None
+        )
+        if (
+            not isinstance(prediction, dict)
+            or prediction.get("status") != "predicted"
+            or not isinstance(execution, dict)
+            or execution.get("selection")
+            != candidate.get("settlement_reference_outcome")
+        ):
+            raise ValueError(
+                f"Active formal {market} pick does not match the predicted ledger selection"
+            )
+
+        source_binding = candidate.get("source_evidence_binding")
+        if not isinstance(source_binding, dict):
+            raise ValueError(f"Active formal {market} pick has no source binding")
+        if (
+            pick.get("odds_format") != source_binding.get("odds_format")
+            or pick.get("price_basis") != source_binding.get("price_basis")
+            or str(pick.get("market_source") or "")
+            != str(source_binding.get("source_url") or "")
+            or parse_aware_datetime(
+                str(pick.get("market_collected_at") or ""),
+                f"active formal {market} market_collected_at",
+            ).astimezone(timezone.utc)
+            != parse_aware_datetime(
+                str(source_binding.get("collected_at") or ""),
+                f"active formal {market} source collected_at",
+            ).astimezone(timezone.utc)
+            or int(float(pick.get("firm_count")))
+            != int(source_binding.get("firm_count"))
+            or not _same_numeric_mapping(
+                pick.get("complete_market_odds"),
+                source_binding.get("prices"),
+                tolerance=5e-7,
+            )
+            or not math.isclose(
+                float(pick.get("odds")),
+                float(candidate.get("odds")),
+                rel_tol=0.0,
+                abs_tol=ODDS_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("probability")),
+                float(candidate.get("probability")),
+                rel_tol=0.0,
+                abs_tol=PROBABILITY_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("ev")),
+                float(candidate.get("ev")),
+                rel_tol=0.0,
+                abs_tol=EV_AUDIT_TOLERANCE,
+            )
+            or not math.isclose(
+                float(pick.get("edge_pp")),
+                float(candidate.get("edge_pp")),
+                rel_tol=0.0,
+                abs_tol=EDGE_AUDIT_TOLERANCE_PP,
+            )
+            or pick.get("market_signal") != candidate.get("market_signal")
+            or pick.get("confidence_components") != candidate.get("shadow_confidence")
+            or not math.isclose(
+                float(pick.get("confidence_score")),
+                float((candidate.get("shadow_confidence") or {}).get("score")),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(
+                f"Active formal {market} pick does not match its frozen candidate source/price/model"
+            )
+        candidate_distribution = candidate.get("settlement_probabilities")
+        pick_distribution = pick.get("settlement_probabilities")
+        if isinstance(pick_distribution, dict) and not _same_numeric_mapping(
+            pick_distribution, candidate_distribution
+        ):
+            raise ValueError(
+                f"Active formal {market} pick settlement model does not match its candidate"
+            )
+
+    expected_candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in candidates
+        if candidate.get("formal_eligible") is True
+        and candidate.get("shadow_selected") is True
+    }
+    if bound_candidate_ids != expected_candidate_ids:
+        missing = sorted(expected_candidate_ids - bound_candidate_ids)
+        extra = sorted(bound_candidate_ids - expected_candidate_ids)
+        raise ValueError(
+            "Frozen formal-eligible selected candidates and official formal picks must "
+            f"match exactly (missing={missing}, extra={extra})"
+        )
+
+
+def validate_active_candidate_evaluation_ledger_binding(
+    record: dict[str, Any], ledger_archive: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind the complete candidate denominator to the frozen forward queue.
+
+    ``candidate-evaluation/3`` records the eight family-level denominator, including
+    families for which no concrete line was available.  The forward queue, by contrast,
+    can only contain concrete canonical market identities.  An active record therefore
+    needs exactly one current candidate audit; every evaluated concrete identity must be
+    present in the queue exactly once, while unavailable families remain explicitly
+    represented by the committed candidate manifest rather than by an invented line.
+    """
+
+    audits = [
+        item
+        for item in record.get("candidate_audits", [])
+        if isinstance(item, dict) and item.get("kind") == CANDIDATE_EVALUATION_KIND
+    ]
+    if len(audits) != 1:
+        raise ValueError(
+            "Active untouched cohorts require exactly one current candidate evaluation audit"
+        )
+    audit = audits[0]
+    if (
+        audit.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or not validated_candidate_evaluation_audit(audit, record)
+    ):
+        raise ValueError(
+            "Active untouched cohort candidate evaluation audit is invalid or historical"
+        )
+
+    manifest = audit.get("market_manifest")
+    if not isinstance(manifest, list) or {
+        str(item.get("market") or "") for item in manifest if isinstance(item, dict)
+    } != set(PRIMARY_MARKETS):
+        raise ValueError(
+            "Active untouched cohort candidate evaluation must cover all eight markets"
+        )
+
+    payload = ledger_archive.get("ledger_payload")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "forward-observations/3.0.0"
+    ):
+        raise ValueError(
+            "Active candidate evaluations require a current forward-observations/3.0.0 ledger"
+        )
+    queue = payload.get("queue_manifest")
+    raw_entries = queue.get("entries") if isinstance(queue, dict) else None
+    raw_commitments = payload.get("commitments")
+    if not isinstance(raw_entries, list) or not isinstance(raw_commitments, list):
+        raise ValueError("Active forward candidate queue or commitments are missing")
+    candidate_generated_at = parse_aware_datetime(
+        str(audit.get("artifact", {}).get("generated_at") or ""),
+        "candidate evaluation generated_at",
+    )
+    queue_frozen_at = parse_aware_datetime(
+        str(queue.get("frozen_at") or ""), "candidate evaluation queue frozen_at"
+    )
+    if queue_frozen_at.astimezone(timezone.utc) > candidate_generated_at.astimezone(
+        timezone.utc
+    ):
+        raise ValueError(
+            "Candidate evaluation cannot precede its frozen eligibility queue"
+        )
+
+    candidate_groups: dict[str, list[dict[str, Any]]] = {}
+    for candidate in audit.get("candidates", []):
+        if not isinstance(candidate, dict):
+            raise ValueError(
+                "Active candidate evaluation contains an invalid candidate"
+            )
+        identity_hash = require_sha256(
+            candidate.get("market_identity_hash"),
+            "candidate evaluation market identity hash",
+        )
+        candidate_groups.setdefault(identity_hash, []).append(candidate)
+
+    representatives: dict[str, dict[str, Any]] = {}
+    expected_statuses: dict[str, str] = {}
+    for identity_hash, candidates in candidate_groups.items():
+        identities = [candidate.get("market_identity") for candidate in candidates]
+        if any(identity != identities[0] for identity in identities[1:]):
+            raise ValueError(
+                "Candidate selections sharing an identity hash disagree on canonical identity"
+            )
+        selected = [
+            candidate
+            for candidate in candidates
+            if candidate.get("shadow_selected") is True
+        ]
+        if len(selected) > 1:
+            raise ValueError(
+                "One exact market identity cannot have multiple predicted dispositions"
+            )
+        representatives[identity_hash] = (
+            selected[0]
+            if selected
+            else min(candidates, key=lambda item: str(item.get("candidate_id") or ""))
+        )
+        expected_statuses[identity_hash] = "predicted" if selected else "abstained"
+
+    source_audit = validated_source_evidence_audit(record)
+    source_bundle = (
+        source_audit.get("bundle") if isinstance(source_audit, dict) else None
+    )
+    market_index = (
+        source_bundle.get("market_index") if isinstance(source_bundle, dict) else None
+    )
+    if not isinstance(market_index, dict):
+        raise ValueError(
+            "Active candidate denominator requires replayable canonical source evidence"
+        )
+    source_bundle_generated_at = parse_aware_datetime(
+        str(source_bundle.get("generated_at") or ""),
+        "active source evidence generated_at",
+    )
+    if source_bundle_generated_at.astimezone(
+        timezone.utc
+    ) > candidate_generated_at.astimezone(timezone.utc):
+        raise ValueError(
+            "Candidate evaluation cannot bind source evidence collected after its "
+            "generated_at"
+        )
+    source_identities: dict[str, dict[str, Any]] = {}
+    source_hashes_by_candidate_market: dict[str, set[str]] = {
+        market: set() for market in PRIMARY_MARKETS
+    }
+    for identity_hash, snapshots in market_index.items():
+        if not isinstance(snapshots, list) or not snapshots:
+            raise ValueError("Active source evidence market index is invalid")
+        identity = snapshots[0].get("market_identity")
+        if not isinstance(identity, dict) or any(
+            not isinstance(snapshot, dict)
+            or snapshot.get("market_identity") != identity
+            or snapshot.get("market_identity_hash") != identity_hash
+            for snapshot in snapshots
+        ):
+            raise ValueError("Active source evidence market identity does not replay")
+        candidate_market = _candidate_market_for_source_identity(identity)
+        if candidate_market is None:
+            continue
+        source_identities[str(identity_hash)] = identity
+        source_hashes_by_candidate_market[candidate_market].add(str(identity_hash))
+
+    manifest_by_market = {
+        str(item["market"]): item for item in manifest if isinstance(item, dict)
+    }
+    predictions_by_hash: dict[str, dict[str, Any]] = {}
+    for raw_commitment in raw_commitments:
+        prediction = (
+            raw_commitment.get("prediction_payload")
+            if isinstance(raw_commitment, dict)
+            else None
+        )
+        if not isinstance(prediction, dict):
+            raise ValueError("Active forward commitment has no prediction payload")
+        identity_hash = require_sha256(
+            prediction.get("market_identity_hash"),
+            "forward commitment market identity hash",
+        )
+        if identity_hash in predictions_by_hash:
+            raise ValueError(
+                "Active forward commitments duplicate an exact market identity"
+            )
+        predictions_by_hash[identity_hash] = prediction
+
+    raw_protocol = (
+        payload.get("policy_manifest", {})
+        .get("policy", {})
+        .get("validation_protocol", {})
+    )
+    try:
+        same_time_tolerance_minutes = float(raw_protocol["same_time_tolerance_minutes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Active forward policy has no frozen same-time price tolerance"
+        ) from exc
+    unavailable_source_hashes: set[str] = set()
+    for market in PRIMARY_MARKETS:
+        source_hashes = source_hashes_by_candidate_market[market]
+        candidate_hashes_for_market = {
+            identity_hash
+            for identity_hash, candidates in candidate_groups.items()
+            if any(candidate.get("market") == market for candidate in candidates)
+        }
+        if manifest_by_market[market].get("status") == "evaluated":
+            if source_hashes != candidate_hashes_for_market:
+                missing = sorted(source_hashes - candidate_hashes_for_market)
+                extra = sorted(candidate_hashes_for_market - source_hashes)
+                raise ValueError(
+                    "Candidate evaluation does not exactly cover source-visible identities "
+                    f"for {market} (missing={missing}, extra={extra})"
+                )
+            for identity_hash in source_hashes:
+                expected_outcomes = set(
+                    source_identities[identity_hash].get("price_outcomes", [])
+                )
+                candidate_outcomes = {
+                    str(candidate.get("settlement_reference_outcome") or "")
+                    for candidate in candidate_groups[identity_hash]
+                }
+                if candidate_outcomes != expected_outcomes or len(
+                    candidate_groups[identity_hash]
+                ) != len(expected_outcomes):
+                    missing = sorted(expected_outcomes - candidate_outcomes)
+                    extra = sorted(candidate_outcomes - expected_outcomes)
+                    raise ValueError(
+                        "Candidate evaluation does not cover every quoted price outcome "
+                        f"for {identity_hash} (missing={missing}, extra={extra})"
+                    )
+        else:
+            if candidate_hashes_for_market:
+                raise ValueError(
+                    f"Unavailable candidate market {market} cannot contain candidates"
+                )
+            if not source_hashes:
+                expected_reasons = [ACTIVE_UNAVAILABLE_REASON_SOURCE_MISSING]
+            else:
+                derived_reasons: set[str] = set()
+                for identity_hash in source_hashes:
+                    prediction = predictions_by_hash.get(identity_hash)
+                    if not isinstance(prediction, dict):
+                        prediction = {
+                            "generated_at": candidate_generated_at.isoformat()
+                        }
+                    reasons = _verified_source_identity_unavailable_reasons(
+                        record,
+                        source_identities[identity_hash],
+                        list(market_index[identity_hash]),
+                        prediction,
+                        same_time_tolerance_minutes=same_time_tolerance_minutes,
+                    )
+                    if not reasons:
+                        raise ValueError(
+                            "Source-visible market with a replayable canonical model and "
+                            "decision-time price must be evaluated"
+                        )
+                    derived_reasons.update(reasons)
+                expected_reasons = sorted(derived_reasons)
+            if manifest_by_market[market].get("reasons") != expected_reasons:
+                raise ValueError(
+                    f"Unavailable candidate market {market} reasons do not match "
+                    "verified source/model conditions"
+                )
+            unavailable_source_hashes.update(source_hashes)
+
+    entries_by_hash: dict[str, dict[str, Any]] = {}
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            raise ValueError("Active forward queue contains an invalid entry")
+        identity_hash = require_sha256(
+            raw_entry.get("market_identity_hash"), "forward queue market identity hash"
+        )
+        if identity_hash in entries_by_hash:
+            raise ValueError("Active forward queue duplicates an exact market identity")
+        entries_by_hash[identity_hash] = raw_entry
+
+    candidate_hashes = set(candidate_groups)
+    queue_hashes = set(entries_by_hash)
+    all_manifest_unavailable = not candidate_hashes and all(
+        isinstance(item, dict) and item.get("status") == "unavailable"
+        for item in manifest
+    )
+    sentinel_identity = {
+        "family": "1x2",
+        "period": "full_time",
+        "line": None,
+        "price_outcomes": ["H", "D", "A"],
+    }
+    sentinel_hash = source_evidence.market_identity_hash(sentinel_identity)
+    use_sentinel = all_manifest_unavailable and not unavailable_source_hashes
+    expected_queue_hashes = candidate_hashes | unavailable_source_hashes
+    if use_sentinel:
+        if queue_hashes != {sentinel_hash}:
+            raise ValueError(
+                "An all-unavailable candidate manifest requires exactly one canonical "
+                "fixture-denominator sentinel"
+            )
+    elif expected_queue_hashes != queue_hashes:
+        missing = sorted(expected_queue_hashes - queue_hashes)
+        extra = sorted(queue_hashes - expected_queue_hashes)
+        raise ValueError(
+            "Active forward queue does not exactly cover evaluated and unavailable "
+            "source-visible identities "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    expected_prediction_hashes = (
+        {sentinel_hash} if use_sentinel else expected_queue_hashes
+    )
+    if set(predictions_by_hash) != expected_prediction_hashes:
+        raise ValueError(
+            "Active forward commitments do not exactly cover evaluated candidate identities"
+        )
+
+    if use_sentinel:
+        sentinel_entry = entries_by_hash[sentinel_hash]
+        sentinel_prediction = predictions_by_hash[sentinel_hash]
+        source_rows = (
+            source_bundle.get("sources") if isinstance(source_bundle, dict) else None
+        )
+        if (
+            not isinstance(source_bundle, dict)
+            or source_bundle.get("market_index") != {}
+            or not isinstance(source_rows, list)
+            or not source_rows
+            or any(
+                not isinstance(source_row, dict)
+                or not isinstance(source_row.get("parsed"), dict)
+                or source_row["parsed"].get("availability_status") != "unavailable"
+                for source_row in source_rows
+            )
+        ):
+            raise ValueError(
+                "All-unavailable candidate manifests require replayable source evidence "
+                "with no available market snapshots"
+            )
+        sentinel_generated_at = parse_aware_datetime(
+            str(sentinel_prediction.get("generated_at") or ""),
+            "fixture denominator sentinel generated_at",
+        )
+        expected_reasons = [
+            f"{item['market']}:{reason}"
+            for item in manifest
+            if isinstance(item, dict)
+            for reason in item.get("reasons", [])
+        ]
+        if (
+            sentinel_entry.get("market_identity") != sentinel_identity
+            or sentinel_prediction.get("market_identity") != sentinel_identity
+            or sentinel_prediction.get("status") != "unavailable"
+            or sentinel_prediction.get("settlement_reference_outcome") is not None
+            or sentinel_prediction.get("unavailable_reasons") != expected_reasons
+            or candidate_generated_at.astimezone(timezone.utc)
+            > sentinel_generated_at.astimezone(timezone.utc)
+        ):
+            raise ValueError(
+                "All-unavailable fixture denominator sentinel does not bind the eight-market manifest"
+            )
+        _validate_active_formal_pick_binding(record, audit, predictions_by_hash)
+        return {
+            "candidate_evaluation_audit_hash": audit["audit_hash"],
+            "evaluated_identity_count": 0,
+            "evaluated_market_count": 0,
+            "unavailable_market_count": len(PRIMARY_MARKETS),
+            "fixture_denominator_sentinel": sentinel_hash,
+        }
+
+    for identity_hash in unavailable_source_hashes:
+        identity = source_identities[identity_hash]
+        entry = entries_by_hash[identity_hash]
+        prediction = predictions_by_hash[identity_hash]
+        candidate_market = _candidate_market_for_source_identity(identity)
+        manifest_entry = manifest_by_market.get(str(candidate_market))
+        prediction_generated_at = parse_aware_datetime(
+            str(prediction.get("generated_at") or ""),
+            "unavailable forward identity generated_at",
+        )
+        if (
+            entry.get("market_identity") != identity
+            or prediction.get("market_identity") != identity
+            or prediction.get("status") != "unavailable"
+            or prediction.get("settlement_reference_outcome") is not None
+            or not isinstance(manifest_entry, dict)
+            or manifest_entry.get("status") != "unavailable"
+            or prediction.get("unavailable_reasons") != manifest_entry.get("reasons")
+            or candidate_generated_at.astimezone(timezone.utc)
+            > prediction_generated_at.astimezone(timezone.utc)
+        ):
+            raise ValueError(
+                "Unavailable forward identity does not bind its source-visible market manifest"
+            )
+
+    market_schemas = payload.get("market_schemas")
+    if not isinstance(market_schemas, dict):
+        raise ValueError("Active forward market schemas are missing")
+    for identity_hash, candidates in candidate_groups.items():
+        candidate = representatives[identity_hash]
+        entry = entries_by_hash[identity_hash]
+        prediction = predictions_by_hash[identity_hash]
+        if entry.get("market_identity") != candidate.get(
+            "market_identity"
+        ) or prediction.get("market_identity") != candidate.get("market_identity"):
+            raise ValueError(
+                "Active forward queue identity does not match its evaluated candidate"
+            )
+
+        expected_status = expected_statuses[identity_hash]
+        if prediction.get("status") != expected_status:
+            raise ValueError(
+                "Active forward commitment status does not match the candidate disposition"
+            )
+        family = str(candidate.get("market_identity", {}).get("family") or "")
+        semantics = market_schemas.get(family, {}).get("settlement_semantics")
+        model_probabilities = prediction.get("model_probabilities")
+        if not isinstance(model_probabilities, dict):
+            raise ValueError("Modeled candidate commitment probabilities are missing")
+        if semantics == "five_state_return":
+            if prediction.get("settlement_reference_outcome") != candidate.get(
+                "settlement_reference_outcome"
+            ):
+                raise ValueError(
+                    "Active forward commitment selection does not match the evaluated candidate"
+                )
+            expected_probabilities = candidate.get("settlement_probabilities")
+        elif semantics == "categorical":
+            if prediction.get("settlement_reference_outcome") is not None:
+                raise ValueError(
+                    "Categorical candidate commitments cannot carry a settlement reference"
+                )
+            execution = prediction.get("execution_entry")
+            if isinstance(execution, dict) and execution.get(
+                "selection"
+            ) != candidate.get("settlement_reference_outcome"):
+                raise ValueError(
+                    "Predicted categorical commitment does not bind the selected candidate outcome"
+                )
+            expected_probabilities = _canonical_candidate_categorical_probabilities(
+                record, candidate["market_identity"]
+            )
+        else:
+            raise ValueError("Candidate-bound forward market semantics are unsupported")
+        if (
+            not isinstance(expected_probabilities, dict)
+            or set(model_probabilities) != set(expected_probabilities)
+            or any(
+                not math.isclose(
+                    float(model_probabilities[outcome]),
+                    float(expected_probabilities[outcome]),
+                    rel_tol=0.0,
+                    abs_tol=PROBABILITY_AUDIT_TOLERANCE,
+                )
+                for outcome in model_probabilities
+            )
+        ):
+            raise ValueError(
+                "Active forward model probabilities do not match the frozen candidate model"
+            )
+        prediction_generated_at = parse_aware_datetime(
+            str(prediction.get("generated_at") or ""),
+            "forward candidate commitment generated_at",
+        )
+        if candidate_generated_at.astimezone(
+            timezone.utc
+        ) > prediction_generated_at.astimezone(timezone.utc):
+            raise ValueError(
+                "Forward commitment cannot precede its candidate evaluation disposition"
+            )
+
+        source_binding = candidate.get("source_evidence_binding")
+        bookmaker = prediction.get("bookmaker_snapshot")
+        if not isinstance(source_binding, dict) or not isinstance(bookmaker, dict):
+            raise ValueError(
+                "Active candidate and forward commitment require the same source snapshot"
+            )
+        if any(
+            source_binding.get(candidate_field) != bookmaker.get(ledger_field)
+            for candidate_field, ledger_field in (
+                ("evidence_hash", "source_evidence_hash"),
+                ("source_url", "source_url"),
+                ("collected_at", "collected_at"),
+                ("price_basis", "price_basis"),
+                ("odds_format", "odds_format"),
+                ("firm_count", "firm_count"),
+            )
+        ):
+            raise ValueError(
+                "Active candidate and forward commitment source snapshots do not match"
+            )
+        if any(
+            other.get("source_evidence_binding") != source_binding
+            for other in candidates
+        ):
+            raise ValueError(
+                "Selections sharing one exact identity must use the same frozen source snapshot"
+            )
+        candidate_prices = source_binding.get("prices")
+        ledger_prices = bookmaker.get("complete_market_odds")
+        if (
+            not isinstance(candidate_prices, dict)
+            or not isinstance(ledger_prices, dict)
+            or set(candidate_prices) != set(ledger_prices)
+            or any(
+                not math.isclose(
+                    float(candidate_prices[outcome]),
+                    float(ledger_prices[outcome]),
+                    rel_tol=0.0,
+                    abs_tol=5e-7,
+                )
+                for outcome in candidate_prices
+            )
+        ):
+            raise ValueError(
+                "Active candidate and forward commitment prices do not match"
+            )
+
+    _validate_active_formal_pick_binding(record, audit, predictions_by_hash)
+    return {
+        "candidate_evaluation_audit_hash": audit["audit_hash"],
+        "evaluated_identity_count": len(candidate_groups),
+        "evaluated_market_count": sum(
+            item.get("status") == "evaluated"
+            for item in manifest
+            if isinstance(item, dict)
+        ),
+        "unavailable_market_count": sum(
+            item.get("status") == "unavailable"
+            for item in manifest
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def _canonical_forward_record_prediction_payload(
     record: dict[str, Any],
     ledger_archive: dict[str, Any],
     provenance_binding: dict[str, Any],
+    *,
+    schema_version: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": FORWARD_RECORD_PREDICTION_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "archived_at": str(record.get("updated_at") or record.get("created_at") or ""),
         "analysis_stage": str(record.get("analysis_stage") or "initial"),
         "fixture": {
@@ -6149,6 +7364,25 @@ def canonical_forward_record_prediction_payload(
         },
         "provenance_binding": deepcopy(provenance_binding),
     }
+
+
+def canonical_forward_record_prediction_payload(
+    record: dict[str, Any],
+    ledger_archive: dict[str, Any],
+    provenance_binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Build only the current prediction commitment payload.
+
+    Previous schemas are reconstructed internally for immutable replay and are never exposed
+    through the active builder.
+    """
+
+    return _canonical_forward_record_prediction_payload(
+        record,
+        ledger_archive,
+        provenance_binding,
+        schema_version=FORWARD_RECORD_PREDICTION_SCHEMA_VERSION,
+    )
 
 
 def build_forward_record_prediction_commitment(
@@ -6201,29 +7435,54 @@ def validate_forward_record_prediction_commitment(
     }
     if set(value) != required:
         raise ValueError("Forward record commitment fields are incomplete")
-    if value.get("schema_version") != FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION:
+    commitment_schema = value.get("schema_version")
+    if commitment_schema not in {
+        PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION,
+        FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION,
+    }:
         raise ValueError("Forward record commitment schema is unsupported")
+    historical = commitment_schema == PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION
     supplied_hash = value.pop("commitment_hash", None)
     if supplied_hash != forward_policy._hash_json(value):
         raise ValueError("Forward record commitment hash is invalid")
     ledger = validate_forward_validation_ledger_archive(
         record.get("forward_validation_ledger"), record=record
     )
+    expected_ledger_schema = (
+        PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+        if historical
+        else FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    )
+    if ledger.get("schema_version") != expected_ledger_schema:
+        raise ValueError("Forward record commitment and ledger schemas do not match")
+    if not historical:
+        validate_active_candidate_evaluation_ledger_binding(record, ledger)
     try:
         binding = forward_policy.validate_record_binding(
             value.get("forward_policy_binding")
         )
     except forward_policy.ForwardPolicyError as exc:
         raise ValueError("Forward record commitment binding is invalid") from exc
+    expected_binding_schema = (
+        forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        if historical
+        else forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    )
     if (
         binding is None
-        or binding.get("schema_version")
-        != forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        or binding.get("schema_version") != expected_binding_schema
         or binding != binding_raw
     ):
         raise ValueError("Forward record does not preserve its committed binding")
-    expected_payload = canonical_forward_record_prediction_payload(
-        record, ledger, binding["provenance_binding"]
+    expected_payload = _canonical_forward_record_prediction_payload(
+        record,
+        ledger,
+        binding["provenance_binding"],
+        schema_version=(
+            PREVIOUS_FORWARD_RECORD_PREDICTION_SCHEMA_VERSION
+            if historical
+            else FORWARD_RECORD_PREDICTION_SCHEMA_VERSION
+        ),
     )
     expected_prediction_hash = forward_policy._hash_json(expected_payload)
     if (
@@ -6243,9 +7502,111 @@ def validate_forward_record_prediction_commitment(
     return value
 
 
-def _forward_observed_outcome(
+def _forward_observed_settlement_state(
+    record: dict[str, Any], prediction: dict[str, Any], schema: dict[str, Any]
+) -> str | None:
+    final = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("final_score") or "")
+    )
+    if final is None:
+        return None
+    home, away = (int(final.group(1)), int(final.group(2)))
+    full_code = "H" if home > away else "A" if away > home else "D"
+    raw_states = schema.get("settlement_states")
+    if not isinstance(raw_states, list):
+        return None
+    settlement_states = set(raw_states)
+    identity = prediction.get("market_identity")
+    if not isinstance(identity, dict):
+        return None
+    family = str(identity.get("family") or "")
+    period = str(identity.get("period") or "")
+    semantics = str(schema.get("settlement_semantics") or "")
+    half = re.fullmatch(
+        r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("half_time_score") or "")
+    )
+    if period == "first_half":
+        if half is None:
+            return None
+        score_home, score_away = int(half.group(1)), int(half.group(2))
+    else:
+        score_home, score_away = home, away
+    if semantics == "five_state_return":
+        reference = str(prediction.get("settlement_reference_outcome") or "")
+        line = identity.get("line")
+        if reference not in identity.get("price_outcomes", []) or line is None:
+            return None
+        if family in {"asian", "corner_handicap"}:
+            pick_line = float(line) if reference == "home" else -float(line)
+            pick = {"side": reference, "line": pick_line}
+            if family == "corner_handicap":
+                home_corners = record.get("home_corners")
+                away_corners = record.get("away_corners")
+                if home_corners is None or away_corners is None:
+                    return None
+                observed = settle_corner_handicap(
+                    pick, int(home_corners), int(away_corners)
+                )
+            else:
+                observed = settle_asian(pick, score_home, score_away)
+        elif family in {"total", "corner_total"}:
+            pick = {"side": reference, "line": float(line)}
+            if family == "corner_total":
+                home_corners = record.get("home_corners")
+                away_corners = record.get("away_corners")
+                if home_corners is None or away_corners is None:
+                    return None
+                observed = settle_corner_total(
+                    pick, int(home_corners), int(away_corners)
+                )
+            else:
+                observed = settle_total(pick, score_home, score_away)
+        else:
+            return None
+        normalized = "full_win" if observed == "win" else observed
+        return normalized if normalized in settlement_states else None
+    if settlement_states == {"H", "D", "A"}:
+        return result_code(score_home, score_away)
+    if family == "htft" and half is not None:
+        half_home, half_away = int(half.group(1)), int(half.group(2))
+        half_code = (
+            "H" if half_home > half_away else "A" if half_away > half_home else "D"
+        )
+        candidate = f"{half_code}{full_code}"
+        return candidate if candidate in settlement_states else None
+    if family == "goal_range":
+        total_goals = score_home + score_away
+        matches: list[str] = []
+        for state in raw_states:
+            try:
+                parsed = parse_goal_range_selection(str(state))
+            except ValueError:
+                return None
+            minimum = int(parsed["minimum_goals"])
+            maximum = parsed["maximum_goals"]
+            if total_goals >= minimum and (
+                maximum is None or total_goals <= int(maximum)
+            ):
+                matches.append(str(state))
+        return matches[0] if len(matches) == 1 else None
+    actual_score = f"{home}-{away}"
+    if actual_score in settlement_states:
+        return actual_score
+    if settlement_states in ({"yes", "no"}, {"Y", "N"}):
+        yes = home > 0 and away > 0
+        return (
+            ("yes" if yes else "no")
+            if "yes" in settlement_states
+            else ("Y" if yes else "N")
+        )
+    return None
+
+
+def _previous_forward_observed_outcome(
     record: dict[str, Any], market: str, outcomes: list[str]
 ) -> str | None:
+    """Replay the v2 observation outcome contract without upgrading it."""
+
     final = re.fullmatch(
         r"\s*(\d+)\s*-\s*(\d+)\s*", str(record.get("final_score") or "")
     )
@@ -6293,6 +7654,10 @@ def _forward_validation_micro_ledger_for_record(
         record.get("forward_validation_ledger"), record=record
     )
     payload = deepcopy(ledger_archive["ledger_payload"])
+    historical = (
+        ledger_archive.get("schema_version")
+        == PREVIOUS_FORWARD_LEDGER_ARCHIVE_SCHEMA_VERSION
+    )
     if cohort_closure is not None:
         payload["cohort_closure"] = deepcopy(cohort_closure)
     if record.get("status") == "reviewed":
@@ -6309,19 +7674,42 @@ def _forward_validation_micro_ledger_for_record(
             prediction = predictions.get(observation_id)
             if not isinstance(prediction, dict):
                 raise ValueError("Forward settlement has no archived prediction")
-            schema = schemas.get(str(prediction.get("market") or ""), {})
-            outcomes = schema.get("outcomes") if isinstance(schema, dict) else None
-            if not isinstance(outcomes, list):
-                raise ValueError("Forward market schema outcomes are unavailable")
-            observed = _forward_observed_outcome(
-                record, str(prediction.get("market") or ""), list(outcomes)
-            )
+            if historical:
+                market = str(prediction.get("market") or "")
+                schema = schemas.get(market, {})
+                outcomes = schema.get("outcomes") if isinstance(schema, dict) else None
+                if not isinstance(outcomes, list):
+                    raise ValueError("Forward market schema outcomes are unavailable")
+                observed = _previous_forward_observed_outcome(
+                    record, market, list(outcomes)
+                )
+            else:
+                raw_identity = prediction.get("market_identity")
+                family = (
+                    str(raw_identity.get("family") or "")
+                    if isinstance(raw_identity, dict)
+                    else ""
+                )
+                schema = schemas.get(family, {})
+                if not isinstance(schema, dict) or not isinstance(
+                    schema.get("settlement_states"), list
+                ):
+                    raise ValueError(
+                        "Forward market schema settlement states are unavailable"
+                    )
+                observed = _forward_observed_settlement_state(
+                    record, prediction, schema
+                )
             if observed is None:
                 continue
             settlement.update(
                 {
                     "status": "settled",
-                    "observed_outcome": observed,
+                    (
+                        "observed_outcome"
+                        if historical
+                        else "observed_settlement_state"
+                    ): observed,
                     "result_collected_at": verification.get("collected_at"),
                     "result_source_evidence_hash": forward_policy._hash_json(
                         {
@@ -6373,8 +7761,16 @@ def _forward_history_record_receipt(
     if forward_policy._hash_json(snapshot) != archive_version_hash:
         raise ValueError("Forward record archive snapshot does not replay")
     market_commitments = _forward_market_commitments(ledger_archive["ledger_payload"])
+    historical = (
+        commitment.get("schema_version")
+        == PREVIOUS_FORWARD_RECORD_COMMITMENT_SCHEMA_VERSION
+    )
     receipt: dict[str, Any] = {
-        "schema_version": FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION,
+        "schema_version": (
+            PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+            if historical
+            else FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+        ),
         "fixture_id": str(record.get("match_id") or ""),
         "record_archived_at": archived_at,
         "archive_version_hash": archive_version_hash,
@@ -6426,6 +7822,13 @@ def forward_record_manifest_for_records(
     except forward_policy.ForwardPolicyError as exc:
         raise ValueError("Forward record manifest cohort is invalid") from exc
     receipts = [_forward_history_record_receipt(record) for record in records]
+    if any(
+        receipt.get("schema_version") != FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+        for receipt in receipts
+    ):
+        raise ValueError(
+            "Historical forward records are read-only and cannot create a new cohort closure"
+        )
     receipts.sort(key=lambda item: str(item["fixture_id"]))
     entries = [_record_manifest_entry_from_receipt(receipt) for receipt in receipts]
     fixture_ids = [entry["fixture_id"] for entry in entries]
@@ -6484,6 +7887,23 @@ def forward_validation_input_for_records(
     fixture_ids = [str(item["fixture_id"]) for item in receipts]
     if len(set(fixture_ids)) != len(fixture_ids):
         raise ValueError("Forward cohort export contains duplicate fixture records")
+    receipt_schemas = {str(item.get("schema_version") or "") for item in receipts}
+    if len(receipt_schemas) != 1:
+        raise ValueError(
+            "Forward cohort export cannot mix historical and current records"
+        )
+    historical = receipt_schemas == {
+        PREVIOUS_FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+    }
+    if not historical and receipt_schemas != {
+        FORWARD_HISTORY_RECORD_RECEIPT_SCHEMA_VERSION
+    }:
+        raise ValueError("Forward cohort export receipt schema is unsupported")
+    if historical:
+        raise ValueError(
+            "Historical forward-observations/2.0.0 records are defect-quarantined "
+            "and cannot enter formal validation export"
+        )
 
     first_ledger = receipts[0]["ledger_payload"]
     policy = deepcopy(first_ledger.get("policy_manifest"))
@@ -6526,7 +7946,11 @@ def forward_validation_input_for_records(
         )
 
     history_binding: dict[str, Any] = {
-        "schema_version": FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION,
+        "schema_version": (
+            PREVIOUS_FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+            if historical
+            else FORWARD_HISTORY_LEDGER_BINDING_SCHEMA_VERSION
+        ),
         "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
         "cohort_id": cohort_id,
         "policy_id": policy_id,
@@ -6536,7 +7960,9 @@ def forward_validation_input_for_records(
     }
     history_binding["binding_hash"] = forward_policy._hash_json(history_binding)
     return {
-        "schema_version": "forward-observations/2.0.0",
+        "schema_version": (
+            "forward-observations/2.0.0" if historical else "forward-observations/3.0.0"
+        ),
         "artifact_type": FORWARD_HISTORY_AGGREGATE_ARTIFACT_TYPE,
         "cohort_id": cohort_id,
         "policy_id": policy_id,
@@ -6609,6 +8035,36 @@ def _write_json_atomically(output: str | Path, payload: dict[str, Any]) -> Path:
     return path
 
 
+def _write_forward_record_manifest_once(
+    output: str | Path,
+    manifest: dict[str, Any],
+    *,
+    cohort: dict[str, Any],
+) -> Path:
+    """Create the close manifest once, or accept an identical crash-retry."""
+
+    path = Path(output).resolve()
+    if not path.exists():
+        return _write_json_atomically(path, manifest)
+    try:
+        existing_raw = json.loads(path.read_text(encoding="utf-8"))
+        existing = forward_policy.validate_record_manifest(existing_raw, cohort=cohort)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        forward_policy.ForwardPolicyError,
+    ) as exc:
+        raise ValueError(
+            "Existing forward record manifest is invalid; refusing crash recovery"
+        ) from exc
+    if existing != manifest:
+        raise ValueError(
+            "Existing forward record manifest differs; refusing crash recovery"
+        )
+    return path
+
+
 @locked_history_transaction
 def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, Any]:
     """Write the complete record index for one immutable cohort from history."""
@@ -6649,7 +8105,9 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
         else forward_policy.cohort_directory(args.base_dir)
         / f"{cohort_id}-record-manifest.json"
     )
-    manifest_path = _write_json_atomically(manifest_output, manifest)
+    manifest_path = _write_forward_record_manifest_once(
+        manifest_output, manifest, cohort=cohort
+    )
     try:
         closure_path, closure = forward_policy.close_cohort(
             base_dir=args.base_dir,
@@ -7321,6 +8779,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     )
     if base_forward_binding is not None:
         assert ledger_archive is not None
+        validate_active_candidate_evaluation_ledger_binding(record, ledger_archive)
         commitment, committed_binding = build_forward_record_prediction_commitment(
             record, ledger_archive, base_forward_binding
         )
@@ -8019,6 +9478,18 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError(
                     "Review refused: frozen forward prediction commitment is invalid"
                 ) from exc
+        if validated_review_binding is not None and validated_review_binding.get(
+            "schema_version"
+        ) in {
+            forward_policy.PREVIOUS_PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        }:
+            try:
+                validate_forward_record_prediction_commitment(record)
+            except ValueError as exc:
+                raise ValueError(
+                    "Review refused: historical forward prediction commitment is invalid"
+                ) from exc
     if settlement_basis.get("forward_policy_binding") is not None:
         if validated_source_evidence_audit(settlement_basis) is None:
             raise ValueError(
@@ -8499,7 +9970,7 @@ def is_strict_forward_oos_record(record: dict[str, Any]) -> bool:
 
 
 def forward_policy_binding_for_record(record: dict[str, Any]) -> dict[str, Any] | None:
-    """Return only a self-consistent frozen untouched-cohort binding."""
+    """Return a self-consistent committed binding, including historical replay."""
 
     basis = record.get("settlement_basis")
     binding = (
@@ -8509,11 +9980,10 @@ def forward_policy_binding_for_record(record: dict[str, Any]) -> dict[str, Any] 
     )
     try:
         validated = forward_policy.validate_record_binding(binding)
-        if (
-            validated is None
-            or validated.get("schema_version")
-            != forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
-        ):
+        if validated is None or validated.get("schema_version") not in {
+            forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+            forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
+        }:
             return None
         validate_forward_record_prediction_commitment(record)
         return validated
@@ -8524,11 +9994,24 @@ def forward_policy_binding_for_record(record: dict[str, Any]) -> dict[str, Any] 
 def untouched_live_forward_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Keep a truly frozen confirmation cohort separate from generic strict-OOS data."""
 
-    eligible = [
-        record
+    bound_records = [
+        (record, forward_policy_binding_for_record(record))
         for record in records
         if is_strict_forward_oos_record(record)
-        and forward_policy_binding_for_record(record) is not None
+    ]
+    historical = [
+        (record, binding)
+        for record, binding in bound_records
+        if binding is not None
+        and binding.get("schema_version")
+        == forward_policy.PREVIOUS_PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+    ]
+    eligible = [
+        record
+        for record, binding in bound_records
+        if binding is not None
+        and binding.get("schema_version")
+        == forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
         and validated_source_evidence_audit(record) is not None
     ]
     cohorts: dict[str, dict[str, Any]] = {}
@@ -8587,6 +10070,15 @@ def untouched_live_forward_summary(records: list[dict[str, Any]]) -> dict[str, A
         "reviewed_matches": len(eligible),
         "cohort_count": len(rendered),
         "cohorts": rendered,
+        "historical_quarantine": {
+            "record_count": len(historical),
+            "cohort_ids": sorted(
+                {str(binding["cohort_id"]) for _record, binding in historical}
+            ),
+            "reason": "forward_observations_v2_defective_historical_read_only",
+            "formal_export_eligible": False,
+            "promotion_evidence_eligible": False,
+        },
         "promotion_is_manual": True,
         "no_claim_without_same_time_bookmaker_baseline": True,
     }
@@ -8941,9 +10433,16 @@ def _replay_candidate_evaluation_audit(
         calculated_source_hash = calculate_candidate_evaluation_source_hash(source)
         if artifact.get("source_payload_hash") != calculated_source_hash:
             return False
+        source_schema = source.get("schema_version")
         if (
             source.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
-            or source.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+            or source_schema
+            not in {
+                CANDIDATE_EVALUATION_SCHEMA_VERSION,
+                LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            }
+            or audit.get("schema_version") != source_schema
+            or artifact.get("schema_version") != source_schema
             or source.get("policy_version") != STRICT_OOS_POLICY_VERSION
             or source.get("selection_policy_version") != CONFIDENCE_POLICY_VERSION
         ):
@@ -9044,6 +10543,9 @@ def _replay_candidate_evaluation_audit(
                 expected_observation_id,
                 index,
                 generated_at,
+                legacy_read_only=(
+                    source_schema == LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION
+                ),
             )
             if source_audit is not None:
                 candidate["source_evidence_binding"] = source_evidence.match_candidate(
@@ -9113,7 +10615,11 @@ def validated_candidate_evaluation_audit(
     audit: dict[str, Any], record: dict[str, Any] | None = None
 ) -> bool:
     if (
-        audit.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        audit.get("schema_version")
+        not in {
+            CANDIDATE_EVALUATION_SCHEMA_VERSION,
+            LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        }
         or audit.get("kind") != CANDIDATE_EVALUATION_KIND
         or audit.get("status") != "observation_only"
         or audit.get("counts_toward_primary_record") is not False
@@ -9190,7 +10696,7 @@ def validated_candidate_evaluation_audit(
     source_payload_hash = str(artifact.get("source_payload_hash") or "")
     if (
         artifact.get("artifact_type") != CANDIDATE_EVALUATION_ARTIFACT_TYPE
-        or artifact.get("schema_version") != CANDIDATE_EVALUATION_SCHEMA_VERSION
+        or artifact.get("schema_version") != audit.get("schema_version")
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_sha256)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw_artifact_sha256)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", observation_id)
@@ -9336,10 +10842,21 @@ def validated_candidate_evaluation_audit(
     return _replay_candidate_evaluation_audit(audit, record)
 
 
+def candidate_evaluation_evidence_scope(audit: dict[str, Any]) -> str:
+    if audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION:
+        return "canonical_market_identity_forward_eligible"
+    if audit.get("schema_version") == LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION:
+        return "legacy_read_only_quarantined"
+    return "unsupported"
+
+
 def validated_observation_audit(
     audit: dict[str, Any], record: dict[str, Any] | None = None
 ) -> bool:
-    if audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION:
+    if audit.get("schema_version") in {
+        CANDIDATE_EVALUATION_SCHEMA_VERSION,
+        LEGACY_CANDIDATE_EVALUATION_SCHEMA_VERSION,
+    }:
         return validated_candidate_evaluation_audit(audit, record)
     if (
         audit.get("schema_version") != OBSERVATION_SCHEMA_VERSION
@@ -10407,7 +11924,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--forward-validation-ledger",
         help=(
-            "pre-match forward-observations/2.0.0 JSON with only pending settlements; "
+            "pre-match forward-observations/3.0.0 JSON with only pending settlements; "
             "required whenever an untouched live-forward cohort is active"
         ),
     )
@@ -10545,14 +12062,14 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--source-evidence-file",
         help=(
-            "source-evidence/1.0.0 bundle rebuilt from content-addressed visible-page "
+            "source-evidence/2.0.0 bundle rebuilt from content-addressed visible-page "
             "snapshots; mandatory while an untouched forward cohort is active"
         ),
     )
     record.add_argument(
         "--candidate-evaluation-file",
         help=(
-            "candidate-evaluation/2.0.0 multi-market audit artifact; probabilities, "
+            "candidate-evaluation/3.0.0 multi-market audit artifact; probabilities, "
             "EV, edge, timing, gates, and shadow selection are revalidated before archive"
         ),
     )
