@@ -33,18 +33,69 @@ from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DATASET_ARTIFACT_TYPE = "soccer_history_dataset_bundle"
-DATASET_SCHEMA_VERSION = "1.2.0"
-IMPORTER_VERSION = "league-workbook-importer/1.5.0"
+DATASET_SCHEMA_VERSION = "1.4.0"
+IMPORTER_VERSION = "league-workbook-importer/1.7.0"
 
 REGULAR_COMPETITION_REGIME = "regular"
 JAPAN_J1_VISION_REGIME = "2026_vision_regional"
+NORWAY_RELEGATION_PLAYOFF_REGIME = "relegation_playoff"
 # The official opening may be presented as 7 February in other timezones, but
 # the supplied source has three finished fixtures dated 6 February in its
 # explicitly declared source timezone.  These bounds deliberately preserve the
 # complete regional and placement tournament in the audited 2026 snapshot.
 JAPAN_J1_VISION_SOURCE_DATE_START = date(2026, 2, 6)
 JAPAN_J1_VISION_SOURCE_DATE_END = date(2026, 6, 6)
+ADMINISTRATIVE_RESULT_EXCLUSIONS: dict[str, dict[str, dict[str, str]]] = {
+    "uefa_nations_league": {
+        # Neither fixture was played. UEFA awarded each match 3-0, so treating
+        # the displayed result as observed goals would corrupt every score and
+        # HT/FT target derived from it.
+        "1858422": {
+            "reason": "Romania-Norway was not played; UEFA awarded a 3-0 result",
+            "source": (
+                "https://editorial.uefa.com/resources/0264-11087084fb9c-"
+                "cf80ec57c11c-1000/2020.12.03_website_publication_ab_34054_b_final.pdf"
+            ),
+        },
+        "1858413": {
+            "reason": "Switzerland-Ukraine was not played; UEFA awarded a 3-0 result",
+            "source": (
+                "https://www.uefa.com/news-media/news/0263-10f07669c421-"
+                "a1b7e2cc6859-1000--ab-switzerland-v-ukraine/"
+            ),
+        },
+    }
+}
+MATCH_ID_REQUIRED_LEAGUES = frozenset(ADMINISTRATIVE_RESULT_EXCLUSIONS)
+ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION = "administrative-result-exclusion/1.0.0"
+
+
+def _administrative_result_exclusion_policy() -> dict[str, Any]:
+    return {
+        "version": ADMINISTRATIVE_RESULT_EXCLUSION_POLICY_VERSION,
+        "match_id_source_column": "Titan比赛ID",
+        "required_leagues": sorted(MATCH_ID_REQUIRED_LEAGUES),
+        "excluded_matches": {
+            league_key: {
+                match_id: dict(evidence)
+                for match_id, evidence in sorted(exclusions.items())
+            }
+            for league_key, exclusions in sorted(
+                ADMINISTRATIVE_RESULT_EXCLUSIONS.items()
+            )
+        },
+        "rule": "administrative or awarded unplayed results cannot enter training",
+    }
+
+
 SEASON_COMPLETENESS_POLICY_VERSION = "known-schedule-match-counts-v1"
+NATIONS_LEAGUE_EDITION_END_YEARS = {
+    # Every completed edition in the frozen 2020-2026 source scope has a league
+    # phase in year N, finals in N+1 and lower-league play-outs in N+2.
+    2020: 2022,
+    2022: 2024,
+    2024: 2026,
+}
 # Expected finished-match totals for the source competition scope.  Stable
 # round-robin totals are repeated deliberately so every supported season has an
 # explicit, reviewable expectation.  Variable or exceptional formats (for
@@ -61,6 +112,17 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2026: 117,
     },
     "brazil_serie_a": {season: 380 for season in range(2020, 2027)},
+    "brazil_cup": {
+        2020: 120,
+        2021: 122,
+        2022: 122,
+        2023: 122,
+        2024: 122,
+        2025: 122,
+        # CBF's frozen 2026 format contains 155 matches; the 142 rows available
+        # at the 2026-08-07 cutoff are therefore an explicit partial cohort.
+        2026: 155,
+    },
     "england_premier_league": {season: 380 for season in range(2020, 2027)},
     "france_ligue_1": {
         2020: 380,
@@ -110,6 +172,9 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2025: 228,
         2026: 228,
     },
+    # The 2025/2026 source scope contains the 240-match league plus two
+    # relegation play-off legs.  Those legs remain in the complete workbook but
+    # are tagged ``relegation_playoff`` and excluded from production fitting.
     "norway_eliteserien": {
         2020: 240,
         2021: 240,
@@ -129,6 +194,14 @@ EXPECTED_SEASON_MATCH_COUNTS: dict[str, dict[int, int]] = {
         2024: 279,
         2025: 281,
         2026: 281,
+    },
+    # Only matches actually played are counted. Romania-Norway and
+    # Switzerland-Ukraine in the 2020 edition were administrative 3-0 awards
+    # and are intentionally absent from the workbook/training cohort.
+    "uefa_nations_league": {
+        2020: 168,
+        2022: 162,
+        2024: 188,
     },
     # MLS includes every Titan-listed tournament/postseason phase, not only the
     # regular-season table.  This keeps the workbook promise of all matches;
@@ -159,6 +232,20 @@ LEAGUE_SPECS = {
         "league_key": "brazil_serie_a",
         "filename": "brazil-serie-a",
         "calendar_policy": "brazil_2020_delayed",
+    },
+    "巴西杯": {
+        "league_key": "brazil_cup",
+        "filename": "brazil-cup",
+        # The 2020 edition was delayed by the COVID-19 schedule disruption and
+        # finished in March 2021. Keep this as a competition-specific frozen
+        # exception instead of weakening the calendar-year policy globally.
+        "calendar_policy": "brazil_cup_2020_delayed",
+        "aliases": (
+            "brazil_cup",
+            "巴西杯",
+            "Copa do Brasil",
+            "Brazil Cup",
+        ),
     },
     "挪超": {
         "league_key": "norway_eliteserien",
@@ -226,6 +313,18 @@ LEAGUE_SPECS = {
         "league_key": "uefa_champions_league",
         "filename": "uefa-champions-league",
         "calendar_policy": "autumn_to_spring",
+    },
+    "欧国联": {
+        "league_key": "uefa_nations_league",
+        "filename": "uefa-nations-league",
+        "calendar_policy": "nations_league_cycle",
+        "aliases": (
+            "uefa_nations_league",
+            "欧国联",
+            "UEFA Nations League",
+            "Nations League",
+            "UNL",
+        ),
     },
     "亚冠": {
         "league_key": "afc_champions_league",
@@ -307,6 +406,7 @@ ROUND_RE = re.compile(r"^第(?P<round>\d+)轮$")
 CELL_REF_RE = re.compile(r"^(?P<column>[A-Z]+)(?P<row>\d+)$")
 
 SCORE_FIELDS = (
+    "match_id",
     "date",
     "home_team",
     "away_team",
@@ -331,6 +431,7 @@ SCORE_FIELDS = (
     "kickoff_utc",
 )
 MARKET_FIELDS = (
+    "match_id",
     "league_key",
     "league",
     "season",
@@ -756,14 +857,66 @@ def _calendar_rollover_allowed(
         return previous_month >= 10 and month <= 3
     if policy == "brazil_2020_delayed":
         return season == 2020 and previous_month == 12 and month == 1
+    if policy == "brazil_cup_2020_delayed":
+        # The 2020 Copa do Brasil moved directly from the December semi-finals
+        # to the March 2021 final. No other edition may cross a calendar year.
+        return season == 2020 and previous_month == 12 and month == 3
     if policy == "afc_transition":
         return (previous_month >= 10 and month <= 3) or (
             season == 2022 and previous_month == 8 and month == 2
         )
+    if policy == "nations_league_cycle":
+        # The source workbook stores the edition start year plus MM-DD HH:MM.
+        # Rows are chronological, so the single month decrease marks the
+        # edition's move into its second calendar year (for example 2020 ->
+        # 2021 finals or 2022 -> 2023 finals).
+        return month < previous_month
     raise HistoryImportError(f"unsupported calendar policy: {policy}")
 
 
-def _competition_regime(league_key: str, season: int, source_date: date) -> str:
+def _maximum_calendar_rollovers(policy: str, season: int) -> int:
+    """Return the predeclared number of calendar boundaries in one season.
+
+    Completed Nations League editions in the frozen source scope each have a
+    third-calendar-year play-out boundary. The delayed 2020 Copa do Brasil has
+    one frozen December-to-March boundary. Other supported cross-year seasons
+    span at most two calendar years.
+    """
+
+    if policy == "calendar_year":
+        return 0
+    if policy == "brazil_cup_2020_delayed":
+        return 1 if season == 2020 else 0
+    if policy == "nations_league_cycle":
+        return 2 if season in NATIONS_LEAGUE_EDITION_END_YEARS else 1
+    return 1
+
+
+def _normalized_round_label(raw_round: Any) -> str:
+    """Normalize a source round label without discarding stage semantics."""
+
+    return " ".join(unicodedata.normalize("NFKC", _text(raw_round)).casefold().split())
+
+
+def _is_norway_relegation_playoff_round(raw_round: Any) -> bool:
+    """Identify Eliteserien relegation play-offs from stable schedule text."""
+
+    normalized = _normalized_round_label(raw_round)
+    compact = normalized.replace(" ", "").replace("-", "")
+    return (
+        compact.startswith("保级附加赛")
+        or compact.startswith("降级附加赛")
+        or normalized.startswith("relegation playoff")
+        or normalized.startswith("relegation play-off")
+    )
+
+
+def _competition_regime(
+    league_key: str,
+    season: int,
+    source_date: date,
+    raw_round: Any = None,
+) -> str:
     """Return the explicitly versioned competition format for one fixture."""
 
     if (
@@ -774,6 +927,14 @@ def _competition_regime(league_key: str, season: int, source_date: date) -> str:
         <= JAPAN_J1_VISION_SOURCE_DATE_END
     ):
         return JAPAN_J1_VISION_REGIME
+    if league_key == "brazil_cup":
+        return "national_knockout_cup"
+    if league_key == "uefa_nations_league":
+        return "national_team_league_and_knockout"
+    if league_key == "norway_eliteserien" and _is_norway_relegation_playoff_round(
+        raw_round
+    ):
+        return NORWAY_RELEGATION_PLAYOFF_REGIME
     return REGULAR_COMPETITION_REGIME
 
 
@@ -800,6 +961,15 @@ def _format_version(league_key: str, season: int) -> str:
         if season == 2023:
             return "afc_40_team_cross_year"
         return "afc_elite_24_team_league_phase"
+    if league_key == "brazil_cup":
+        if season == 2020:
+            return "copa_do_brasil_2020"
+        if season <= 2025:
+            return "copa_do_brasil_2021_2025"
+        return "copa_do_brasil_2026_expanded"
+    if league_key == "uefa_nations_league":
+        end_year = NATIONS_LEAGUE_EDITION_END_YEARS.get(season, season + 1)
+        return f"uefa_nations_league_{season}_{end_year}_edition"
     if league_key == "japan_j1" and season == 2026:
         return "j1_2026_vision_regional"
     return "standard_league_format"
@@ -809,6 +979,10 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
     """Map source round labels to a stable, audit-only phase family."""
 
     value = _text(raw_round)
+    if league_key == "norway_eliteserien":
+        if _is_norway_relegation_playoff_round(raw_round):
+            return "relegation_playoff"
+        return "regular_season"
     if league_key == "korea_k_league_1":
         if value.startswith("争冠组"):
             return "championship_split"
@@ -847,6 +1021,14 @@ def _phase_group(league_key: str, raw_round: Any) -> str:
             return "qualifying"
         if "分组" in value:
             return "group_or_league_stage"
+        return "knockout"
+    if league_key == "brazil_cup":
+        return "knockout"
+    if league_key == "uefa_nations_league":
+        if "联赛" in value and "附加" not in value:
+            return "league_phase"
+        if "降级附加" in value:
+            return "relegation_playoff"
         return "knockout"
     return "regular_season"
 
@@ -945,6 +1127,7 @@ def import_workbook(
     season_state: dict[int, dict[str, Any]] = {}
     rollover_events: list[dict[str, Any]] = []
     fixture_keys: dict[tuple[str, str, str], int] = {}
+    match_ids: dict[str, int] = {}
     bookmaker_completeness = {
         book_key: {"opening_1x2": 0, "opening_asian": 0, "opening_total": 0}
         for book_key, _book_label in BOOKMAKERS
@@ -980,12 +1163,47 @@ def import_workbook(
                 f"row {row_number}: only finished rows (状态=完) may be imported"
             )
 
+        raw_match_id = (
+            row[len(EXPECTED_HEADERS)] if len(row) > len(EXPECTED_HEADERS) else None
+        )
+        match_id_text = _text(raw_match_id)
+        if spec["league_key"] in MATCH_ID_REQUIRED_LEAGUES and not match_id_text:
+            raise HistoryImportError(
+                f"row {row_number}: Titan比赛ID is required for "
+                f"{spec['league_key']} administrative-result exclusion"
+            )
+        if match_id_text:
+            match_id = str(_integer(raw_match_id, "Titan比赛ID", row_number, minimum=1))
+            if match_id in match_ids:
+                raise HistoryImportError(
+                    f"row {row_number}: duplicate Titan比赛ID also present at row "
+                    f"{match_ids[match_id]}"
+                )
+            match_ids[match_id] = row_number
+            exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(
+                spec["league_key"], {}
+            ).get(match_id)
+            if exclusion is not None:
+                raise HistoryImportError(
+                    f"row {row_number}: Titan match {match_id} is an administrative "
+                    f"result and cannot enter training ({exclusion['reason']}; "
+                    f"{exclusion['source']})"
+                )
+        else:
+            match_id = ""
+
         kickoff_match = KICKOFF_RE.fullmatch(_text(row[4]))
         if not kickoff_match:
             raise HistoryImportError(f"row {row_number}: invalid 比赛时间")
         month = int(kickoff_match.group("month"))
         state = season_state.setdefault(
-            season, {"calendar_year": season, "previous_month": None, "previous": None}
+            season,
+            {
+                "calendar_year": season,
+                "rollover_count": 0,
+                "previous_month": None,
+                "previous": None,
+            },
         )
         previous_month = state["previous_month"]
         # Calendar-year leagues must never turn an out-of-order row into a new
@@ -994,17 +1212,23 @@ def import_workbook(
         if previous_month is not None and _calendar_rollover_allowed(
             spec["calendar_policy"], season, previous_month, month
         ):
-            if state["calendar_year"] != season:
+            maximum_rollovers = _maximum_calendar_rollovers(
+                spec["calendar_policy"], season
+            )
+            if state["rollover_count"] >= maximum_rollovers:
                 raise HistoryImportError(
-                    f"row {row_number}: more than one calendar rollover in season {season}"
+                    f"row {row_number}: more than {maximum_rollovers} calendar "
+                    f"rollover(s) in season {season}"
                 )
+            from_calendar_year = state["calendar_year"]
             state["calendar_year"] += 1
+            state["rollover_count"] += 1
             rollover_events.append(
                 {
                     "season": season,
                     "source_row": row_number,
-                    "from_calendar_year": season,
-                    "to_calendar_year": season + 1,
+                    "from_calendar_year": from_calendar_year,
+                    "to_calendar_year": state["calendar_year"],
                     "trigger": f"{previous_month:02d}->{month:02d}",
                 }
             )
@@ -1064,11 +1288,12 @@ def import_workbook(
         fixture_keys[fixture_key] = row_number
         round_value = _round_number(row[3])
         competition_regime = _competition_regime(
-            spec["league_key"], season, kickoff.date()
+            spec["league_key"], season, kickoff.date(), row[3]
         )
         format_version = _format_version(spec["league_key"], season)
         phase_group = _phase_group(spec["league_key"], row[3])
         common = {
+            "match_id": match_id,
             "league_key": spec["league_key"],
             "league": sheet_name,
             "season": season,
@@ -1086,6 +1311,7 @@ def import_workbook(
         }
         score_rows.append(
             {
+                "match_id": match_id,
                 "date": kickoff_utc.date().isoformat(),
                 "home_team": home_team,
                 "away_team": away_team,
@@ -1413,6 +1639,13 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
     audit_date = _parse_as_of_date(manifest.get("as_of_date"), "manifest.as_of_date")
     if manifest.get("season_completeness_policy") != SEASON_COMPLETENESS_POLICY:
         raise HistoryImportError("manifest season_completeness_policy is invalid")
+    if (
+        manifest.get("administrative_result_exclusion_policy")
+        != _administrative_result_exclusion_policy()
+    ):
+        raise HistoryImportError(
+            "manifest administrative_result_exclusion_policy is invalid"
+        )
     source_timezone = _text(manifest.get("source_timezone"))
     if not source_timezone:
         raise HistoryImportError("manifest source_timezone is required")
@@ -1508,8 +1741,10 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
         status_counts: Counter[tuple[int, str]] = Counter()
         fixture_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
         dated_fixtures: set[tuple[str, str, str]] = set()
+        score_match_ids: set[str] = set()
         score_dates: list[str] = []
         identity_fields = (
+            "match_id",
             "league_key",
             "league",
             "season",
@@ -1536,6 +1771,29 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 )
             if row.get("league") != expected_league:
                 raise HistoryImportError(f"{row_label} league does not match manifest")
+            match_id = _text(row.get("match_id"))
+            if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
+                raise HistoryImportError(
+                    f"{row_label} match_id is required for administrative-result "
+                    "exclusion"
+                )
+            if match_id:
+                parsed_match_id = _bundle_integer(
+                    match_id, f"{row_label} match_id", minimum=1
+                )
+                if str(parsed_match_id) != match_id:
+                    raise HistoryImportError(f"{row_label} match_id is not canonical")
+                if match_id in score_match_ids:
+                    raise HistoryImportError(f"{row_label} duplicate match_id")
+                score_match_ids.add(match_id)
+                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                    match_id
+                )
+                if exclusion is not None:
+                    raise HistoryImportError(
+                        f"{row_label} administrative result {match_id} cannot enter "
+                        f"training ({exclusion['reason']})"
+                    )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
             if not home_team or not away_team or home_team == away_team:
@@ -1607,7 +1865,9 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 )
 
             source_date = source_kickoff.date()
-            expected_regime = _competition_regime(league_key, season, source_date)
+            expected_regime = _competition_regime(
+                league_key, season, source_date, row.get("round")
+            )
             expected_format = _format_version(league_key, season)
             expected_phase = _phase_group(league_key, row.get("round"))
             expected_status = expected_completeness[str(season)]["status"]
@@ -1628,6 +1888,7 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 raise HistoryImportError(f"{row_label} duplicate fixture")
             dated_fixtures.add(dated_key)
             identity = {
+                "match_id": match_id,
                 "league_key": league_key,
                 "league": expected_league,
                 "season": season,
@@ -1717,6 +1978,26 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                 raise HistoryImportError(
                     f"{row_label} league identity does not match manifest"
                 )
+            match_id = _text(row.get("match_id"))
+            if league_key in MATCH_ID_REQUIRED_LEAGUES and not match_id:
+                raise HistoryImportError(
+                    f"{row_label} match_id is required for administrative-result "
+                    "exclusion"
+                )
+            if match_id:
+                parsed_match_id = _bundle_integer(
+                    match_id, f"{row_label} match_id", minimum=1
+                )
+                if str(parsed_match_id) != match_id:
+                    raise HistoryImportError(f"{row_label} match_id is not canonical")
+                exclusion = ADMINISTRATIVE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+                    match_id
+                )
+                if exclusion is not None:
+                    raise HistoryImportError(
+                        f"{row_label} administrative result {match_id} cannot enter "
+                        f"training ({exclusion['reason']})"
+                    )
             home_team = _text(row.get("home_team"))
             away_team = _text(row.get("away_team"))
             if not home_team or not away_team or home_team == away_team:
@@ -1754,12 +2035,13 @@ def validate_bundle(output_dir: str | Path) -> dict[str, Any]:
                     f"{row_label} fixture identity has no matching score row"
                 )
             expected_regime = _competition_regime(
-                league_key, season, source_kickoff.date()
+                league_key, season, source_kickoff.date(), row.get("round")
             )
             expected_format = _format_version(league_key, season)
             expected_phase = _phase_group(league_key, row.get("round"))
             expected_status = expected_completeness.get(str(season), {}).get("status")
             market_identity = {
+                "match_id": match_id,
                 "league_key": league_key,
                 "league": expected_league,
                 "season": season,
@@ -1983,11 +2265,15 @@ def import_bundle(
         "importer_version": IMPORTER_VERSION,
         "as_of_date": audit_date.isoformat(),
         "season_completeness_policy": dict(SEASON_COMPLETENESS_POLICY),
+        "administrative_result_exclusion_policy": (
+            _administrative_result_exclusion_policy()
+        ),
         "source_timezone": source_timezone,
         "kickoff_year_policy": (
-            "explicit per-competition calendar policy; cross-year rollover is "
-            "allowed once only for autumn-to-spring competitions and the documented "
-            "Brazil 2020/AFC 2022 exceptions"
+            "explicit per-competition calendar policy; ordinary cross-year seasons "
+            "allow one rollover; the frozen 2020, 2022 and 2024 Nations League "
+            "editions allow two, and the delayed 2020 Copa do Brasil allows only "
+            "its observed December-to-March boundary"
         ),
         "training_feature_whitelist": ["date", "home_team", "away_team"],
         "outcome_label_fields": [
@@ -2017,6 +2303,7 @@ def import_bundle(
             "Source kickoff timezone is supplied explicitly by the importer operator.",
             "Rows labelled partial_as_of_* are right-censored snapshots and cannot support model promotion.",
             "Competition format_version and phase_group labels must be evaluated as separate cohorts when material.",
+            "UEFA administrative 3-0 awards are excluded by immutable Titan match ID, not inferred from the displayed score.",
         ],
         "leagues": sorted(league_summaries, key=lambda item: item["league_key"]),
     }

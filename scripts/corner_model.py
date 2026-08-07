@@ -31,7 +31,8 @@ BACKTEST_ARTIFACT_TYPE = "soccer_corner_backtest"
 MODEL_SCHEMA_VERSION = "2.1.0"
 PREDICTION_SCHEMA_VERSION = "2.1.0"
 BACKTEST_SCHEMA_VERSION = "2.1.0"
-MODEL_VERSION = "corner-nb2-independent-time-decay/2.1.0"
+MODEL_VERSION = "corner-nb2-independent-time-decay/2.1.1"
+OPTIMIZER = "deterministic_projected_adam_with_dispersion_grid"
 DEPENDENCE_MODEL = "independent_nb"
 FIXTURE_GRAPH_POLICY_VERSION = "undirected-team-fixture-components/1.0.0"
 CROSS_COMPONENT_PREDICTION_POLICY = "fail_closed"
@@ -39,6 +40,7 @@ COMPONENT_IDENTIFICATION_METHOD = (
     "shared_league_intercepts_global_zero_centering_positive_l2_regularization"
 )
 MIN_COMPONENT_REGULARIZATION = 1e-8
+DEFAULT_HARD_MAX_CORNERS = 200
 TRAINING_COLUMNS = (
     "date",
     "kickoff_utc",
@@ -780,7 +782,7 @@ def nb2_distribution(
     dispersion: float,
     *,
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
 ) -> dict[str, Any]:
     """Build an adaptive NB2 marginal and retain its unnormalized tail audit."""
 
@@ -894,6 +896,64 @@ def _mean_objective(
         / max(1, len(effects))
     )
     return loss + penalty
+
+
+def _project_zero_sum_bounded_effects(
+    values: Mapping[str, float], *, bound: float = 3.0
+) -> dict[str, float]:
+    """Project one effect vector onto the zero-sum bounded parameter space.
+
+    Adam first clamps individual effects and the identifiability transform then
+    zero-centres them. A value sitting on a clamp can therefore move just beyond
+    it when the vector mean is removed. This active-set projection solves the
+    joint constraints together: every effect remains in ``[-bound, bound]`` and
+    the vector sum remains zero.
+    """
+
+    if not values:
+        raise CornerModelError("cannot project an empty effect vector")
+    raw = {name: float(value) for name, value in values.items()}
+    free = list(raw)
+    fixed: dict[str, float] = {}
+    projected: dict[str, float] = {}
+    tolerance = 1e-12
+
+    for _ in range(len(raw) + 1):
+        if not free:
+            if abs(math.fsum(fixed.values())) <= tolerance:
+                projected = dict(fixed)
+            break
+        offset = (
+            math.fsum(raw[name] for name in free) + math.fsum(fixed.values())
+        ) / len(free)
+        lower = [name for name in free if raw[name] - offset < -bound]
+        upper = [name for name in free if raw[name] - offset > bound]
+        if not lower and not upper:
+            projected = dict(fixed)
+            projected.update({name: raw[name] - offset for name in free})
+            residual = math.fsum(projected.values())
+            if abs(residual) > tolerance:
+                for name in free:
+                    corrected = projected[name] - residual
+                    if -bound <= corrected <= bound:
+                        projected[name] = corrected
+                        break
+            break
+        lower_names = set(lower)
+        upper_names = set(upper)
+        fixed.update({name: -bound for name in lower})
+        fixed.update({name: bound for name in upper})
+        free = [
+            name for name in free if name not in lower_names and name not in upper_names
+        ]
+
+    if set(projected) != set(raw):
+        raise CornerModelError("effect projection did not converge")
+    if any(abs(value) > bound + tolerance for value in projected.values()):
+        raise CornerModelError("effect projection exceeded fitted bounds")
+    if abs(math.fsum(projected.values())) > tolerance:
+        raise CornerModelError("effect projection did not preserve zero centring")
+    return projected
 
 
 def _fit_mean_parameters(
@@ -1010,9 +1070,15 @@ def _fit_mean_parameters(
         for team in teams:
             result["attack"][team] -= attack_mean
             result["concession"][team] -= concession_mean
+        result["attack"] = _project_zero_sum_bounded_effects(result["attack"])
+        result["concession"] = _project_zero_sum_bounded_effects(result["concession"])
         adjustment = attack_mean + concession_mean
-        result["home_intercept"] += adjustment
-        result["away_intercept"] += adjustment
+        result["home_intercept"] = max(
+            -2.5, min(4.5, result["home_intercept"] + adjustment)
+        )
+        result["away_intercept"] = max(
+            -2.5, min(4.5, result["away_intercept"] + adjustment)
+        )
     return result
 
 
@@ -1226,7 +1292,7 @@ def _fit_records(
         "parameters": parameters,
         "fit": {
             "objective": "time_weighted_independent_nb2_negative_log_likelihood",
-            "optimizer": "deterministic_adam_with_dispersion_grid",
+            "optimizer": OPTIMIZER,
             "penalized_mean_nll": objective,
             "effective_weight": math.fsum(weights),
             "historical_simulation": bool(historical_simulation),
@@ -1480,6 +1546,8 @@ def validate_model(model: Mapping[str, Any]) -> None:
         raise CornerModelError("model fit metadata is missing")
     if fit.get("objective") != "time_weighted_independent_nb2_negative_log_likelihood":
         raise CornerModelError("fit objective is unsupported")
+    if fit.get("optimizer") != OPTIMIZER:
+        raise CornerModelError("fit optimizer is unsupported")
     _require_finite(fit.get("penalized_mean_nll"), "fit.penalized_mean_nll")
     _require_positive(fit.get("effective_weight"), "fit.effective_weight")
     if not isinstance(fit.get("historical_simulation"), bool):
@@ -1705,7 +1773,7 @@ def predict_model(
     generated_at: str | datetime | None = None,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
     total_markets: Iterable[tuple[str, float]] = (),
     corner_handicaps: Iterable[tuple[str, float]] = (),
 ) -> dict[str, Any]:
@@ -2374,13 +2442,12 @@ def _date_groups(records: Sequence[Mapping[str, Any]]) -> list[list[dict[str, An
 
 
 def _count_crps(probabilities: Sequence[float], actual: int, minimum: int = 0) -> float:
-    if actual < minimum:
-        raise CornerModelError("actual count is below distribution support")
     maximum = minimum + len(probabilities) - 1
+    lower = min(minimum, actual)
     upper = max(maximum, actual)
     cumulative = 0.0
     score = 0.0
-    for value in range(minimum, upper + 1):
+    for value in range(lower, upper + 1):
         if minimum <= value <= maximum:
             cumulative += probabilities[value - minimum]
         observed = 1.0 if value >= actual else 0.0
@@ -2599,7 +2666,7 @@ def backtest_model(
     regularization: float = 0.02,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = DEFAULT_HARD_MAX_CORNERS,
     source_lineage: Mapping[str, Any] | None = None,
     allow_research_cohorts: bool = False,
 ) -> dict[str, Any]:
@@ -3194,7 +3261,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--unknown-team-policy", choices=("error", "league_average"), default="error"
     )
     predict.add_argument("--tail-tolerance", type=float, default=1e-8)
-    predict.add_argument("--hard-max-corners", type=int, default=80)
+    predict.add_argument(
+        "--hard-max-corners", type=int, default=DEFAULT_HARD_MAX_CORNERS
+    )
     predict.add_argument("--total", action="append", default=[])
     predict.add_argument("--handicap", action="append", default=[])
 
@@ -3213,7 +3282,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--unknown-team-policy", choices=("error", "league_average"), default="error"
     )
     backtest.add_argument("--tail-tolerance", type=float, default=1e-8)
-    backtest.add_argument("--hard-max-corners", type=int, default=80)
+    backtest.add_argument(
+        "--hard-max-corners", type=int, default=DEFAULT_HARD_MAX_CORNERS
+    )
     return parser
 
 

@@ -41,7 +41,7 @@ except ImportError:  # Works when invoked directly as scripts/league_model_manag
 
 
 REGISTRY_ARTIFACT_TYPE = "soccer_league_model_registry"
-REGISTRY_SCHEMA_VERSION = "1.4.0"
+REGISTRY_SCHEMA_VERSION = "1.5.0"
 PREDICTION_BUNDLE_ARTIFACT_TYPE = "soccer_league_prediction_bundle"
 PREDICTION_BUNDLE_SCHEMA_VERSION = "1.2.0"
 REGISTRY_INSPECTION_ARTIFACT_TYPE = "soccer_league_model_registry_inspection"
@@ -51,6 +51,7 @@ HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 LEAGUE_NAMES = {
     "brazil_serie_a": "巴甲",
+    "brazil_cup": "巴西杯",
     "norway_eliteserien": "挪超",
     "japan_j1": "日职",
     "usa_mls": "美职联",
@@ -63,6 +64,7 @@ LEAGUE_NAMES = {
     "sweden_allsvenskan": "瑞典超",
     "finland_veikkausliiga": "芬超",
     "uefa_champions_league": "欧冠",
+    "uefa_nations_league": "欧国联",
     "afc_champions_league": "亚冠",
 }
 
@@ -150,9 +152,86 @@ VALIDATED_TRAINING_CONFIG = {
     "ipf_max_iterations": 1000,
     "association_smoothing_alpha": 0.5,
     "association_power": 1.0,
+    # Freeze HT/FT association recency to the same horizon as the full-time
+    # marginal.  This prevents old seasons from retaining lifetime-equal
+    # influence after the score marginals have already decayed.
+    "association_half_life_days": 365.0,
 }
-TRAINING_REGIME_POLICY_VERSION = "regular-only-production-v1"
+TRAINING_REGIME_POLICY_VERSION = "competition-specific-production-v2"
 PRODUCTION_TRAINING_REGIMES = ("regular",)
+PRODUCTION_TRAINING_REGIMES_BY_LEAGUE = {
+    "brazil_cup": ("national_knockout_cup",),
+    "uefa_nations_league": ("national_team_league_and_knockout",),
+}
+
+
+def _production_training_regimes(league_key: str) -> tuple[str, ...]:
+    """Return the frozen, competition-specific regime allowlist."""
+
+    return PRODUCTION_TRAINING_REGIMES_BY_LEAGUE.get(
+        league_key, PRODUCTION_TRAINING_REGIMES
+    )
+
+
+def _expected_evaluator_regime_policy() -> dict[str, Any]:
+    """Build the evaluator contract from the manager's active fit policy."""
+
+    return {
+        "version": TRAINING_REGIME_POLICY_VERSION,
+        "source_column": "competition_regime",
+        "default_allowed_regimes": list(PRODUCTION_TRAINING_REGIMES),
+        "allowed_regimes_by_league": {
+            key: list(values)
+            for key, values in sorted(PRODUCTION_TRAINING_REGIMES_BY_LEAGUE.items())
+        },
+        "excluded_regimes_usage": "counted_for_drift_audit_only_not_fit_or_scored",
+        "special_regimes_are_not_merged_into_regular_strengths": True,
+    }
+
+
+def _assert_evaluator_regime_policy_matches_manager() -> None:
+    if (
+        htft_holdout_evaluator.COMPETITION_REGIME_POLICY
+        != _expected_evaluator_regime_policy()
+    ):
+        raise LeagueModelManagerError(
+            "HT/FT evaluator competition regime policy does not match the "
+            "registered manager"
+        )
+
+
+EVALUATOR_SHARED_FIT_CONFIG_KEYS = (
+    "half_time_half_life_days",
+    "second_half_half_life_days",
+    "full_time_half_life_days",
+    "iterations",
+    "learning_rate",
+    "regularization",
+    "rho_min",
+    "rho_max",
+    "rho_step",
+    "association_smoothing_alpha",
+    "association_power",
+    "association_half_life_days",
+)
+
+
+def _assert_evaluator_fit_policy_matches_manager() -> None:
+    """Reject evaluator/registry drift in every shared fitted parameter."""
+
+    expected = {
+        key: VALIDATED_TRAINING_CONFIG[key] for key in EVALUATOR_SHARED_FIT_CONFIG_KEYS
+    }
+    observed = {
+        key: htft_holdout_evaluator.PROMOTED_FIT_CONFIG.get(key)
+        for key in EVALUATOR_SHARED_FIT_CONFIG_KEYS
+    }
+    if observed != expected or (
+        expected["association_half_life_days"] != expected["full_time_half_life_days"]
+    ):
+        raise LeagueModelManagerError(
+            "HT/FT evaluator fit policy does not match the registered manager"
+        )
 
 
 class LeagueModelManagerError(ValueError):
@@ -727,6 +806,8 @@ def _validate_source_bound_evaluation(
     dataset_manifest_hash: str,
     league_keys: set[str],
 ) -> tuple[str, dict[str, dict[str, Any]]]:
+    _assert_evaluator_regime_policy_matches_manager()
+    _assert_evaluator_fit_policy_matches_manager()
     try:
         htft_holdout_evaluator.validate_evaluation(
             evaluation,
@@ -878,10 +959,19 @@ def _validate_promoted_model_config(
             "model actual training config is not the approved promoted configuration"
         )
     association = model.get("empirical_association")
+    time_decay = (
+        association.get("time_decay") if isinstance(association, Mapping) else None
+    )
     if not isinstance(association, Mapping) or (
         association.get("smoothing_alpha")
         != promoted_config["association_smoothing_alpha"]
         or association.get("power") != promoted_config["association_power"]
+        or not isinstance(time_decay, Mapping)
+        or time_decay.get("mode") != "exponential_half_life"
+        or time_decay.get("half_life_days")
+        != promoted_config["association_half_life_days"]
+        or promoted_config["association_half_life_days"]
+        != promoted_config["full_time_half_life_days"]
     ):
         raise LeagueModelManagerError(
             "model empirical association config is not the approved promoted configuration"
@@ -904,7 +994,7 @@ def _validate_promoted_model_config(
 def _prepare_production_training_csv(
     dataset: Mapping[str, Any], staging_directory: Path
 ) -> tuple[Path, dict[str, Any]]:
-    """Create a deterministic regular-regime-only training view."""
+    """Create a deterministic competition-regime training view."""
 
     source_path = Path(dataset["score_path"])
     try:
@@ -929,6 +1019,7 @@ def _prepare_production_training_csv(
 
     source_counts: dict[str, int] = {}
     included_rows: list[dict[str, str]] = []
+    allowed_regimes = _production_training_regimes(str(dataset["league_key"]))
     for row_number, row in enumerate(rows, start=2):
         regime = (row.get("competition_regime") or "").strip()
         if not regime:
@@ -936,11 +1027,11 @@ def _prepare_production_training_csv(
                 f"{dataset['league_key']} row {row_number}: competition_regime is required"
             )
         source_counts[regime] = source_counts.get(regime, 0) + 1
-        if regime in PRODUCTION_TRAINING_REGIMES:
+        if regime in allowed_regimes:
             included_rows.append(row)
     if len(included_rows) < 1:
         raise LeagueModelManagerError(
-            f"{dataset['league_key']} has no production-eligible regular-regime rows"
+            f"{dataset['league_key']} has no production-eligible competition-regime rows"
         )
 
     training_path = staging_directory / f"{dataset['league_key']}-regular-training.csv"
@@ -952,17 +1043,17 @@ def _prepare_production_training_csv(
     included_counts = {
         regime: count
         for regime, count in sorted(source_counts.items())
-        if regime in PRODUCTION_TRAINING_REGIMES
+        if regime in allowed_regimes
     }
     excluded_counts = {
         regime: count
         for regime, count in sorted(source_counts.items())
-        if regime not in PRODUCTION_TRAINING_REGIMES
+        if regime not in allowed_regimes
     }
     policy = {
         "version": TRAINING_REGIME_POLICY_VERSION,
         "source_column": "competition_regime",
-        "allowed_regimes": list(PRODUCTION_TRAINING_REGIMES),
+        "allowed_regimes": list(allowed_regimes),
         "source_regime_counts": dict(sorted(source_counts.items())),
         "included_regime_counts": included_counts,
         "excluded_regime_counts": excluded_counts,
@@ -1097,6 +1188,9 @@ def train_models(
                         "association_smoothing_alpha"
                     ],
                     association_power=VALIDATED_TRAINING_CONFIG["association_power"],
+                    association_half_life_days=VALIDATED_TRAINING_CONFIG[
+                        "association_half_life_days"
+                    ],
                     competition_key=dataset["league_key"],
                     dataset_manifest_hash=bundle_hash,
                 )
@@ -1184,6 +1278,8 @@ def train_models(
 def validate_registry(registry: Mapping[str, Any]) -> None:
     if not isinstance(registry, Mapping):
         raise LeagueModelManagerError("registry must be a JSON object")
+    _assert_evaluator_regime_policy_matches_manager()
+    _assert_evaluator_fit_policy_matches_manager()
     if registry.get("artifact_type") != REGISTRY_ARTIFACT_TYPE:
         raise LeagueModelManagerError("unexpected registry artifact_type")
     if registry.get("schema_version") != REGISTRY_SCHEMA_VERSION:
@@ -1278,10 +1374,11 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
             raise LeagueModelManagerError(
                 f"{name}.competition_regime_policy is missing"
             )
+        allowed_regimes = _production_training_regimes(league_key)
         if (
             regime_policy.get("version") != TRAINING_REGIME_POLICY_VERSION
             or regime_policy.get("source_column") != "competition_regime"
-            or regime_policy.get("allowed_regimes") != list(PRODUCTION_TRAINING_REGIMES)
+            or regime_policy.get("allowed_regimes") != list(allowed_regimes)
             or regime_policy.get(
                 "special_regimes_are_not_merged_into_regular_strengths"
             )
@@ -1309,9 +1406,9 @@ def validate_registry(registry: Mapping[str, Any]) -> None:
         source_counts = regime_policy["source_regime_counts"]
         included_counts = regime_policy["included_regime_counts"]
         excluded_counts = regime_policy["excluded_regime_counts"]
-        if set(included_counts) - set(PRODUCTION_TRAINING_REGIMES):
+        if set(included_counts) - set(allowed_regimes):
             raise LeagueModelManagerError(f"{name} includes an unapproved regime")
-        if set(excluded_counts).intersection(PRODUCTION_TRAINING_REGIMES):
+        if set(excluded_counts).intersection(allowed_regimes):
             raise LeagueModelManagerError(f"{name} excludes an approved regime")
         if dict(source_counts) != {**dict(included_counts), **dict(excluded_counts)}:
             raise LeagueModelManagerError(f"{name} regime count partitions changed")

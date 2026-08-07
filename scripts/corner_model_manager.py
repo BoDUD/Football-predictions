@@ -38,7 +38,7 @@ except ImportError:  # Invoked directly as scripts/corner_model_manager.py.
 REGISTRY_ARTIFACT_TYPE = "soccer_corner_model_registry"
 REGISTRY_SCHEMA_VERSION = "2.1.0"
 REGISTRY_FILENAME = "corner-registry.json"
-MANAGER_VERSION = "corner-model-manager/2.1.0"
+MANAGER_VERSION = "corner-model-manager/2.1.1"
 DEPLOYMENT_POLICY_VERSION = "corner-historical-deployment-gate/2.1.0"
 
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -2132,7 +2132,7 @@ def train_registered_model(
     test_block_size: int = 50,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = corner_model.DEFAULT_HARD_MAX_CORNERS,
     manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Fit, evaluate, and atomically add or replace one registered league."""
@@ -2562,7 +2562,7 @@ def predict_registered_model(
     generated_at: str | datetime | None = None,
     unknown_team_policy: str = "error",
     tail_tolerance: float = 1e-8,
-    hard_max_corners: int = 80,
+    hard_max_corners: int = corner_model.DEFAULT_HARD_MAX_CORNERS,
     total_markets: Iterable[tuple[str, float]] = (),
     corner_handicaps: Iterable[tuple[str, float]] = (),
 ) -> dict[str, Any]:
@@ -2677,7 +2677,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="error",
     )
     train.add_argument("--tail-tolerance", type=float, default=1e-8)
-    train.add_argument("--hard-max-corners", type=int, default=80)
+    train.add_argument(
+        "--hard-max-corners",
+        type=int,
+        default=corner_model.DEFAULT_HARD_MAX_CORNERS,
+    )
 
     inspect_command = subparsers.add_parser(
         "inspect", help="verify and display registered lineage and deployment"
@@ -2702,7 +2706,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="error",
     )
     predict.add_argument("--tail-tolerance", type=float, default=1e-8)
-    predict.add_argument("--hard-max-corners", type=int, default=80)
+    predict.add_argument(
+        "--hard-max-corners",
+        type=int,
+        default=corner_model.DEFAULT_HARD_MAX_CORNERS,
+    )
     predict.add_argument("--total", action="append", default=[])
     predict.add_argument("--handicap", action="append", default=[])
     return parser

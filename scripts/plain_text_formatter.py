@@ -56,6 +56,7 @@ CANONICAL_LEAGUE_DISPLAY_LABELS = {
     "uefa_champions_league": "欧冠",
     "afc_champions_league": "亚冠",
     "brazil_cup": "巴西杯",
+    "uefa_nations_league": "欧国联",
 }
 LEAGUE_DISPLAY_LABELS = dict(CANONICAL_LEAGUE_DISPLAY_LABELS)
 LEAGUE_DISPLAY_LABELS.update(

@@ -78,6 +78,7 @@ def _write_workbook(
     lower_header: list[object] | None = None,
     formula_ref: str | None = None,
     corner_extension: bool = False,
+    corner_match_ids: tuple[int, ...] | None = None,
     auxiliary_sheets: tuple[str, ...] = (),
     auxiliary_formula_ref: str | None = None,
 ) -> None:
@@ -91,6 +92,8 @@ def _write_workbook(
         lower = lower_header
     output_rows = [list(row) for row in data_rows]
     if corner_extension:
+        if corner_match_ids is not None and len(corner_match_ids) != len(output_rows):
+            raise ValueError("corner_match_ids must match the data row count")
         top.extend(
             [history_importer.CORNER_AUDIT_TOP_HEADER]
             + [None] * (len(history_importer.CORNER_AUDIT_HEADERS) - 1)
@@ -99,7 +102,11 @@ def _write_workbook(
         for index, row in enumerate(output_rows, start=1):
             row.extend(
                 [
-                    1000000 + index,
+                    (
+                        corner_match_ids[index - 1]
+                        if corner_match_ids is not None
+                        else 1000000 + index
+                    ),
                     6,
                     4,
                     10,
@@ -396,6 +403,7 @@ class HistoryImporterTests(unittest.TestCase):
 
     def test_expanded_competition_workbooks_have_stable_model_keys(self):
         expected = {
+            "巴西杯": ("brazil_cup", "brazil-cup"),
             "英超": ("england_premier_league", "england-premier-league"),
             "法甲": ("france_ligue_1", "france-ligue-1"),
             "西甲": ("spain_la_liga", "spain-la-liga"),
@@ -405,6 +413,7 @@ class HistoryImporterTests(unittest.TestCase):
             "瑞典超": ("sweden_allsvenskan", "sweden-allsvenskan"),
             "芬超": ("finland_veikkausliiga", "finland-veikkausliiga"),
             "欧冠": ("uefa_champions_league", "uefa-champions-league"),
+            "欧国联": ("uefa_nations_league", "uefa-nations-league"),
             "亚冠": ("afc_champions_league", "afc-champions-league"),
         }
 
@@ -413,10 +422,233 @@ class HistoryImporterTests(unittest.TestCase):
                 summary, score_rows, _market_rows = self._import(
                     [_data_row(1, "08-01 20:00", league=league)],
                     sheet_name=league,
+                    corner_extension=league == "欧国联",
                 )
                 self.assertEqual(summary["league_key"], league_key)
                 self.assertEqual(summary["output_stem"], output_stem)
                 self.assertEqual(score_rows[0]["league_key"], league_key)
+
+    def test_cup_and_nations_formats_phases_and_cross_year_cycle_are_audited(self):
+        brazil_summary, brazil_rows, _ = self._import(
+            [
+                _data_row(
+                    1,
+                    "02-20 20:30",
+                    season=2026,
+                    league="巴西杯",
+                    round_label="第一圈",
+                )
+            ],
+            sheet_name="巴西杯",
+        )
+        self.assertEqual(brazil_summary["league_key"], "brazil_cup")
+        self.assertEqual(brazil_rows[0]["competition_regime"], "national_knockout_cup")
+        self.assertEqual(
+            brazil_rows[0]["format_version"], "copa_do_brasil_2026_expanded"
+        )
+        self.assertEqual(brazil_rows[0]["phase_group"], "knockout")
+
+        nations_summary, nations_rows, _ = self._import(
+            [
+                _data_row(
+                    1,
+                    "09-03 20:45",
+                    season=2020,
+                    home="甲",
+                    away="乙",
+                    league="欧国联",
+                    round_label="A联赛 第1轮",
+                ),
+                _data_row(
+                    2,
+                    "11-18 20:45",
+                    season=2020,
+                    home="丙",
+                    away="丁",
+                    league="欧国联",
+                    round_label="B联赛 第6轮",
+                ),
+                _data_row(
+                    3,
+                    "10-06 20:45",
+                    season=2020,
+                    home="戊",
+                    away="己",
+                    league="欧国联",
+                    round_label="A联半决赛",
+                ),
+            ],
+            sheet_name="欧国联",
+            as_of_date="2021-12-31",
+            corner_extension=True,
+        )
+        self.assertEqual(nations_summary["league_key"], "uefa_nations_league")
+        self.assertEqual(
+            nations_summary["calendar_rollovers"][0]["to_calendar_year"], 2021
+        )
+        self.assertEqual(
+            {row["competition_regime"] for row in nations_rows},
+            {"national_team_league_and_knockout"},
+        )
+        self.assertEqual(
+            {row["format_version"] for row in nations_rows},
+            {"uefa_nations_league_2020_2022_edition"},
+        )
+        self.assertEqual(
+            [row["phase_group"] for row in nations_rows],
+            ["league_phase", "league_phase", "knockout"],
+        )
+
+    def test_norway_relegation_playoff_round_is_explicitly_non_regular(self):
+        norway_sheet = next(
+            name
+            for name, spec in history_importer.LEAGUE_SPECS.items()
+            if spec["league_key"] == "norway_eliteserien"
+        )
+        summary, score_rows, market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "11-30 17:00",
+                    season=2025,
+                    league=norway_sheet,
+                    home="Regular Home",
+                    away="Regular Away",
+                    round_label="30",
+                ),
+                _data_row(
+                    2,
+                    "12-07 17:00",
+                    season=2025,
+                    league=norway_sheet,
+                    home="Playoff Home",
+                    away="Playoff Away",
+                    round_label="保级附加赛 第1轮",
+                ),
+            ],
+            sheet_name=norway_sheet,
+            as_of_date="2025-12-31",
+        )
+
+        self.assertEqual(
+            [row["competition_regime"] for row in score_rows],
+            ["regular", "relegation_playoff"],
+        )
+        self.assertEqual(
+            [row["phase_group"] for row in score_rows],
+            ["regular_season", "relegation_playoff"],
+        )
+        self.assertEqual(
+            summary["competition_regimes"]["2025"],
+            {"regular": 1, "relegation_playoff": 1},
+        )
+        self.assertEqual(
+            summary["phase_groups"]["2025"],
+            {"regular_season": 1, "relegation_playoff": 1},
+        )
+        self.assertEqual(
+            {row["competition_regime"] for row in market_rows},
+            {"regular", "relegation_playoff"},
+        )
+
+    def test_nations_2020_cycle_can_cross_2021_into_2022_playouts(self):
+        summary, score_rows, _ = self._import(
+            [
+                _data_row(
+                    1,
+                    "11-18 20:45",
+                    season=2020,
+                    home="甲",
+                    away="乙",
+                    league="欧国联",
+                    round_label="A联赛 第6轮",
+                ),
+                _data_row(
+                    2,
+                    "10-10 20:45",
+                    season=2020,
+                    home="丙",
+                    away="丁",
+                    league="欧国联",
+                    round_label="A联决赛",
+                ),
+                _data_row(
+                    3,
+                    "03-25 20:45",
+                    season=2020,
+                    home="戊",
+                    away="己",
+                    league="欧国联",
+                    round_label="C联淘汰 首回合",
+                ),
+            ],
+            sheet_name="欧国联",
+            as_of_date="2022-12-31",
+            corner_extension=True,
+        )
+
+        self.assertEqual(
+            [row["source_kickoff"] for row in score_rows],
+            [
+                "2020-11-18T20:45+08:00",
+                "2021-10-10T20:45+08:00",
+                "2022-03-25T20:45+08:00",
+            ],
+        )
+        self.assertEqual(
+            summary["calendar_rollovers"],
+            [
+                {
+                    "season": 2020,
+                    "source_row": 4,
+                    "from_calendar_year": 2020,
+                    "to_calendar_year": 2021,
+                    "trigger": "11->10",
+                },
+                {
+                    "season": 2020,
+                    "source_row": 5,
+                    "from_calendar_year": 2021,
+                    "to_calendar_year": 2022,
+                    "trigger": "10->03",
+                },
+            ],
+        )
+
+    def test_nations_administrative_awards_are_rejected_by_titan_match_id(self):
+        for match_id in (1858422, 1858413):
+            with (
+                self.subTest(match_id=match_id),
+                self.assertRaisesRegex(
+                    history_importer.HistoryImportError,
+                    rf"administrative result.*{match_id}|match {match_id}.*administrative",
+                ),
+            ):
+                self._import(
+                    [
+                        _data_row(
+                            1,
+                            "11-18 20:45",
+                            season=2020,
+                            league="欧国联",
+                            full_score="3-0",
+                            round_label="A联赛 第6轮",
+                        )
+                    ],
+                    sheet_name="欧国联",
+                    corner_extension=True,
+                    corner_match_ids=(match_id,),
+                )
+
+    def test_nations_requires_source_bound_titan_match_id(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "Titan比赛ID is required",
+        ):
+            self._import(
+                [_data_row(1, "09-03 20:45", league="欧国联")],
+                sheet_name="欧国联",
+            )
 
     def test_finland_multistage_format_aliases_and_partial_status_are_audited(self):
         summary, score_rows, market_rows = self._import(
@@ -647,6 +879,162 @@ class HistoryImporterTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_brazil_cup_2020_december_to_march_rollover_is_explicit(self):
+        brazil_cup_sheet = next(
+            name
+            for name, spec in history_importer.LEAGUE_SPECS.items()
+            if spec["league_key"] == "brazil_cup"
+        )
+        summary, score_rows, _market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "12-31 08:30",
+                    season=2020,
+                    league=brazil_cup_sheet,
+                    home="Palmeiras",
+                    away="America Mineiro",
+                    round_label="Semi-final second leg",
+                ),
+                _data_row(
+                    2,
+                    "03-01 08:00",
+                    season=2020,
+                    league=brazil_cup_sheet,
+                    home="Gremio",
+                    away="Palmeiras",
+                    round_label="Final first leg",
+                ),
+                _data_row(
+                    3,
+                    "03-08 05:00",
+                    season=2020,
+                    league=brazil_cup_sheet,
+                    home="Palmeiras",
+                    away="Gremio",
+                    round_label="Final second leg",
+                ),
+            ],
+            sheet_name=brazil_cup_sheet,
+            as_of_date="2021-12-31",
+        )
+
+        self.assertEqual(
+            [row["source_kickoff"] for row in score_rows],
+            [
+                "2020-12-31T08:30+08:00",
+                "2021-03-01T08:00+08:00",
+                "2021-03-08T05:00+08:00",
+            ],
+        )
+        self.assertEqual(
+            summary["calendar_rollovers"],
+            [
+                {
+                    "season": 2020,
+                    "source_row": 4,
+                    "from_calendar_year": 2020,
+                    "to_calendar_year": 2021,
+                    "trigger": "12->03",
+                }
+            ],
+        )
+
+    def test_brazil_cup_rollover_is_not_allowed_outside_2020(self):
+        brazil_cup_sheet = next(
+            name
+            for name, spec in history_importer.LEAGUE_SPECS.items()
+            if spec["league_key"] == "brazil_cup"
+        )
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "kickoff order goes backwards"
+        ):
+            self._import(
+                [
+                    _data_row(
+                        1,
+                        "12-31 08:30",
+                        season=2021,
+                        league=brazil_cup_sheet,
+                        home="Team A",
+                        away="Team B",
+                    ),
+                    _data_row(
+                        2,
+                        "03-01 08:00",
+                        season=2021,
+                        league=brazil_cup_sheet,
+                        home="Team C",
+                        away="Team D",
+                    ),
+                ],
+                sheet_name=brazil_cup_sheet,
+                as_of_date="2022-12-31",
+            )
+
+    def test_completed_nations_cycles_can_reach_third_calendar_year(self):
+        nations_sheet = next(
+            name
+            for name, spec in history_importer.LEAGUE_SPECS.items()
+            if spec["league_key"] == "uefa_nations_league"
+        )
+        for season in (2022, 2024):
+            with self.subTest(season=season):
+                summary, score_rows, _market_rows = self._import(
+                    [
+                        _data_row(
+                            1,
+                            "11-18 20:45",
+                            season=season,
+                            league=nations_sheet,
+                            home="Team A",
+                            away="Team B",
+                            round_label="League phase",
+                        ),
+                        _data_row(
+                            2,
+                            "06-09 03:00",
+                            season=season,
+                            league=nations_sheet,
+                            home="Team C",
+                            away="Team D",
+                            round_label="Final",
+                        ),
+                        _data_row(
+                            3,
+                            "03-27 01:00",
+                            season=season,
+                            league=nations_sheet,
+                            home="Team E",
+                            away="Team F",
+                            round_label="C/D play-out first leg",
+                        ),
+                    ],
+                    sheet_name=nations_sheet,
+                    as_of_date=f"{season + 2}-12-31",
+                    corner_extension=True,
+                )
+
+                self.assertEqual(
+                    [row["source_kickoff"] for row in score_rows],
+                    [
+                        f"{season}-11-18T20:45+08:00",
+                        f"{season + 1}-06-09T03:00+08:00",
+                        f"{season + 2}-03-27T01:00+08:00",
+                    ],
+                )
+                self.assertEqual(
+                    [
+                        event["to_calendar_year"]
+                        for event in summary["calendar_rollovers"]
+                    ],
+                    [season + 1, season + 2],
+                )
+                self.assertEqual(
+                    {row["format_version"] for row in score_rows},
+                    {f"uefa_nations_league_{season}_{season + 2}_edition"},
+                )
 
     def test_afc_delayed_season_august_to_february_rollover_is_explicit(self):
         summary, score_rows, _market_rows = self._import(

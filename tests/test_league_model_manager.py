@@ -9,6 +9,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -45,6 +46,10 @@ def _fake_model(league_key: str, bundle_hash: str, *, rows: int = 1):
         "empirical_association": {
             "smoothing_alpha": promoted["association_smoothing_alpha"],
             "power": promoted["association_power"],
+            "time_decay": {
+                "mode": "exponential_half_life",
+                "half_life_days": promoted["association_half_life_days"],
+            },
         },
         "construction": {
             "validated_configuration": {
@@ -67,6 +72,67 @@ class LeagueModelManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_manager_and_evaluator_share_the_exact_competition_regime_policy(self):
+        self.assertEqual(
+            league_model_manager._expected_evaluator_regime_policy(),
+            league_model_manager.htft_holdout_evaluator.COMPETITION_REGIME_POLICY,
+        )
+        tampered = copy.deepcopy(
+            league_model_manager.htft_holdout_evaluator.COMPETITION_REGIME_POLICY
+        )
+        tampered["allowed_regimes_by_league"]["uefa_nations_league"] = ["regular"]
+        with (
+            mock.patch.object(
+                league_model_manager.htft_holdout_evaluator,
+                "COMPETITION_REGIME_POLICY",
+                tampered,
+            ),
+            self.assertRaisesRegex(
+                league_model_manager.LeagueModelManagerError,
+                "does not match the registered manager",
+            ),
+        ):
+            league_model_manager._assert_evaluator_regime_policy_matches_manager()
+
+    def test_manager_and_evaluator_share_the_exact_fit_policy(self):
+        league_model_manager._assert_evaluator_fit_policy_matches_manager()
+        tampered = copy.deepcopy(
+            league_model_manager.htft_holdout_evaluator.PROMOTED_FIT_CONFIG
+        )
+        tampered["association_half_life_days"] = 180.0
+        with (
+            mock.patch.object(
+                league_model_manager.htft_holdout_evaluator,
+                "PROMOTED_FIT_CONFIG",
+                tampered,
+            ),
+            self.assertRaisesRegex(
+                league_model_manager.LeagueModelManagerError,
+                "fit policy does not match",
+            ),
+        ):
+            league_model_manager._assert_evaluator_fit_policy_matches_manager()
+
+    def test_promoted_model_rejects_uniform_or_wrong_association_decay(self):
+        promoted = league_model_manager.VALIDATED_TRAINING_CONFIG
+        model = _fake_model("brazil_serie_a", _hash_bytes(b"bundle"))
+        league_model_manager._validate_promoted_model_config(model, promoted)
+
+        for mode, half_life in (("none", None), ("exponential_half_life", 180.0)):
+            with self.subTest(mode=mode, half_life=half_life):
+                tampered = copy.deepcopy(model)
+                tampered["empirical_association"]["time_decay"] = {
+                    "mode": mode,
+                    "half_life_days": half_life,
+                }
+                with self.assertRaisesRegex(
+                    league_model_manager.LeagueModelManagerError,
+                    "empirical association config",
+                ):
+                    league_model_manager._validate_promoted_model_config(
+                        tampered, promoted
+                    )
+
     @staticmethod
     def _score_row(
         league_key,
@@ -80,12 +146,20 @@ class LeagueModelManagerTests(unittest.TestCase):
         half_home_goals=0,
         half_away_goals=0,
         season=None,
-        competition_regime="regular",
+        competition_regime=None,
         source_row=3,
+        round_label=None,
     ):
         season = int(match_date[:4]) if season is None else season
         history_importer = league_model_manager.history_importer
-        round_value = str(source_row - 2)
+        round_value = str(source_row - 2) if round_label is None else round_label
+        if competition_regime is None:
+            competition_regime = history_importer._competition_regime(
+                league_key,
+                season,
+                date.fromisoformat(match_date),
+                round_value,
+            )
 
         def result(home, away):
             return "H" if home > away else "A" if home < away else "D"
@@ -93,6 +167,7 @@ class LeagueModelManagerTests(unittest.TestCase):
         half_result = result(half_home_goals, half_away_goals)
         full_result = result(home_goals, away_goals)
         return {
+            "match_id": str(9000000 + source_row),
             "date": match_date,
             "home_team": home_team,
             "away_team": away_team,
@@ -150,6 +225,7 @@ class LeagueModelManagerTests(unittest.TestCase):
             for bookmaker, _label in history_importer.BOOKMAKERS:
                 market_rows.append(
                     {
+                        "match_id": row["match_id"],
                         "league_key": row["league_key"],
                         "league": row["league"],
                         "season": row["season"],
@@ -305,6 +381,9 @@ class LeagueModelManagerTests(unittest.TestCase):
             "as_of_date": "2026-08-03",
             "season_completeness_policy": dict(
                 league_model_manager.history_importer.SEASON_COMPLETENESS_POLICY
+            ),
+            "administrative_result_exclusion_policy": (
+                league_model_manager.history_importer._administrative_result_exclusion_policy()
             ),
             "source_timezone": "Asia/Shanghai",
             "leagues": leagues,
@@ -488,6 +567,10 @@ class LeagueModelManagerTests(unittest.TestCase):
         )
         self.assertTrue((self.model_dir / "registry.json").is_file())
         self.assertEqual(league_model_manager.load_registry(self.model_dir), registry)
+        self.assertEqual(
+            {call.kwargs["competition_key"] for call in calls},
+            set(league_model_manager.LEAGUE_NAMES),
+        )
         for call in calls:
             kwargs = call.kwargs
             self.assertEqual(kwargs["half_time_half_life_days"], 730.0)
@@ -495,6 +578,7 @@ class LeagueModelManagerTests(unittest.TestCase):
             self.assertEqual(kwargs["full_time_half_life_days"], 365.0)
             self.assertEqual(kwargs["association_smoothing_alpha"], 0.5)
             self.assertEqual(kwargs["association_power"], 1.0)
+            self.assertEqual(kwargs["association_half_life_days"], 365.0)
             self.assertEqual(kwargs["iterations"], 1200)
             self.assertEqual(kwargs["dataset_manifest_hash"], manifest["bundle_hash"])
         for entry in registry["leagues"]:
@@ -516,6 +600,21 @@ class LeagueModelManagerTests(unittest.TestCase):
             self.assertEqual(
                 entry["deployment_policy_version"],
                 league_model_manager.DEPLOYMENT_POLICY_VERSION,
+            )
+            expected_regimes = league_model_manager._production_training_regimes(
+                entry["league_key"]
+            )
+            self.assertEqual(
+                entry["competition_regime_policy"]["allowed_regimes"],
+                list(expected_regimes),
+            )
+            self.assertEqual(
+                set(entry["competition_regime_policy"]["included_regime_counts"]),
+                set(expected_regimes),
+            )
+            self.assertEqual(
+                entry["competition_regime_policy"]["excluded_regime_counts"],
+                {},
             )
             evidence = entry["league_pair_gate_evidence"]
             self.assertEqual(
@@ -921,6 +1020,99 @@ class LeagueModelManagerTests(unittest.TestCase):
             entry["league_pair_gate_evidence"]["regime_warning"],
             league_model_manager.SPECIAL_REGIME_WARNING,
         )
+
+    def test_norway_relegation_playoff_is_excluded_from_registered_training(self):
+        manifest = self._write_dataset_bundle(
+            all_leagues=False, only_league="norway_eliteserien"
+        )
+        league = manifest["leagues"][0]
+        rows = [
+            self._score_row(
+                "norway_eliteserien",
+                league["league"],
+                match_date="2025-11-30",
+                source_row=3,
+                round_label="30",
+            ),
+            self._score_row(
+                "norway_eliteserien",
+                league["league"],
+                match_date="2025-12-07",
+                source_row=4,
+                round_label="保级附加赛 第1轮",
+            ),
+        ]
+        self.assertEqual(rows[1]["competition_regime"], "relegation_playoff")
+        self.assertEqual(rows[1]["phase_group"], "relegation_playoff")
+        self._replace_league_rows(manifest, 0, rows)
+        self._write_evaluation_artifact(manifest)
+        observed_training_rows = []
+
+        def fit_model(path, **kwargs):
+            with Path(path).open("r", encoding="utf-8", newline="") as handle:
+                observed_training_rows.extend(csv.DictReader(handle))
+            return _fake_model(
+                kwargs["competition_key"], manifest["bundle_hash"], rows=1
+            )
+
+        with (
+            mock.patch.object(
+                league_model_manager.htft_model,
+                "fit_model",
+                side_effect=fit_model,
+            ),
+            mock.patch.object(league_model_manager.htft_model, "validate_model"),
+            mock.patch.object(
+                league_model_manager.htft_holdout_evaluator,
+                "validate_evaluation",
+            ),
+        ):
+            registry = league_model_manager.train_models(
+                self.dataset_dir,
+                self.model_dir,
+                evaluation_artifact=self.evaluation_path,
+            )
+
+        self.assertEqual(len(observed_training_rows), 1)
+        self.assertEqual(observed_training_rows[0]["round"], "30")
+        entry = registry["leagues"][0]
+        self.assertEqual(entry["training_rows"], 1)
+        self.assertEqual(entry["excluded_training_rows"], 1)
+        self.assertEqual(
+            entry["competition_regime_policy"]["excluded_regime_counts"],
+            {"relegation_playoff": 1},
+        )
+
+    def test_rehashed_norway_playoff_regime_tampering_is_rejected(self):
+        manifest = self._write_dataset_bundle(
+            all_leagues=False, only_league="norway_eliteserien"
+        )
+        league = manifest["leagues"][0]
+        tampered_rows = [
+            self._score_row(
+                "norway_eliteserien",
+                league["league"],
+                match_date="2025-12-07",
+                competition_regime="regular",
+                round_label="保级附加赛 第1轮",
+            )
+        ]
+        self._replace_league_rows(manifest, 0, tampered_rows)
+        self._write_evaluation_artifact(manifest)
+
+        with (
+            mock.patch.object(league_model_manager.htft_model, "fit_model") as fitted,
+            self.assertRaisesRegex(
+                league_model_manager.LeagueModelManagerError,
+                "competition_regime must be relegation_playoff",
+            ),
+        ):
+            league_model_manager.train_models(
+                self.dataset_dir,
+                self.model_dir,
+                evaluation_artifact=self.evaluation_path,
+            )
+        fitted.assert_not_called()
 
     def test_modified_dataset_is_rejected_before_training(self):
         manifest = self._write_dataset_bundle(all_leagues=False)

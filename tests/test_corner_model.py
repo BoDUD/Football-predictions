@@ -140,6 +140,19 @@ class CornerModelTests(unittest.TestCase):
             math.exp(corner_model.nb2_log_pmf(4, 6.25, 2.5)),
             places=15,
         )
+        sparse_cup_tail = corner_model.nb2_distribution(80.1, 256.0)
+        self.assertLessEqual(sparse_cup_tail["raw_omitted_probability"], 1e-8)
+        self.assertLessEqual(
+            sparse_cup_tail["maximum"], corner_model.DEFAULT_HARD_MAX_CORNERS
+        )
+
+    def test_count_crps_scores_observations_on_either_side_of_truncated_support(self):
+        probabilities = [0.25, 0.5, 0.25]
+        below = corner_model._count_crps(probabilities, -3, minimum=-1)
+        above = corner_model._count_crps(probabilities, 3, minimum=-1)
+
+        self.assertAlmostEqual(below, 2.625, places=12)
+        self.assertAlmostEqual(above, 2.625, places=12)
 
     def test_empirical_baseline_smoothing_does_not_inject_fifty_fake_matches(self):
         probabilities = corner_model._weighted_empirical_distribution(
@@ -178,7 +191,50 @@ class CornerModelTests(unittest.TestCase):
         self.assertEqual(set(self.model["parameters"]["attack"]), set(TEAMS))
         self.assertEqual(set(self.model["parameters"]["concession"]), set(TEAMS))
         self.assertEqual(self.model["config"]["half_life_days"], 180.0)
+        self.assertEqual(self.model["fit"]["optimizer"], corner_model.OPTIMIZER)
         corner_model.validate_model(self.model)
+
+    def test_zero_centring_cannot_move_sparse_effect_beyond_fitted_bound(self):
+        teams = ["A", "B", "C", "Sparse"]
+        result = corner_model._fit_mean_parameters(
+            [
+                {
+                    "home_team": "Sparse",
+                    "away_team": "A",
+                    "home_corners": 0,
+                    "away_corners": 4,
+                },
+                {
+                    "home_team": "B",
+                    "away_team": "C",
+                    "home_corners": 4,
+                    "away_corners": 4,
+                },
+            ],
+            teams,
+            [1.0, 1.0],
+            {
+                "home_intercept": math.log(4.0),
+                "away_intercept": math.log(4.0),
+                "attack": {
+                    "A": 1.0,
+                    "B": 1.0,
+                    "C": 1.0001552230502524,
+                    "Sparse": -3.0001552230502524,
+                },
+                "concession": {team: 0.0 for team in teams},
+            },
+            home_dispersion=2.0,
+            away_dispersion=2.0,
+            iterations=1,
+            learning_rate=1e-12,
+            regularization=0.02,
+        )
+
+        self.assertGreaterEqual(min(result["attack"].values()), -3.0)
+        self.assertLessEqual(max(result["attack"].values()), 3.0)
+        self.assertAlmostEqual(math.fsum(result["attack"].values()), 0.0, places=12)
+        self.assertAlmostEqual(math.fsum(result["concession"].values()), 0.0, places=12)
 
     def test_disconnected_fixture_components_are_retained_audited_and_fail_cross_component(
         self,

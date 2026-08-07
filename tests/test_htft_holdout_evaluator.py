@@ -47,6 +47,10 @@ def _row(
         if spec["league_key"] == league_key
     )
     return {
+        "match_id": (
+            f"{season}{month_day.replace('-', '')}"
+            f"{sum(ord(char) for char in home + away) % 10000:04d}"
+        ),
         "date": match_date,
         "home_team": home,
         "away_team": away,
@@ -79,6 +83,76 @@ def _row(
 def _league_rows(
     league_key: str, extra_per_holdout: int = 0
 ) -> list[dict[str, object]]:
+    if league_key == "uefa_nations_league":
+        regime = "national_team_league_and_knockout"
+        return [
+            _row(
+                league_key,
+                2020,
+                "09-03",
+                "A",
+                "B",
+                (1, 0),
+                (0, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2020,
+                "11-18",
+                "B",
+                "C",
+                (1, 1),
+                (0, 1),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+            _row(
+                league_key,
+                2022,
+                "06-03",
+                "A",
+                "C",
+                (2, 1),
+                (1, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2022,
+                "09-27",
+                "C",
+                "B",
+                (0, 1),
+                (0, 0),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+            _row(
+                league_key,
+                2024,
+                "09-05",
+                "A",
+                "B",
+                (1, 1),
+                (0, 0),
+                competition_regime=regime,
+                round_label="A联赛 第1轮",
+            ),
+            _row(
+                league_key,
+                2024,
+                "11-18",
+                "C",
+                "A",
+                (0, 2),
+                (0, 1),
+                competition_regime=regime,
+                round_label="B联赛 第6轮",
+            ),
+        ]
     rows: list[dict[str, object]] = [
         _row(league_key, 2022, "02-01", "A", "B", (1, 0), (0, 0)),
         _row(league_key, 2022, "03-01", "B", "C", (2, 1), (1, 1)),
@@ -143,6 +217,7 @@ def _market_rows(score_rows: list[dict[str, object]]) -> list[dict[str, object]]
         ):
             rows.append(
                 {
+                    "match_id": score["match_id"],
                     "league_key": score["league_key"],
                     "league": score["league"],
                     "season": score["season"],
@@ -339,6 +414,9 @@ def _build_bundle(
         "as_of_date": "2026-08-03",
         "season_completeness_policy": dict(
             evaluator.history_importer.SEASON_COMPLETENESS_POLICY
+        ),
+        "administrative_result_exclusion_policy": (
+            evaluator.history_importer._administrative_result_exclusion_policy()
         ),
         "source_timezone": "UTC",
         "kickoff_year_policy": (
@@ -548,6 +626,82 @@ def _rewrite_summaries_from_forecasts(evaluation: dict[str, object]) -> None:
 
 
 class HtftHoldoutEvaluatorTests(unittest.TestCase):
+    def test_competition_specific_regime_partition_keeps_cups_separate(self):
+        brazil_rows = [
+            {"competition_regime": "national_knockout_cup"},
+            {"competition_regime": "regular"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            brazil_rows, league_key="brazil_cup"
+        )
+        self.assertEqual(included, brazil_rows[:1])
+        self.assertEqual(excluded, brazil_rows[1:])
+
+        nations_rows = [
+            {"competition_regime": "national_team_league_and_knockout"},
+            {"competition_regime": "regular"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            nations_rows, league_key="uefa_nations_league"
+        )
+        self.assertEqual(included, nations_rows[:1])
+        self.assertEqual(excluded, nations_rows[1:])
+
+        ordinary_rows = [
+            {"competition_regime": "regular"},
+            {"competition_regime": "national_knockout_cup"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            ordinary_rows, league_key="brazil_serie_a"
+        )
+        self.assertEqual(included, ordinary_rows[:1])
+        self.assertEqual(excluded, ordinary_rows[1:])
+
+        norway_rows = [
+            {"competition_regime": "regular"},
+            {"competition_regime": "relegation_playoff"},
+        ]
+        included, excluded = evaluator._partition_formal_regimes(
+            norway_rows, league_key="norway_eliteserien"
+        )
+        self.assertEqual(included, norway_rows[:1])
+        self.assertEqual(excluded, norway_rows[1:])
+
+    def test_nations_biennial_history_uses_2024_validation_without_fake_2025(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("uefa_nations_league", 0)])
+
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=20,
+                experimental_override=True,
+            )
+
+        league = result["leagues"][0]
+        self.assertEqual(league["league_key"], "uefa_nations_league")
+        by_split = {item["split_id"]: item for item in league["splits"]}
+        validation = by_split["validation_2024"]
+        self.assertEqual(validation["status"], "evaluated")
+        self.assertEqual(validation["training_match_count"], 4)
+        self.assertEqual(validation["test_match_count"], 2)
+        self.assertEqual(
+            validation["training_competition_regime_counts"],
+            {"national_team_league_and_knockout": 4},
+        )
+        self.assertEqual(
+            validation["test_competition_regime_counts"],
+            {"national_team_league_and_knockout": 2},
+        )
+        self.assertLess(
+            validation["training_cutoff_date"], validation["test_date_start"]
+        )
+        for split_id in ("fixed_holdout_2025", "shadow_2026"):
+            self.assertEqual(by_split[split_id]["status"], "not_available")
+            self.assertEqual(by_split[split_id]["test_match_count"], 0)
+
     def setUp(self) -> None:
         self._expected_season_counts = copy.deepcopy(
             evaluator.history_importer.EXPECTED_SEASON_MATCH_COUNTS
@@ -865,6 +1019,10 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             self.assertEqual(result["fit_config"]["half_time_half_life_days"], 730.0)
             self.assertEqual(result["fit_config"]["full_time_half_life_days"], 365.0)
             self.assertEqual(
+                result["fit_config"]["association_half_life_days"],
+                result["fit_config"]["full_time_half_life_days"],
+            )
+            self.assertEqual(
                 result["fit_config"]["seed_method"], "empirical_association"
             )
             self.assertTrue(output.is_file())
@@ -988,6 +1146,36 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
                     bootstrap_repetitions=50,
                 )
 
+    def test_association_half_life_is_fitted_and_not_display_only_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+
+            frozen = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            short_decay = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                association_half_life_days=30.0,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+
+            self.assertEqual(frozen["fit_config"]["association_half_life_days"], 365.0)
+            self.assertEqual(
+                short_decay["fit_config"]["association_half_life_days"], 30.0
+            )
+            self.assertNotEqual(
+                frozen["leagues"][0]["splits"][0]["model_hash"],
+                short_decay["leagues"][0]["splits"][0]["model_hash"],
+            )
+
     def test_promoted_claim_cannot_be_forged_by_rehashing(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1009,6 +1197,31 @@ class HtftHoldoutEvaluatorTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 evaluator.HoldoutEvaluationError,
                 "promotion metadata",
+            ):
+                evaluator.validate_evaluation(tampered)
+
+    def test_rehashed_nonpositive_association_half_life_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _build_bundle(root, [("brazil_serie_a", 0)])
+            result = evaluator.evaluate_bundle(
+                dataset_dir=root,
+                iterations=2,
+                learning_rate=0.005,
+                bootstrap_repetitions=50,
+                experimental_override=True,
+            )
+            tampered = copy.deepcopy(result)
+            tampered["fit_config"]["association_half_life_days"] = 0.0
+            tampered["promotion"] = evaluator._promotion_metadata(
+                fit_configuration_matches_promoted=False,
+                bootstrap_configuration_matches_promoted=False,
+            )
+            tampered["evaluation_hash"] = evaluator.calculate_evaluation_hash(tampered)
+
+            with self.assertRaisesRegex(
+                evaluator.HoldoutEvaluationError,
+                "association_half_life_days must be positive",
             ):
                 evaluator.validate_evaluation(tampered)
 

@@ -48,8 +48,8 @@ except ImportError:  # Direct invocation as scripts/htft_holdout_evaluator.py.
 
 
 ARTIFACT_TYPE = "soccer_htft_fixed_season_evaluation"
-SCHEMA_VERSION = "1.3.0"
-EVALUATOR_VERSION = "htft-fixed-season-holdout/1.3.0"
+SCHEMA_VERSION = "1.5.0"
+EVALUATOR_VERSION = "htft-fixed-season-holdout/1.5.0"
 RESEARCH_MARKET_POLICY = "research_only_untimestamped_opening_snapshot"
 OPTIONAL_CONTEXT_COLUMNS = ("season_status", "format_version", "phase_group")
 LEGACY_SEASON_STATUS = "unlabeled_legacy"
@@ -57,13 +57,26 @@ LEGACY_FORMAT_VERSION = "competition_regime_legacy"
 LEGACY_PHASE_GROUP = "unspecified"
 PARTIAL_SEASON_STATUS_PREFIX = "partial_as_of_"
 COMPETITION_REGIME_POLICY = {
-    "version": "regular-only-production-v1",
+    "version": "competition-specific-production-v2",
     "source_column": "competition_regime",
-    "allowed_regimes": ["regular"],
+    "default_allowed_regimes": ["regular"],
+    "allowed_regimes_by_league": {
+        "brazil_cup": ["national_knockout_cup"],
+        "uefa_nations_league": ["national_team_league_and_knockout"],
+    },
     "excluded_regimes_usage": "counted_for_drift_audit_only_not_fit_or_scored",
     "special_regimes_are_not_merged_into_regular_strengths": True,
 }
-FORMAL_COMPETITION_REGIMES = frozenset(COMPETITION_REGIME_POLICY["allowed_regimes"])
+
+
+def _formal_competition_regimes(league_key: str) -> frozenset[str]:
+    overrides = COMPETITION_REGIME_POLICY["allowed_regimes_by_league"]
+    values = overrides.get(
+        league_key, COMPETITION_REGIME_POLICY["default_allowed_regimes"]
+    )
+    return frozenset(values)
+
+
 MODEL_PAIR_MASS_THRESHOLD = 0.46
 MARKET_PAIR_MASS_THRESHOLD = 0.50
 EPSILON = 1e-15
@@ -106,6 +119,11 @@ PROMOTED_FIT_CONFIG = {
     "rho_step": 0.01,
     "association_smoothing_alpha": 0.5,
     "association_power": 1.0,
+    # The nine-cell HT/FT association must age on the same time axis as the
+    # full-time marginal it is coupled to.  Keeping this in the frozen config
+    # makes an accidental return to lifetime-equal counts a schema-visible
+    # experiment rather than a silent production change.
+    "association_half_life_days": 365.0,
     "baseline_smoothing_alpha": 0.5,
     "seed_method": "empirical_association",
     "unknown_team_policy": "league_average",
@@ -1228,14 +1246,17 @@ def _competition_regime_counts(
 
 def _partition_formal_regimes(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    league_key: str,
 ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     formal: list[Mapping[str, Any]] = []
     excluded: list[Mapping[str, Any]] = []
+    allowed_regimes = _formal_competition_regimes(league_key)
     for row in rows:
         regime = row.get("competition_regime")
         if not isinstance(regime, str) or not regime:
             raise HoldoutEvaluationError("competition_regime is missing")
-        (formal if regime in FORMAL_COMPETITION_REGIMES else excluded).append(row)
+        (formal if regime in allowed_regimes else excluded).append(row)
     return formal, excluded
 
 
@@ -1272,9 +1293,11 @@ def _fit_and_score_split(
     ]
     test_candidates = [row for row in rows if row["season"] == split["test_season"]]
     training_rows, excluded_training_rows = _partition_formal_regimes(
-        training_candidates
+        training_candidates, league_key=league_key
     )
-    test_rows, excluded_test_rows = _partition_formal_regimes(test_candidates)
+    test_rows, excluded_test_rows = _partition_formal_regimes(
+        test_candidates, league_key=league_key
+    )
     model_cohorts = _cohort_accumulators(MODEL_PAIR_MASS_THRESHOLD)
     market_cohorts = _cohort_accumulators(MARKET_PAIR_MASS_THRESHOLD)
     baseline_accumulator = _new_accumulator(MODEL_PAIR_MASS_THRESHOLD)
@@ -1383,6 +1406,7 @@ def _fit_and_score_split(
                 rho_step=fit_config["rho_step"],
                 association_smoothing_alpha=fit_config["association_smoothing_alpha"],
                 association_power=fit_config["association_power"],
+                association_half_life_days=fit_config["association_half_life_days"],
                 competition_key=league_key,
                 dataset_manifest_hash=manifest_hash,
             )
@@ -1698,6 +1722,7 @@ def evaluate_bundle(
     rho_step: float = 0.01,
     association_smoothing_alpha: float = 0.5,
     association_power: float = 1.0,
+    association_half_life_days: float = 365.0,
     bootstrap_repetitions: int = DEFAULT_BOOTSTRAP_REPETITIONS,
     bootstrap_seed: int = BOOTSTRAP_SEED,
     experimental_override: bool = False,
@@ -1734,6 +1759,7 @@ def evaluate_bundle(
         "rho_step": rho_step,
         "association_smoothing_alpha": association_smoothing_alpha,
         "association_power": association_power,
+        "association_half_life_days": association_half_life_days,
         "baseline_smoothing_alpha": 0.5,
         "seed_method": "empirical_association",
         "unknown_team_policy": "league_average",
@@ -1897,7 +1923,7 @@ def evaluate_bundle(
             "random_split": False,
             "training_rule": "season <= training_season_max",
             "test_rule": "season == test_season",
-            "competition_regime_rule": "competition_regime == regular",
+            "competition_regime_rule": "competition-specific frozen allowlist",
             "strict_date_rule": "max(training date) < min(test date)",
             "splits": [dict(split) for split in run_splits],
         },
@@ -2026,7 +2052,8 @@ def _rebuild_split_evidence(
         split.get("training_competition_regime_counts"),
         "training_competition_regime_counts",
     )
-    if not set(training_regime_counts).issubset(FORMAL_COMPETITION_REGIMES):
+    formal_regimes = _formal_competition_regimes(league_key)
+    if not set(training_regime_counts).issubset(formal_regimes):
         raise HoldoutEvaluationError(
             "formal training competition regime counts include an excluded regime"
         )
@@ -2042,7 +2069,7 @@ def _rebuild_split_evidence(
         )
     if sum(test_regime_counts.values()) != len(forecasts):
         raise HoldoutEvaluationError("test competition regime counts changed")
-    if not set(test_regime_counts).issubset(FORMAL_COMPETITION_REGIMES):
+    if not set(test_regime_counts).issubset(formal_regimes):
         raise HoldoutEvaluationError(
             "formal test competition regime counts include an excluded regime"
         )
@@ -2055,8 +2082,8 @@ def _rebuild_split_evidence(
         "excluded_test_competition_regime_counts",
     )
     if (
-        set(excluded_training_regime_counts) & FORMAL_COMPETITION_REGIMES
-        or set(excluded_test_regime_counts) & FORMAL_COMPETITION_REGIMES
+        set(excluded_training_regime_counts) & formal_regimes
+        or set(excluded_test_regime_counts) & formal_regimes
     ):
         raise HoldoutEvaluationError(
             "excluded competition regime counts contain a formal regime"
@@ -2200,7 +2227,7 @@ def _rebuild_split_evidence(
         if actual_class not in htft_model.HTFT_CLASSES:
             raise HoldoutEvaluationError("forecast actual_class is invalid")
         competition_regime = forecast.get("competition_regime")
-        if competition_regime not in FORMAL_COMPETITION_REGIMES:
+        if competition_regime not in formal_regimes:
             raise HoldoutEvaluationError(
                 "forecast competition_regime is not production-eligible"
             )
@@ -2515,9 +2542,11 @@ def _verify_source_binding(
                 if row["season"] == expected_split["test_season"]
             ]
             training_rows, excluded_training_rows = _partition_formal_regimes(
-                training_candidates
+                training_candidates, league_key=str(league_key)
             )
-            test_rows, excluded_test_rows = _partition_formal_regimes(test_candidates)
+            test_rows, excluded_test_rows = _partition_formal_regimes(
+                test_candidates, league_key=str(league_key)
+            )
             if split.get("training_match_count") != len(training_rows):
                 raise HoldoutEvaluationError(
                     f"{league_key} source-bound training count changed"
@@ -2658,6 +2687,9 @@ def _verify_source_binding(
                                 "association_smoothing_alpha"
                             ],
                             association_power=fit_config["association_power"],
+                            association_half_life_days=fit_config[
+                                "association_half_life_days"
+                            ],
                             competition_key=str(league_key),
                             dataset_manifest_hash=evaluation["dataset"][
                                 "manifest_bundle_hash"
@@ -2790,6 +2822,7 @@ def validate_evaluation(
         "rho_step",
         "association_smoothing_alpha",
         "association_power",
+        "association_half_life_days",
         "baseline_smoothing_alpha",
     ):
         value = fit_config.get(name)
@@ -2806,6 +2839,10 @@ def validate_evaluation(
         or iterations < 1
     ):
         raise HoldoutEvaluationError("fit_config.iterations is invalid")
+    if fit_config["association_half_life_days"] <= 0.0:
+        raise HoldoutEvaluationError(
+            "fit_config.association_half_life_days must be positive"
+        )
     if fit_config.get("seed_method") != "empirical_association":
         raise HoldoutEvaluationError("fit_config seed_method is invalid")
     if fit_config.get("unknown_team_policy") != "league_average":
@@ -2864,7 +2901,7 @@ def validate_evaluation(
         or split_policy.get("splits") != [dict(item) for item in expected_splits]
         or split_policy.get("random_split") is not False
         or split_policy.get("competition_regime_rule")
-        != "competition_regime == regular"
+        != "competition-specific frozen allowlist"
     ):
         raise HoldoutEvaluationError("fixed split policy is invalid")
     leagues = evaluation.get("leagues")
@@ -3035,6 +3072,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rho-step", type=float, default=0.01)
     parser.add_argument("--association-smoothing-alpha", type=float, default=0.5)
     parser.add_argument("--association-power", type=float, default=1.0)
+    parser.add_argument("--association-half-life-days", type=float, default=365.0)
     parser.add_argument(
         "--bootstrap-repetitions",
         type=int,
@@ -3069,6 +3107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rho_step=args.rho_step,
             association_smoothing_alpha=args.association_smoothing_alpha,
             association_power=args.association_power,
+            association_half_life_days=args.association_half_life_days,
             bootstrap_repetitions=args.bootstrap_repetitions,
             bootstrap_seed=args.bootstrap_seed,
             experimental_override=args.experimental_override,

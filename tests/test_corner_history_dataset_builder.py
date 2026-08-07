@@ -33,11 +33,14 @@ def _record(
     kickoff_utc = local.astimezone(timezone.utc)
     year = season_year if season_year is not None else local.year
     if phase is None:
-        phase = (
-            "group_stage"
-            if source_key in {"uefa-champions-league", "afc-champions-league"}
-            else "regular"
-        )
+        if source_key in {"uefa-champions-league", "afc-champions-league"}:
+            phase = "group_stage"
+        elif source_key == "brazil-cup":
+            phase = "knockout"
+        elif source_key == "uefa-nations-league":
+            phase = "league_phase"
+        else:
+            phase = "regular"
     if regime is None:
         eligible_regimes = builder.ELIGIBLE_REGIMES_BY_COMPETITION[source_key]
         regime = "standard" if eligible_regimes == ("regular",) else eligible_regimes[0]
@@ -175,7 +178,7 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                     league_keys=["not_a_league"],
                 )
 
-    def test_builds_fourteen_bound_csvs_and_excludes_unsafe_rows(self):
+    def test_builds_sixteen_bound_csvs_and_excludes_unsafe_rows(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = _source()
@@ -196,14 +199,14 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                 source_path, root / "dataset", as_of_date="2026-08-03"
             )
 
-            self.assertEqual(len(manifest["leagues"]), 14)
+            self.assertEqual(len(manifest["leagues"]), 16)
             self.assertEqual(
                 manifest["bundle_hash"], builder.calculate_manifest_hash(manifest)
             )
-            self.assertEqual(manifest["schema_version"], "2.0.0")
+            self.assertEqual(manifest["schema_version"], "2.1.0")
             self.assertEqual(
                 manifest["selection_policy"]["version"],
-                "regulation-corner-training-selection/2.0.0",
+                "regulation-corner-training-selection/2.1.0",
             )
             copied_source = root / "dataset" / manifest["source_file"]
             self.assertTrue(copied_source.is_file())
@@ -332,9 +335,13 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
 
     def test_versioned_competition_regimes_are_allowed_only_in_their_league(self):
         additions = {
+            "brazil-cup": [("national-knockout-cup", "knockout")],
             "france-ligue-1": [("20-team", "regular")],
             "south-korea-k-league-1": [("covid-27-round", "regular")],
             "uefa-champions-league": [("36-team-league-phase", "league_phase")],
+            "uefa-nations-league": [
+                ("national-team-league-and-knockout", "league_phase")
+            ],
             "afc-champions-league": [
                 ("cross-year-acl", "group_stage"),
                 ("24-team-acl-elite", "group_stage"),
@@ -392,6 +399,11 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
         excluded = {
             "finland-veikkausliiga": ("regular", "欧战决赛", "european_playoff"),
             "uefa-champions-league": ("group_stage", "第一圈", "qualifying"),
+            "uefa-nations-league": (
+                "league_phase",
+                "A联半决赛",
+                "knockout",
+            ),
             "afc-champions-league": ("group_stage", "淘汰赛", "knockout"),
             "usa-mls": ("regular", "Playoffs", "playoffs"),
         }
@@ -430,6 +442,95 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                         entry["qa"]["excluded_cohorts"],
                         {f"phase:{expected_phase}": 1},
                     )
+
+    def test_brazil_cup_extra_time_or_non_regulation_corners_never_train(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["matches"].extend(
+                [
+                    _record(
+                        "brazil-cup",
+                        997,
+                        kickoff="2025-05-01 19:00",
+                        regime="national-knockout-cup",
+                        phase="knockout",
+                        status="extra_time_ambiguous",
+                        period="unverified",
+                    ),
+                    _record(
+                        "brazil-cup",
+                        998,
+                        kickoff="2025-05-02 19:00",
+                        regime="national-knockout-cup",
+                        phase="knockout",
+                        status="complete",
+                        period="unverified",
+                    ),
+                ]
+            )
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            manifest = builder.build_dataset(
+                source_path, root / "dataset", as_of_date="2026-08-03"
+            )
+            brazil = next(
+                row
+                for row in manifest["leagues"]
+                if row["source_competition_key"] == "brazil-cup"
+            )
+            self.assertEqual(brazil["rows"], 2)
+            self.assertEqual(
+                brazil["qa"]["excluded_reasons"],
+                {
+                    "extra_time_ambiguous": 1,
+                    "non_regulation_corner_period": 1,
+                },
+            )
+
+    def test_nations_corner_training_contains_only_league_phase(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["matches"].extend(
+                [
+                    _record(
+                        "uefa-nations-league",
+                        997,
+                        kickoff="2025-05-01 19:00",
+                        regime="national-team-league-and-knockout",
+                        phase="A联赛",
+                        round_value="A联赛 第1轮",
+                    ),
+                    _record(
+                        "uefa-nations-league",
+                        998,
+                        kickoff="2025-05-02 19:00",
+                        regime="national-team-league-and-knockout",
+                        phase="A联赛",
+                        round_value="A联决赛",
+                    ),
+                ]
+            )
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            manifest = builder.build_dataset(
+                source_path, root / "dataset", as_of_date="2026-08-03"
+            )
+            nations = next(
+                row
+                for row in manifest["leagues"]
+                if row["source_competition_key"] == "uefa-nations-league"
+            )
+            self.assertEqual(nations["rows"], 3)
+            self.assertEqual(nations["phases"], {"league_phase": 3})
+            self.assertEqual(
+                nations["qa"]["excluded_reasons"],
+                {"phase_not_training_eligible": 1},
+            )
+            self.assertEqual(nations["qa"]["excluded_cohorts"], {"phase:knockout": 1})
 
     def test_rehashed_fixture_identity_tampering_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

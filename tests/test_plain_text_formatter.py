@@ -275,6 +275,7 @@ class PlainTextFormatterTests(unittest.TestCase):
     def test_all_registered_model_league_keys_have_chinese_display_labels(self):
         expected = {
             "brazil_serie_a": "巴甲",
+            "brazil_cup": "巴西杯",
             "norway_eliteserien": "挪超",
             "japan_j1": "日职",
             "usa_mls": "美职联",
@@ -287,6 +288,7 @@ class PlainTextFormatterTests(unittest.TestCase):
             "sweden_allsvenskan": "瑞典超",
             "finland_veikkausliiga": "芬超",
             "uefa_champions_league": "欧冠",
+            "uefa_nations_league": "欧国联",
             "afc_champions_league": "亚冠",
         }
         for league_key, display in expected.items():
