@@ -31,6 +31,13 @@ class ForwardPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
 
+    def test_documented_cli_uses_importable_module_entrypoint(self) -> None:
+        for relative in ("README.md", "references/model-validation.md"):
+            with self.subTest(relative=relative):
+                text = (self.repo_root / relative).read_text(encoding="utf-8")
+                self.assertIn("python -m scripts.forward_policy", text)
+                self.assertNotIn("python scripts/forward_policy.py", text)
+
     def _artifacts(self, base: Path) -> tuple[Path, Path]:
         dataset = base / "manifest.json"
         dataset.write_text(

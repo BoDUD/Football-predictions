@@ -308,13 +308,13 @@ a `live-forward-cohort/2.0.0` after that final policy exists; do not start a coh
 branch:
 
 ```bash
-python scripts/forward_policy.py --base-dir <workspace> --repo-root <repo> freeze \
+python -m scripts.forward_policy --base-dir <workspace> --repo-root <repo> freeze \
   --dataset-manifest <dataset-manifest.json> \
   --model-registry <registry.json> \
   --expected-final-merge-commit <final-merge-git-sha> \
   --cohort-kind local-integrity-shadow-v2
 
-python scripts/forward_policy.py --base-dir <workspace> --repo-root <repo> start \
+python -m scripts.forward_policy --base-dir <workspace> --repo-root <repo> start \
   --policy-file <forward-policy.json> \
   --cohort-id <stable-cohort-id> \
   --cohort-kind local-integrity-shadow-v2

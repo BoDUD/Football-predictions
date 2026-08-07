@@ -181,8 +181,8 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 ```bash
 python scripts/source_evidence.py build --source-file visible-page-export.json --output-dir .codex/soccer-predict/source-evidence
 python scripts/source_evidence.py verify --evidence .codex/soccer-predict/source-evidence/MATCH-source-evidence.json
-python scripts/forward_policy.py --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA --cohort-kind local-integrity-shadow-v2
-python scripts/forward_policy.py --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID --cohort-kind local-integrity-shadow-v2
+python -m scripts.forward_policy --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA --cohort-kind local-integrity-shadow-v2
+python -m scripts.forward_policy --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID --cohort-kind local-integrity-shadow-v2
 python scripts/memory_store.py --base-dir . close-forward-cohort --cohort-id COHORT_ID --closed-at TIMEZONE_AWARE_ISO
 python scripts/memory_store.py --base-dir . export-forward-validation --cohort-id COHORT_ID --cohort-closure-file .codex/soccer-predict/forward-cohorts/COHORT_ID-closure.json --output forward-observations.json
 python scripts/forward_validation.py --input forward-observations.json --output forward-validation.json
