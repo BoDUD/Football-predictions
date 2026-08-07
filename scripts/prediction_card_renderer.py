@@ -35,7 +35,10 @@ PANEL_VERTICAL_MARGIN = 28
 TITLE_HEIGHT = 190
 HEADER_HEIGHT = 70
 ROW_HEIGHT = 132
-FOOTER_HEIGHT = 190
+# Reserve enough bottom breathing room for Linux Noto CJK and Windows YaHei.
+# Their glyph bounding boxes differ by a few pixels; the larger fixed footer
+# keeps the final provenance line safely inside the rounded panel on both.
+FOOTER_HEIGHT = 200
 TABLE_WIDTH = WIDTH - 2 * SIDE_MARGIN
 PUBLICATION_MARGIN_TOP = 18
 PUBLICATION_HEADER_HEIGHT = 46
