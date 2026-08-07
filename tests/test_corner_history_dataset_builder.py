@@ -23,6 +23,8 @@ def _record(
     round_value: str | None = None,
     regime: str | None = None,
     season_year: int | None = None,
+    raw_tail: list[str] | None = None,
+    exclusion_reasons: list[str] | None = None,
 ) -> dict:
     total = (
         None
@@ -35,7 +37,7 @@ def _record(
     if phase is None:
         if source_key in {"uefa-champions-league", "afc-champions-league"}:
             phase = "group_stage"
-        elif source_key == "brazil-cup":
+        elif source_key in {"brazil-cup", "england-league-cup"}:
             phase = "knockout"
         elif source_key == "uefa-nations-league":
             phase = "league_phase"
@@ -46,7 +48,7 @@ def _record(
         regime = "standard" if eligible_regimes == ("regular",) else eligible_regimes[0]
     record = {
         "schema_version": "1.0.0",
-        "collector_version": "titan-corner-history/1.0.0",
+        "collector_version": builder.SOURCE_COLLECTOR_VERSION,
         "competition_key": source_key,
         "competition_regime": regime,
         "season_label": str(year),
@@ -64,6 +66,7 @@ def _record(
         "away_team": f"A{match_id}",
         "home_goals": 1,
         "away_goals": 0,
+        "raw_tail": [] if raw_tail is None else raw_tail,
         "home_corners": home_corners,
         "away_corners": away_corners,
         "total_corners": total,
@@ -72,7 +75,11 @@ def _record(
         "half_total_corners": None,
         "corner_data_status": status,
         "corner_period": period,
-        "corner_exclusion_reasons": [] if status == "complete" else [status],
+        "corner_exclusion_reasons": (
+            ([] if status == "complete" else [status])
+            if exclusion_reasons is None
+            else exclusion_reasons
+        ),
         "source_url": f"https://example.test/{match_id}",
         "source_collected_at": "2026-08-05T00:00:00Z",
         "source_response_sha256": "sha256:" + f"{match_id:064x}"[-64:],
@@ -178,7 +185,7 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                     league_keys=["not_a_league"],
                 )
 
-    def test_builds_sixteen_bound_csvs_and_excludes_unsafe_rows(self):
+    def test_builds_nineteen_bound_csvs_and_excludes_unsafe_rows(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = _source()
@@ -191,6 +198,15 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                     kickoff="2024-01-03 12:00",
                 )
             )
+            source["matches"].append(
+                _record(
+                    "finland-veikkausliiga",
+                    1000,
+                    status="conflicting",
+                    period="unverified",
+                    kickoff="2024-01-04 12:00",
+                )
+            )
             source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
             source_path = root / "corner_history.json"
             _write(source_path, source)
@@ -199,14 +215,14 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                 source_path, root / "dataset", as_of_date="2026-08-03"
             )
 
-            self.assertEqual(len(manifest["leagues"]), 16)
+            self.assertEqual(len(manifest["leagues"]), 19)
             self.assertEqual(
                 manifest["bundle_hash"], builder.calculate_manifest_hash(manifest)
             )
-            self.assertEqual(manifest["schema_version"], "2.1.0")
+            self.assertEqual(manifest["schema_version"], "2.2.0")
             self.assertEqual(
                 manifest["selection_policy"]["version"],
-                "regulation-corner-training-selection/2.1.0",
+                "regulation-corner-training-selection/2.2.0",
             )
             copied_source = root / "dataset" / manifest["source_file"]
             self.assertTrue(copied_source.is_file())
@@ -222,7 +238,7 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
             self.assertEqual(finland["rows"], 2)
             self.assertEqual(
                 finland["qa"]["excluded_reasons"],
-                {"extra_time_ambiguous": 1},
+                {"conflicting": 1, "extra_time_ambiguous": 1},
             )
             csv_path = root / "dataset" / finland["dataset_file"]
             with csv_path.open(encoding="utf-8", newline="") as handle:
@@ -257,6 +273,89 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
             source_path = root / "corner_history.json"
             _write(source_path, source)
             with self.assertRaisesRegex(builder.CornerDatasetError, "bundle_hash"):
+                builder.load_source(source_path)
+
+    def test_current_source_requires_the_row_level_replay_contract(self):
+        mutations = (
+            ("raw_tail", lambda row: row.pop("raw_tail"), "raw_tail"),
+            (
+                "collector_version",
+                lambda row: row.__setitem__(
+                    "collector_version", builder.LEGACY_SOURCE_COLLECTOR_VERSION
+                ),
+                "collector_version",
+            ),
+        )
+        for label, mutate, message in mutations:
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(label=label):
+                root = Path(temporary)
+                source = _source()
+                mutate(source["matches"][0])
+                source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+                source_path = root / "corner_history.json"
+                _write(source_path, source)
+                with self.assertRaisesRegex(builder.CornerDatasetError, message):
+                    builder.load_source(source_path)
+
+    def test_load_source_keeps_pre_efl_collector_artifacts_compatible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["collector_version"] = builder.LEGACY_SOURCE_COLLECTOR_VERSION
+            source["matches"] = [
+                row
+                for row in source["matches"]
+                if row["competition_key"] not in builder.V1_1_ONLY_COMPETITIONS
+            ]
+            for row in source["matches"]:
+                row["collector_version"] = builder.LEGACY_SOURCE_COLLECTOR_VERSION
+                row.pop("raw_tail")
+                row["schedule_fixture_sha256"] = builder.calculate_fixture_fingerprint(
+                    row
+                )
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            self.assertEqual(
+                builder.load_source(source_path)["collector_version"],
+                builder.LEGACY_SOURCE_COLLECTOR_VERSION,
+            )
+            manifest = builder.build_dataset(
+                source_path,
+                root / "legacy-dataset",
+                as_of_date="2026-08-03",
+            )
+            self.assertEqual(len(manifest["leagues"]), 16)
+            self.assertNotIn(
+                "england_league_cup",
+                {entry["league_key"] for entry in manifest["leagues"]},
+            )
+            self.assertNotIn(
+                "portugal_primeira_liga",
+                {entry["league_key"] for entry in manifest["leagues"]},
+            )
+            self.assertNotIn(
+                "netherlands_eerste_divisie",
+                {entry["league_key"] for entry in manifest["leagues"]},
+            )
+
+    def test_legacy_collector_artifact_cannot_claim_new_competitions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["collector_version"] = builder.LEGACY_SOURCE_COLLECTOR_VERSION
+            for row in source["matches"]:
+                row["collector_version"] = builder.LEGACY_SOURCE_COLLECTOR_VERSION
+                row.pop("raw_tail")
+                row["schedule_fixture_sha256"] = builder.calculate_fixture_fingerprint(
+                    row
+                )
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            with self.assertRaisesRegex(
+                builder.CornerDatasetError, "requires the replayable v1.1"
+            ):
                 builder.load_source(source_path)
 
     def test_complete_half_corner_tuple_must_reconcile(self):
@@ -336,6 +435,8 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
     def test_versioned_competition_regimes_are_allowed_only_in_their_league(self):
         additions = {
             "brazil-cup": [("national-knockout-cup", "knockout")],
+            "england-league-cup": [("national-knockout-cup", "knockout")],
+            "netherlands-eerste-divisie": [("regular", "regular")],
             "france-ligue-1": [("20-team", "regular")],
             "south-korea-k-league-1": [("covid-27-round", "regular")],
             "uefa-champions-league": [("36-team-league-phase", "league_phase")],
@@ -488,6 +589,144 @@ class CornerHistoryDatasetBuilderTests(unittest.TestCase):
                     "non_regulation_corner_period": 1,
                 },
             )
+
+    def test_efl_cup_trains_only_verified_regulation_time_corners(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["matches"].extend(
+                [
+                    _record(
+                        "england-league-cup",
+                        997,
+                        kickoff="2025-09-01 19:00",
+                        regime="national-knockout-cup",
+                        phase="knockout",
+                        status="extra_time_ambiguous",
+                        period="unverified",
+                        raw_tail=[";|;|;|90,0-0;;1,0-1;;2"],
+                        exclusion_reasons=[
+                            "schedule_indicates_extra_time_or_penalties"
+                        ],
+                    ),
+                    _record(
+                        "england-league-cup",
+                        998,
+                        kickoff="2025-09-02 19:00",
+                        regime="national-knockout-cup",
+                        phase="knockout",
+                        status="complete",
+                        period="unverified",
+                    ),
+                ]
+            )
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            manifest = builder.build_dataset(
+                source_path, root / "dataset", as_of_date="2026-08-03"
+            )
+            efl = next(
+                row
+                for row in manifest["leagues"]
+                if row["source_competition_key"] == "england-league-cup"
+            )
+            self.assertEqual(efl["rows"], 2)
+            self.assertEqual(efl["regimes"], {"national-knockout-cup": 2})
+            self.assertEqual(efl["phases"], {"knockout": 2})
+            self.assertEqual(
+                efl["qa"]["excluded_reasons"],
+                {
+                    "extra_time_ambiguous": 1,
+                    "non_regulation_corner_period": 1,
+                },
+            )
+
+    def test_efl_complete_row_cannot_hide_replayable_extra_time_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            efl = next(
+                row
+                for row in source["matches"]
+                if row["competition_key"] == "england-league-cup"
+            )
+            efl["raw_tail"] = [";|;|;|90,0-0;;1,0-1;;2"]
+            efl["schedule_fixture_sha256"] = builder.calculate_fixture_fingerprint(efl)
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            with self.assertRaisesRegex(
+                builder.CornerDatasetError,
+                "complete EFL Cup row conflicts with replayed extra-time",
+            ):
+                builder.build_dataset(
+                    source_path, root / "dataset", as_of_date="2026-08-03"
+                )
+
+    def test_efl_direct_penalty_tail_replays_as_regulation_time(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            efl = next(
+                row
+                for row in source["matches"]
+                if row["competition_key"] == "england-league-cup"
+            )
+            efl["raw_tail"] = [";|;|;|90,1-1;;;4-3;1"]
+            efl["schedule_fixture_sha256"] = builder.calculate_fixture_fingerprint(efl)
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            manifest = builder.build_dataset(
+                source_path,
+                root / "dataset",
+                as_of_date="2026-08-03",
+                league_keys=["england_league_cup"],
+            )
+            self.assertEqual(manifest["leagues"][0]["rows"], 2)
+
+    def test_efl_raw_tail_is_part_of_fixture_fingerprint(self):
+        record = _record("england-league-cup", 999)
+        original = record["schedule_fixture_sha256"]
+        record["raw_tail"] = [";|;|;|90,0-0;;1,0-1;;2"]
+        self.assertNotEqual(builder.calculate_fixture_fingerprint(record), original)
+
+    def test_efl_administrative_walkovers_fail_closed(self):
+        for match_id in (1927696, 2044807):
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(match_id=match_id),
+            ):
+                root = Path(temporary)
+                source = _source()
+                source["matches"].append(_record("england-league-cup", match_id))
+                source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+                source_path = root / "corner_history.json"
+                _write(source_path, source)
+                with self.assertRaisesRegex(
+                    builder.CornerDatasetError,
+                    rf"match {match_id}: immutable result exclusion",
+                ):
+                    builder.build_dataset(
+                        source_path, root / "dataset", as_of_date="2026-08-03"
+                    )
+
+    def test_eerste_divisie_non_regulation_result_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = _source()
+            source["matches"].append(_record("netherlands-eerste-divisie", 2871575))
+            source["bundle_hash"] = builder.calculate_source_bundle_hash(source)
+            source_path = root / "corner_history.json"
+            _write(source_path, source)
+            with self.assertRaisesRegex(
+                builder.CornerDatasetError,
+                r"match 2871575: immutable result exclusion",
+            ):
+                builder.build_dataset(
+                    source_path, root / "dataset", as_of_date="2026-08-03"
+                )
 
     def test_nations_corner_training_contains_only_league_phase(self):
         with tempfile.TemporaryDirectory() as temporary:

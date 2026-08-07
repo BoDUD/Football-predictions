@@ -22,11 +22,28 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+try:  # Imported from the repository root.
+    from scripts import history_importer, titan_corner_history_collector
+except ImportError:  # Invoked directly as scripts/corner_history_dataset_builder.py.
+    import history_importer  # type: ignore[no-redef]
+    import titan_corner_history_collector  # type: ignore[no-redef]
+
 ARTIFACT_TYPE = "soccer_corner_history_dataset_bundle"
-SCHEMA_VERSION = "2.1.0"
-BUILDER_VERSION = "corner-history-dataset-builder/2.1.0"
+SCHEMA_VERSION = "2.2.0"
+BUILDER_VERSION = "corner-history-dataset-builder/2.2.0"
 SOURCE_SCHEMA_VERSION = "1.0.0"
-SOURCE_COLLECTOR_VERSION = "titan-corner-history/1.0.0"
+LEGACY_SOURCE_COLLECTOR_VERSION = "titan-corner-history/1.0.0"
+SOURCE_COLLECTOR_VERSION = titan_corner_history_collector.COLLECTOR_VERSION
+SUPPORTED_SOURCE_COLLECTOR_VERSIONS = frozenset(
+    {LEGACY_SOURCE_COLLECTOR_VERSION, SOURCE_COLLECTOR_VERSION}
+)
+V1_1_ONLY_COMPETITIONS = frozenset(
+    {
+        "england-league-cup",
+        "netherlands-eerste-divisie",
+        "portugal-primeira-liga",
+    }
+)
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_COPY_FILENAME = "corner_history.source.json"
 
@@ -45,6 +62,20 @@ COMPETITIONS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "英超",
         ("Premier League", "EPL"),
     ),
+    "england-league-cup": (
+        "england_league_cup",
+        "英联杯",
+        ("EFL Cup", "League Cup", "Carabao Cup"),
+    ),
+    "netherlands-eerste-divisie": (
+        "netherlands_eerste_divisie",
+        "荷乙",
+        (
+            "Eerste Divisie",
+            "Keuken Kampioen Divisie",
+            "Netherlands Eerste Divisie",
+        ),
+    ),
     "france-ligue-1": ("france_ligue_1", "法甲", ("Ligue 1",)),
     "spain-la-liga": ("spain_la_liga", "西甲", ("La Liga",)),
     "germany-bundesliga": (
@@ -53,6 +84,11 @@ COMPETITIONS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         ("Bundesliga",),
     ),
     "italy-serie-a": ("italy_serie_a", "意甲", ("Serie A",)),
+    "portugal-primeira-liga": (
+        "portugal_primeira_liga",
+        "葡超",
+        ("Primeira Liga", "Liga Portugal"),
+    ),
     "south-korea-k-league-1": (
         "korea_k_league_1",
         "韩K联",
@@ -115,10 +151,16 @@ ELIGIBLE_PHASES_BY_COMPETITION: dict[str, tuple[str, ...]] = {
     "japan-j1": ("regular_season",),
     "usa-mls": ("regular_season",),
     "england-premier-league": ("regular_season",),
+    # The collector marks any response that exposes extra-time corner scope as
+    # unsafe. All admitted EFL Cup rows therefore retain regulation-time
+    # corners even though the competition itself is knockout-only.
+    "england-league-cup": ("knockout",),
+    "netherlands-eerste-divisie": ("regular_season",),
     "france-ligue-1": ("regular_season",),
     "spain-la-liga": ("regular_season",),
     "germany-bundesliga": ("regular_season",),
     "italy-serie-a": ("regular_season",),
+    "portugal-primeira-liga": ("regular_season",),
     "south-korea-k-league-1": (
         "regular_season",
         "championship_split",
@@ -148,10 +190,13 @@ ELIGIBLE_REGIMES_BY_COMPETITION: dict[str, tuple[str, ...]] = {
     "japan-j1": ("regular",),
     "usa-mls": ("regular",),
     "england-premier-league": ("regular",),
+    "england-league-cup": ("national-knockout-cup",),
+    "netherlands-eerste-divisie": ("regular",),
     "france-ligue-1": ("18-team", "20-team"),
     "spain-la-liga": ("regular",),
     "germany-bundesliga": ("regular",),
     "italy-serie-a": ("regular",),
+    "portugal-primeira-liga": ("regular",),
     "south-korea-k-league-1": ("33-plus-split", "covid-27-round"),
     "sweden-allsvenskan": ("regular",),
     "finland-veikkausliiga": ("regular",),
@@ -165,7 +210,7 @@ ELIGIBLE_REGIMES_BY_COMPETITION: dict[str, tuple[str, ...]] = {
 }
 
 SELECTION_POLICY = {
-    "version": "regulation-corner-training-selection/2.1.0",
+    "version": "regulation-corner-training-selection/2.2.0",
     "required_corner_data_status": "complete",
     "required_corner_period": "regulation_90",
     "eligible_regimes_by_competition": {
@@ -185,14 +230,49 @@ SELECTION_POLICY = {
             "cbf-divulga-tabela-basica-plano-geral-de-acoes-e-regulamento-"
             "especifico-da-copa-do-brasil-2026"
         ),
+        "england-league-cup": "https://www.efl.com/documents/efl-handbook.pdf",
         "uefa-nations-league": (
             "https://documents.uefa.com/r/Regulations-of-the-UEFA-Nations-"
             "League-2024/25/Article-18-Extra-time-and-penalty-shoot-outs-Online"
         ),
     },
+    "immutable_result_exclusion_policy": {
+        "version": history_importer.IMMUTABLE_RESULT_EXCLUSION_POLICY_VERSION,
+        "excluded_matches": {
+            "england-league-cup": {
+                match_id: dict(evidence)
+                for match_id, evidence in sorted(
+                    history_importer.IMMUTABLE_RESULT_EXCLUSIONS[
+                        "england_league_cup"
+                    ].items()
+                )
+            },
+            "netherlands-eerste-divisie": {
+                match_id: dict(evidence)
+                for match_id, evidence in sorted(
+                    history_importer.IMMUTABLE_RESULT_EXCLUSIONS[
+                        "netherlands_eerste_divisie"
+                    ].items()
+                )
+            },
+            "uefa-nations-league": {
+                match_id: dict(evidence)
+                for match_id, evidence in sorted(
+                    history_importer.IMMUTABLE_RESULT_EXCLUSIONS[
+                        "uefa_nations_league"
+                    ].items()
+                )
+            },
+        },
+        "rule": (
+            "administrative, awarded-unplayed, or non-regulation terminated "
+            "results cannot enter strict FT90 training"
+        ),
+    },
     "phase_cohort_policy": (
-        "exclude_entire phase cohorts that can include extra time; never select "
-        "individual rows by observed result"
+        "exclude extra-time-capable phases unless a competition-specific rule "
+        "admits the phase and the collector proves regulation_90; never select "
+        "individual rows by a favorable corner result"
     ),
     "extra_time_ambiguous_excluded": True,
     "conflicting_excluded": True,
@@ -201,24 +281,10 @@ SELECTION_POLICY = {
     "half_corner_missing_value_policy": "preserve_null_never_zero_fill",
 }
 
-SCHEDULE_IDENTITY_FIELDS = (
-    "competition_key",
-    "competition_regime",
-    "season_label",
-    "season_start_year",
-    "phase",
-    "round",
-    "kickoff",
-    "kickoff_utc",
-    "kickoff_epoch",
-    "source_timezone",
-    "home_team_id",
-    "away_team_id",
-    "home_team",
-    "away_team",
-    "home_goals",
-    "away_goals",
+LEGACY_SCHEDULE_IDENTITY_FIELDS = (
+    titan_corner_history_collector.LEGACY_CHECKPOINT_IDENTITY_FIELDS
 )
+SCHEDULE_IDENTITY_FIELDS = titan_corner_history_collector.CHECKPOINT_IDENTITY_FIELDS
 
 
 class CornerDatasetError(ValueError):
@@ -451,7 +517,7 @@ def _normalized_phase(raw: Mapping[str, Any]) -> str:
         if explicit == "league_phase" or "联赛阶段" in phase_and_round:
             return "league_phase"
         return "knockout"
-    elif competition == "brazil-cup":
+    elif competition in {"brazil-cup", "england-league-cup"}:
         return "knockout"
     elif competition == "uefa-nations-league":
         if any(
@@ -484,9 +550,90 @@ def _normalized_phase(raw: Mapping[str, Any]) -> str:
 
 
 def calculate_fixture_fingerprint(raw: Mapping[str, Any]) -> str:
+    collector_version = str(raw.get("collector_version") or "").strip()
+    identity_fields = (
+        LEGACY_SCHEDULE_IDENTITY_FIELDS
+        if collector_version == LEGACY_SOURCE_COLLECTOR_VERSION
+        else SCHEDULE_IDENTITY_FIELDS
+    )
+    if collector_version == SOURCE_COLLECTOR_VERSION and not isinstance(
+        raw.get("raw_tail"), list
+    ):
+        raise CornerDatasetError(
+            "current collector fixture raw_tail must be a replayable JSON array"
+        )
     payload = {"match_id": str(raw.get("match_id") or "")}
-    payload.update({field: raw.get(field) for field in SCHEDULE_IDENTITY_FIELDS})
+    payload.update({field: raw.get(field) for field in identity_fields})
     return _canonical_hash(payload)
+
+
+def _immutable_result_exclusion(
+    competition_key: str, match_id: str
+) -> Mapping[str, str] | None:
+    league_key = competition_key.replace("-", "_")
+    return history_importer.IMMUTABLE_RESULT_EXCLUSIONS.get(league_key, {}).get(
+        match_id
+    )
+
+
+def _validate_current_source_row_contract(
+    raw: Mapping[str, Any], *, index: int
+) -> None:
+    if raw.get("collector_version") != SOURCE_COLLECTOR_VERSION:
+        raise CornerDatasetError(
+            f"matches[{index}] collector_version does not match the current bundle"
+        )
+    if not isinstance(raw.get("raw_tail"), list):
+        raise CornerDatasetError(
+            f"matches[{index}] raw_tail must be a replayable JSON array"
+        )
+
+
+def _validate_legacy_source_row_contract(raw: Mapping[str, Any], *, index: int) -> None:
+    if raw.get("collector_version") != LEGACY_SOURCE_COLLECTOR_VERSION:
+        raise CornerDatasetError(
+            f"matches[{index}] collector_version does not match the legacy bundle"
+        )
+    competition_key = str(raw.get("competition_key") or "").strip()
+    if competition_key in V1_1_ONLY_COMPETITIONS:
+        raise CornerDatasetError(
+            f"matches[{index}] {competition_key} requires the replayable v1.1 "
+            "collector contract"
+        )
+
+
+def _validate_efl_extra_time_replay(
+    raw: Mapping[str, Any], *, match_id: str, status: str, period: str
+) -> None:
+    if str(raw.get("competition_key") or "").strip() != "england-league-cup":
+        return
+    extra_time = titan_corner_history_collector._fixture_extra_time(raw)
+    reasons = raw.get("corner_exclusion_reasons")
+    if reasons is None:
+        reasons = []
+    if not isinstance(reasons, list) or any(
+        not isinstance(reason, str) for reason in reasons
+    ):
+        raise CornerDatasetError(
+            f"match {match_id}: corner_exclusion_reasons must be a string array"
+        )
+    scheduled_reason = "schedule_indicates_extra_time_or_penalties" in reasons
+    if status == "complete" and extra_time:
+        raise CornerDatasetError(
+            f"match {match_id}: complete EFL Cup row conflicts with replayed "
+            "extra-time evidence"
+        )
+    if status == "extra_time_ambiguous":
+        if not extra_time or not scheduled_reason or period != "unverified":
+            raise CornerDatasetError(
+                f"match {match_id}: EFL Cup extra-time classification cannot be "
+                "replayed from raw_tail"
+            )
+    elif scheduled_reason:
+        raise CornerDatasetError(
+            f"match {match_id}: EFL Cup schedule exclusion reason conflicts with "
+            "corner_data_status"
+        )
 
 
 def _canonical_utc(value: datetime) -> str:
@@ -505,12 +652,21 @@ def load_source(path: str | Path) -> dict[str, Any]:
         raise CornerDatasetError("corner history must contain a JSON object")
     if source.get("schema_version") != SOURCE_SCHEMA_VERSION:
         raise CornerDatasetError("corner history schema_version is unsupported")
-    if source.get("collector_version") != SOURCE_COLLECTOR_VERSION:
+    if source.get("collector_version") not in SUPPORTED_SOURCE_COLLECTOR_VERSIONS:
         raise CornerDatasetError("corner history collector_version is unsupported")
     if source.get("bundle_hash") != calculate_source_bundle_hash(source):
         raise CornerDatasetError("corner history bundle_hash does not match contents")
-    if not isinstance(source.get("matches"), list):
+    matches = source.get("matches")
+    if not isinstance(matches, list):
         raise CornerDatasetError("corner history matches must be a list")
+    source_version = str(source["collector_version"])
+    for index, raw in enumerate(matches):
+        if not isinstance(raw, dict):
+            continue
+        if source_version == SOURCE_COLLECTOR_VERSION:
+            _validate_current_source_row_contract(raw, index=index)
+        else:
+            _validate_legacy_source_row_contract(raw, index=index)
     return source
 
 
@@ -581,17 +737,33 @@ def build_dataset(
     full-audited league.  The source bundle hash and copied source remain the
     complete collector artifact, while row-level validation and CSV output are
     limited to the selected competition set.  Omitting both filters retains
-    the complete sixteen-competition validation/build behavior.
+    the complete nineteen-competition validation/build behavior for current
+    v1.1 source artifacts.  A readable legacy v1.0 artifact rebuilds the
+    supported pre-v1.1 competitions that are actually present in that bundle.
     """
 
     audit_date = _as_of(as_of_date)
-    selected_competitions = _selected_competitions(
-        league_keys=league_keys,
-        competition_keys=competition_keys,
-    )
-    selected_set = set(selected_competitions)
     source_file = Path(source_path).resolve()
     source = load_source(source_file)
+    if (
+        league_keys is None
+        and competition_keys is None
+        and source.get("collector_version") == LEGACY_SOURCE_COLLECTOR_VERSION
+    ):
+        present_competitions = {
+            str(raw.get("competition_key") or "").strip()
+            for raw in source["matches"]
+            if isinstance(raw, dict)
+        }
+        selected_competitions = tuple(
+            key for key in COMPETITIONS if key in present_competitions
+        )
+    else:
+        selected_competitions = _selected_competitions(
+            league_keys=league_keys,
+            competition_keys=competition_keys,
+        )
+    selected_set = set(selected_competitions)
     destination = Path(output_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
     by_league: dict[str, list[dict[str, Any]]] = {
@@ -621,6 +793,13 @@ def build_dataset(
             raise CornerDatasetError(
                 f"match {match_id}: unsupported competition_key {competition_key!r}"
             )
+        immutable_exclusion = _immutable_result_exclusion(competition_key, match_id)
+        if immutable_exclusion is not None:
+            raise CornerDatasetError(
+                f"match {match_id}: immutable result exclusion cannot enter strict "
+                f"FT90 corner training ({immutable_exclusion['exclusion_type']}; "
+                f"{immutable_exclusion['reason']}; {immutable_exclusion['source']})"
+            )
         if competition_key not in selected_set:
             continue
         home = str(raw.get("home_team") or "").strip()
@@ -639,8 +818,24 @@ def build_dataset(
             raise CornerDatasetError(f"match {match_id}: duplicate dated fixture")
         seen_fixtures.add(identity)
 
+        fixture_fingerprint = raw.get("schedule_fixture_sha256")
+        if not isinstance(fixture_fingerprint, str) or not HASH_RE.fullmatch(
+            fixture_fingerprint
+        ):
+            raise CornerDatasetError(
+                f"match {match_id}: invalid schedule_fixture_sha256"
+            )
+        if fixture_fingerprint != calculate_fixture_fingerprint(raw):
+            raise CornerDatasetError(
+                f"match {match_id}: schedule_fixture_sha256 does not match fixture"
+            )
+
         status = str(raw.get("corner_data_status") or "").strip()
         period = str(raw.get("corner_period") or "").strip()
+        if source.get("collector_version") == SOURCE_COLLECTOR_VERSION:
+            _validate_efl_extra_time_replay(
+                raw, match_id=match_id, status=status, period=period
+            )
         block = qa[competition_key]
         block["source_rows"] += 1
         statuses = block["status_counts"]
@@ -682,17 +877,6 @@ def build_dataset(
         if not isinstance(source_hash, str) or not HASH_RE.fullmatch(source_hash):
             raise CornerDatasetError(
                 f"match {match_id}: invalid source_response_sha256"
-            )
-        fixture_fingerprint = raw.get("schedule_fixture_sha256")
-        if not isinstance(fixture_fingerprint, str) or not HASH_RE.fullmatch(
-            fixture_fingerprint
-        ):
-            raise CornerDatasetError(
-                f"match {match_id}: invalid schedule_fixture_sha256"
-            )
-        if fixture_fingerprint != calculate_fixture_fingerprint(raw):
-            raise CornerDatasetError(
-                f"match {match_id}: schedule_fixture_sha256 does not match fixture"
             )
         source_url = str(raw.get("source_url") or "").strip()
         if not source_url.startswith("https://"):

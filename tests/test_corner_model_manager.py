@@ -179,6 +179,90 @@ class CornerModelManagerTests(unittest.TestCase):
             expected_config=entry["evaluation_config"],
         )
 
+    def test_integrity_verification_is_bounded_and_checks_registered_files(self):
+        with (
+            mock.patch.object(
+                corner_model, "fit_model", side_effect=AssertionError("must not refit")
+            ),
+            mock.patch.object(
+                corner_model,
+                "backtest_model",
+                side_effect=AssertionError("must not replay"),
+            ),
+        ):
+            verification = corner_model_manager.verify_registry_integrity(
+                self.model_dir
+            )
+        self.assertEqual(verification["league_count"], 2)
+        self.assertEqual(
+            verification["manager_version"], corner_model_manager.MANAGER_VERSION
+        )
+        self.assertIn("without_deterministic_refit", verification["validation_scope"])
+
+        registry = read_json(self.registry_path())
+        dataset_path = self.model_dir / self.entry(registry)["dataset_file"]
+        dataset_path.write_bytes(dataset_path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(
+            corner_model_manager.CornerModelManagerError,
+            "registered dataset_file hash does not match",
+        ):
+            corner_model_manager.verify_registry_integrity(self.model_dir)
+
+    def test_integrity_verification_recomputes_manifest_and_source_bundle_hashes(self):
+        for target in ("manifest", "source"):
+            with self.subTest(target=target):
+                shutil.rmtree(self.model_dir)
+                shutil.copytree(self.seed_models, self.model_dir)
+                registry = read_json(self.registry_path())
+                entry = self.entry(registry)
+                if target == "manifest":
+                    path = self.model_dir / entry["dataset_manifest_file"]
+                    artifact = read_json(path)
+                    artifact["as_of_date"] = "2026-01-01"
+                    write_json(path, artifact)
+                    for registered_entry in registry["leagues"]:
+                        if registered_entry["dataset_manifest_file"] == path.name:
+                            registered_entry["dataset_manifest_file_sha256"] = (
+                                file_hash(path)
+                            )
+                    expected_error = "manifest bundle_hash"
+                else:
+                    path = self.model_dir / entry["source_bundle_file"]
+                    artifact = read_json(path)
+                    artifact["generated_at"] = "2026-01-01T00:00:00Z"
+                    write_json(path, artifact)
+                    manifest_path = self.model_dir / entry["dataset_manifest_file"]
+                    manifest = read_json(manifest_path)
+                    manifest["source_file_sha256"] = file_hash(path)
+                    manifest["bundle_hash"] = (
+                        corner_history_dataset_builder.calculate_manifest_hash(manifest)
+                    )
+                    write_json(manifest_path, manifest)
+                    for registered_entry in registry["leagues"]:
+                        if registered_entry["source_bundle_file"] == path.name:
+                            registered_entry["source_file_sha256"] = file_hash(path)
+                        if (
+                            registered_entry["dataset_manifest_file"]
+                            == manifest_path.name
+                        ):
+                            registered_entry["dataset_manifest_file_sha256"] = (
+                                file_hash(manifest_path)
+                            )
+                    expected_error = "source bundle is invalid"
+                for registered_entry in registry["leagues"]:
+                    registered_entry["lineage_hash"] = (
+                        corner_model_manager.calculate_lineage_hash(registered_entry)
+                    )
+                registry["registry_hash"] = (
+                    corner_model_manager.calculate_registry_hash(registry)
+                )
+                write_json(self.registry_path(), registry)
+
+                with self.assertRaisesRegex(
+                    corner_model_manager.CornerModelManagerError, expected_error
+                ):
+                    corner_model_manager.verify_registry_integrity(self.model_dir)
+
     def test_daily_loader_replays_only_selected_league_and_caches_same_bytes(self):
         original = corner_history_dataset_builder.build_dataset
         with mock.patch.object(

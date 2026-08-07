@@ -49,7 +49,7 @@ except ImportError:  # Direct invocation as scripts/htft_holdout_evaluator.py.
 
 ARTIFACT_TYPE = "soccer_htft_fixed_season_evaluation"
 SCHEMA_VERSION = "1.5.0"
-EVALUATOR_VERSION = "htft-fixed-season-holdout/1.5.0"
+EVALUATOR_VERSION = "htft-fixed-season-holdout/1.6.0"
 RESEARCH_MARKET_POLICY = "research_only_untimestamped_opening_snapshot"
 OPTIONAL_CONTEXT_COLUMNS = ("season_status", "format_version", "phase_group")
 LEGACY_SEASON_STATUS = "unlabeled_legacy"
@@ -57,11 +57,12 @@ LEGACY_FORMAT_VERSION = "competition_regime_legacy"
 LEGACY_PHASE_GROUP = "unspecified"
 PARTIAL_SEASON_STATUS_PREFIX = "partial_as_of_"
 COMPETITION_REGIME_POLICY = {
-    "version": "competition-specific-production-v2",
+    "version": "competition-specific-production-v3",
     "source_column": "competition_regime",
     "default_allowed_regimes": ["regular"],
     "allowed_regimes_by_league": {
         "brazil_cup": ["national_knockout_cup"],
+        "england_league_cup": ["national_knockout_cup"],
         "uefa_nations_league": ["national_team_league_and_knockout"],
     },
     "excluded_regimes_usage": "counted_for_drift_audit_only_not_fit_or_scored",

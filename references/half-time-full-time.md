@@ -141,9 +141,10 @@ Concise mode includes the formal primary or explicit no-primary state, the one R
 
 ## Supported-competition boundary
 
-The expanded history targets separate component models for sixteen competitions: Brazil
+The expanded history targets separate component models for nineteen competitions: Brazil
 Serie A, Brazil Cup, Japan J1, Norway Eliteserien, MLS, the five major European leagues,
-Korean K League 1, Allsvenskan, Finland Veikkausliiga, UEFA Champions League, UEFA Nations
+Portugal Primeira Liga, the England League Cup, Korean K League 1, Allsvenskan,
+Netherlands Eerste Divisie, Finland Veikkausliiga, UEFA Champions League, UEFA Nations
 League, and AFC Champions League. Read
 the exact match counts from the current validated manifest and deployment status from the
 current hash-bound registry. Do not hard-code a `candidate`/`shadow` list. These are
@@ -152,10 +153,15 @@ every registered model remains `formal_htft_eligible=false`.
 
 The importer retains all collected Titan formats and phases for audit and evaluation slices.
 The registered manager uses the frozen competition-specific regime allowlist: ordinary
-leagues use `regular`, Brazil Cup uses `national_knockout_cup`, and UEFA Nations League uses
+leagues use `regular`, Brazil Cup and the England League Cup use
+`national_knockout_cup`, and UEFA Nations League uses
 `national_team_league_and_knockout`. Other formats are excluded from registered fitting and
 fixed-season metrics, with their counts and regime warning retained to surface drift. This
 is not a separate production model per phase.
+
+Netherlands Eerste Divisie is an ordinary `regular` model scale, but Titan match `2871575`
+is excluded before label construction because it ended permanently in the 88th minute. The
+KNVB-set 2-1 result is not an observed FT90 result and must not create a half/full-time target.
 
 Rows marked `season_status=partial_as_of_*`, including unfinished 2026 seasons, are
 right-censored snapshots. They may be shown

@@ -24,6 +24,11 @@ from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:  # Imported from the repository root.
+    from scripts import history_importer
+except ImportError:  # Invoked directly as scripts/titan_corner_history_collector.py.
+    import history_importer  # type: ignore[no-redef]
+
 BASE = "https://m.titan007.com"
 ENDPOINT = BASE + "/Common/CommonInterface.ashx?type=1&isall=0&scheid={match_id}&lang=0"
 HEADER_BASE = "https://livestatic.titan007.com/phone/txt/analysisheader/cn"
@@ -37,12 +42,13 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36"
 )
 SCHEMA_VERSION = "1.0.0"
-COLLECTOR_VERSION = "titan-corner-history/1.0.0"
+COLLECTOR_VERSION = "titan-corner-history/1.1.0"
+LEGACY_COLLECTOR_VERSION = "titan-corner-history/1.0.0"
 SCHEDULE_NORMALIZER_VERSION = "titan-schedule-snapshot-normalizer/1.0.0"
 SOURCE_TIMEZONE = "Asia/Shanghai"
 SOURCE_TIMEZONE_OFFSET = timezone(timedelta(hours=8))
 RETRYABLE_HTTP = {408, 425, 429, 442, 500, 502, 503, 504}
-CHECKPOINT_IDENTITY_FIELDS = (
+LEGACY_CHECKPOINT_IDENTITY_FIELDS = (
     "competition_key",
     "competition_regime",
     "season_label",
@@ -60,10 +66,15 @@ CHECKPOINT_IDENTITY_FIELDS = (
     "home_goals",
     "away_goals",
 )
+CHECKPOINT_IDENTITY_FIELDS = (*LEGACY_CHECKPOINT_IDENTITY_FIELDS, "raw_tail")
 
 
 class CornerCollectionError(ValueError):
     """Raised when a schedule or a fetched corner response is unsafe to use."""
+
+
+class TransientCornerCollectionError(CornerCollectionError):
+    """Raised when no deterministic response bytes exist yet for QA."""
 
 
 def _utc_now() -> str:
@@ -99,10 +110,22 @@ def normalize_competition_regime(fixture: Mapping[str, Any]) -> str:
     return "regular" if regime == "standard" else regime
 
 
-def schedule_fixture_sha256(fixture: Mapping[str, Any]) -> str:
+def _schedule_fixture_sha256(
+    fixture: Mapping[str, Any], identity_fields: Sequence[str]
+) -> str:
     payload = {"match_id": str(fixture.get("match_id") or "")}
-    payload.update({field: fixture.get(field) for field in CHECKPOINT_IDENTITY_FIELDS})
+    payload.update({field: fixture.get(field) for field in identity_fields})
     return _hash_bytes(_canonical_json(payload).encode("utf-8"))
+
+
+def schedule_fixture_sha256(fixture: Mapping[str, Any]) -> str:
+    return _schedule_fixture_sha256(fixture, CHECKPOINT_IDENTITY_FIELDS)
+
+
+def legacy_schedule_fixture_sha256(fixture: Mapping[str, Any]) -> str:
+    """Reproduce the v1.0 fixture identity for read-only checkpoint migration."""
+
+    return _schedule_fixture_sha256(fixture, LEGACY_CHECKPOINT_IDENTITY_FIELDS)
 
 
 def _fixture_binding(fixture: Mapping[str, Any]) -> dict[str, Any]:
@@ -111,6 +134,18 @@ def _fixture_binding(fixture: Mapping[str, Any]) -> dict[str, Any]:
     binding = {field: fixture.get(field) for field in CHECKPOINT_IDENTITY_FIELDS}
     binding["schedule_fixture_sha256"] = schedule_fixture_sha256(fixture)
     return binding
+
+
+def _immutable_result_exclusion(
+    fixture: Mapping[str, Any],
+) -> Mapping[str, str] | None:
+    competition = (
+        str(fixture.get("competition_key") or "").strip().casefold().replace("-", "_")
+    )
+    match_id = str(fixture.get("match_id") or "").strip()
+    return history_importer.IMMUTABLE_RESULT_EXCLUSIONS.get(competition, {}).get(
+        match_id
+    )
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -196,6 +231,10 @@ def _normalized_schedule_payload(
         seen_match_ids.add(match_id)
         row = dict(raw)
         row_source = f"{source} match {match_id}"
+        if not isinstance(row.get("raw_tail"), list):
+            raise CornerCollectionError(
+                f"{row_source} raw_tail must be a replayable JSON array"
+            )
         local = _schedule_local_datetime(row.get("kickoff"), row_source)
         expected_epoch = int(local.timestamp())
         expected_utc = (
@@ -401,6 +440,18 @@ def load_schedule_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
             if not match_id.isdigit():
                 raise CornerCollectionError(
                     f"{path} matches[{index}] has invalid match_id"
+                )
+            if not isinstance(raw.get("raw_tail"), list):
+                raise CornerCollectionError(
+                    f"{path} match {match_id} raw_tail must be a replayable JSON array"
+                )
+            immutable_exclusion = _immutable_result_exclusion(raw)
+            if immutable_exclusion is not None:
+                raise CornerCollectionError(
+                    f"{path} match {match_id} is an immutable result exclusion and "
+                    f"cannot enter strict FT90 corner collection "
+                    f"({immutable_exclusion['exclusion_type']}; "
+                    f"{immutable_exclusion['reason']}; {immutable_exclusion['source']})"
                 )
             required = (
                 "competition_key",
@@ -644,9 +695,40 @@ def header_url(match_id: str) -> str:
 def _fixture_extra_time(fixture: Mapping[str, Any]) -> bool:
     """Titan cup rows retain regulation/aggregate/penalty detail in raw_tail."""
     text = _canonical_json(fixture.get("raw_tail", []))
+    lowered = text.lower()
+    competition = str(fixture.get("competition_key") or "").strip().casefold()
+    if competition in {"england-league-cup", "england_league_cup"}:
+        # EFL Cup rounds through the quarter-final go directly to penalties.
+        # Titan's ``90,...;;;penalties`` tail therefore proves a shoot-out but
+        # not extra time.  An actual extra-time segment is separated by the
+        # ``;;1,`` marker (for example ``90,0-0;;1,0-1``).  Keep explicit
+        # extra-time text as a second source-safe signal, but never infer 120
+        # minutes merely from a penalty marker.
+        return ";;1," in text or any(
+            token in lowered for token in ("extratime", "extra_time", "加时")
+        )
     return any(
-        token in text.lower() for token in ("extra", "penalty", "加时", "点球")
+        token in lowered for token in ("extra", "penalty", "加时", "点球")
     ) or bool(re.search(r"\b90,\d+\s*-\s*\d+", text))
+
+
+def _checkpoint_requires_policy_refresh(
+    record: Mapping[str, Any], fixture: Mapping[str, Any]
+) -> bool:
+    """Refetch only rows whose saved extra-time classification is now stale."""
+
+    if str(fixture.get("competition_key") or "").strip().casefold() not in {
+        "england-league-cup",
+        "england_league_cup",
+    }:
+        return False
+    expected_extra_time = _fixture_extra_time(fixture)
+    saved_extra_time = str(
+        record.get("corner_data_status") or ""
+    ) == "extra_time_ambiguous" and "schedule_indicates_extra_time_or_penalties" in (
+        record.get("corner_exclusion_reasons") or []
+    )
+    return saved_extra_time != expected_extra_time
 
 
 def parse_analysis_header(
@@ -779,7 +861,13 @@ def parse_handicap_result(
     match_id = str(fixture["match_id"])
     if str(sche.get("ScheduleID") or "") != match_id:
         raise CornerCollectionError("handicap fallback match_id does not match fixture")
-    if int(sche.get("MatchState", 0)) != -1:
+    try:
+        match_state = int(sche.get("MatchState", 0))
+    except (TypeError, ValueError) as exc:
+        raise CornerCollectionError(
+            "handicap fallback MatchState is not an integer"
+        ) from exc
+    if match_state != -1:
         raise CornerCollectionError("handicap fallback is not in the finished state")
     for source_key, fixture_key in (
         ("HomeTeamID", "home_team_id"),
@@ -853,6 +941,73 @@ class StartRateLimiter:
             time.sleep(delay)
 
 
+def _fallback_conflict_record(
+    fixture: Mapping[str, Any],
+    *,
+    analysis_raw: bytes,
+    analysis_error: CornerCollectionError | None,
+    fallback_raw: bytes,
+    fallback_error: CornerCollectionError,
+    collected_at: str,
+) -> dict[str, Any]:
+    """Freeze a deterministic header/fallback disagreement as terminal QA."""
+
+    match_id = str(fixture["match_id"])
+    analysis_error_text = (
+        f"{type(analysis_error).__name__}: {analysis_error}"
+        if analysis_error is not None
+        else None
+    )
+    fallback_error_text = f"{type(fallback_error).__name__}: {fallback_error}"
+    fallback_url = HANDICAP_ENDPOINT.format(match_id=match_id)
+    fallback_hash = _hash_bytes(fallback_raw)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "collector_version": COLLECTOR_VERSION,
+        "match_id": match_id,
+        **_fixture_binding(fixture),
+        "competition_key": fixture.get("competition_key"),
+        "competition_name": fixture.get("competition_name"),
+        "competition_id": fixture.get("competition_id"),
+        "season_label": fixture.get("season_label"),
+        "season_start_year": fixture.get("season_start_year"),
+        "competition_regime": fixture.get("competition_regime"),
+        "phase": fixture.get("phase"),
+        "round": fixture.get("round"),
+        "kickoff": fixture.get("kickoff"),
+        "home_team_id": fixture.get("home_team_id"),
+        "away_team_id": fixture.get("away_team_id"),
+        "home_team": fixture.get("home_team"),
+        "away_team": fixture.get("away_team"),
+        "home_goals": fixture.get("home_goals"),
+        "away_goals": fixture.get("away_goals"),
+        "half_home_goals": fixture.get("half_home_goals"),
+        "half_away_goals": fixture.get("half_away_goals"),
+        "home_corners": None,
+        "away_corners": None,
+        "total_corners": None,
+        "half_home_corners": None,
+        "half_away_corners": None,
+        "half_total_corners": None,
+        "corner_period": "unverified",
+        "corner_data_status": "conflicting",
+        "corner_exclusion_reasons": [
+            f"deterministic_fallback_source_conflict: {fallback_error_text}"
+        ],
+        "corner_odds": [],
+        "source_url": fallback_url,
+        "source_collected_at": collected_at,
+        "source_response_sha256": fallback_hash,
+        "source_fallback": "HandicapDataInterface.Sche",
+        "analysis_header_source_url": header_url(match_id),
+        "analysis_header_response_sha256": _hash_bytes(analysis_raw),
+        "analysis_header_parse_error": analysis_error_text,
+        "fallback_source_url": fallback_url,
+        "fallback_response_sha256": fallback_hash,
+        "fallback_parse_error": fallback_error_text,
+    }
+
+
 def fetch_fixture(
     fixture: Mapping[str, Any],
     limiter: StartRateLimiter,
@@ -875,7 +1030,9 @@ def fetch_fixture(
             with urlopen(Request(url, headers=headers), timeout=45) as response:
                 raw = response.read()
             if not raw:
-                raise CornerCollectionError("Titan returned an empty response")
+                raise TransientCornerCollectionError(
+                    "Titan returned an empty analysis-header response"
+                )
             analysis_error: CornerCollectionError | None = None
             try:
                 parsed = parse_analysis_header(fixture, raw, _utc_now())
@@ -894,7 +1051,24 @@ def fetch_fixture(
                 Request(fallback_url, headers=headers), timeout=45
             ) as response:
                 fallback_raw = response.read()
-            fallback = parse_handicap_result(fixture, fallback_raw, _utc_now())
+            if not fallback_raw:
+                raise TransientCornerCollectionError(
+                    "Titan returned an empty handicap-fallback response"
+                )
+            fallback_collected_at = _utc_now()
+            try:
+                fallback = parse_handicap_result(
+                    fixture, fallback_raw, fallback_collected_at
+                )
+            except CornerCollectionError as error:
+                return _fallback_conflict_record(
+                    fixture,
+                    analysis_raw=raw,
+                    analysis_error=analysis_error,
+                    fallback_raw=fallback_raw,
+                    fallback_error=error,
+                    collected_at=fallback_collected_at,
+                )
             fallback["analysis_header_source_url"] = url
             fallback["analysis_header_response_sha256"] = _hash_bytes(raw)
             fallback["analysis_header_parse_error"] = (
@@ -907,7 +1081,12 @@ def fetch_fixture(
             last_error = error
             if error.code not in RETRYABLE_HTTP:
                 break
-        except (URLError, TimeoutError, OSError, CornerCollectionError) as error:
+        except (
+            URLError,
+            TimeoutError,
+            OSError,
+            TransientCornerCollectionError,
+        ) as error:
             last_error = error
         if attempt < attempts:
             time.sleep(min(45.0, 1.5 * (2 ** (attempt - 1))) + random.uniform(0.2, 1.0))
@@ -976,25 +1155,87 @@ def checkpoint_matches_fixture(
         return False
     if record.get("schedule_fixture_sha256") != schedule_fixture_sha256(fixture):
         return False
-    for field in CHECKPOINT_IDENTITY_FIELDS:
+    return _checkpoint_identity_matches(record, fixture, CHECKPOINT_IDENTITY_FIELDS)
+
+
+def _checkpoint_identity_matches(
+    record: Mapping[str, Any],
+    fixture: Mapping[str, Any],
+    identity_fields: Sequence[str],
+    *,
+    allow_legacy_regular: bool = False,
+) -> bool:
+    numeric_fields = {
+        "season_start_year",
+        "home_team_id",
+        "away_team_id",
+        "home_goals",
+        "away_goals",
+    }
+    for field in identity_fields:
         expected = fixture.get(field)
         actual = record.get(field)
-        if field in {
-            "season_start_year",
-            "home_team_id",
-            "away_team_id",
-            "home_goals",
-            "away_goals",
-        }:
+        if field == "competition_regime" and allow_legacy_regular:
+            actual_regime = str(actual or "").strip()
+            if actual_regime == "standard":
+                actual_regime = "regular"
+            if actual_regime != str(expected or "").strip():
+                return False
+        elif field in numeric_fields:
             if expected is None or actual is None:
                 if expected is not actual:
                     return False
                 continue
             if str(actual) != str(expected):
                 return False
+        elif field == "raw_tail":
+            if _canonical_json(actual) != _canonical_json(expected):
+                return False
         elif str(actual or "").strip() != str(expected or "").strip():
             return False
     return True
+
+
+def _checkpoint_source_shape_is_valid(
+    record: Mapping[str, Any], fixture: Mapping[str, Any]
+) -> bool:
+    status = str(record.get("corner_data_status") or "")
+    if status not in {
+        "complete",
+        "missing",
+        "conflicting",
+        "extra_time_ambiguous",
+        "fetch_error",
+    }:
+        return False
+    if status != "fetch_error":
+        source_hash = record.get("source_response_sha256")
+        if not isinstance(source_hash, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", source_hash
+        ):
+            return False
+    source_url = str(record.get("source_url") or "")
+    return source_url in {
+        header_url(str(fixture["match_id"])),
+        HANDICAP_ENDPOINT.format(match_id=str(fixture["match_id"])),
+    }
+
+
+def _efl_saved_extra_time_classification(record: Mapping[str, Any]) -> bool:
+    return str(record.get("corner_data_status") or "") == (
+        "extra_time_ambiguous"
+    ) and "schedule_indicates_extra_time_or_penalties" in (
+        record.get("corner_exclusion_reasons") or []
+    )
+
+
+def _legacy_efl_extra_time_classification_matches(
+    record: Mapping[str, Any], fixture: Mapping[str, Any]
+) -> bool:
+    competition = str(fixture.get("competition_key") or "").strip().casefold()
+    return competition not in {"england-league-cup", "england_league_cup"} or (
+        _efl_saved_extra_time_classification(record) == _fixture_extra_time(fixture)
+    )
 
 
 def upgrade_legacy_checkpoint_record(
@@ -1010,8 +1251,33 @@ def upgrade_legacy_checkpoint_record(
     """
 
     if checkpoint_matches_fixture(record, fixture):
-        return dict(record)
+        upgraded = dict(record)
+        upgraded["collector_version"] = COLLECTOR_VERSION
+        return upgraded
+    if (
+        "raw_tail" not in record
+        and record.get("schema_version") == SCHEMA_VERSION
+        and record.get("collector_version")
+        in {LEGACY_COLLECTOR_VERSION, COLLECTOR_VERSION}
+        and str(record.get("match_id") or "") == str(fixture.get("match_id") or "")
+        and record.get("schedule_fixture_sha256")
+        == legacy_schedule_fixture_sha256(fixture)
+        and _checkpoint_identity_matches(
+            record, fixture, LEGACY_CHECKPOINT_IDENTITY_FIELDS
+        )
+        and _checkpoint_source_shape_is_valid(record, fixture)
+    ):
+        if not _legacy_efl_extra_time_classification_matches(record, fixture):
+            # The v1.0 direct-penalty policy was deliberately conservative.
+            # Refetch only a row whose saved classification changes under the
+            # replayable v1.1 raw-tail rule; never silently promote it in place.
+            return None
+        upgraded = dict(record)
+        upgraded.update(_fixture_binding(fixture))
+        upgraded["collector_version"] = COLLECTOR_VERSION
+        return upgraded if checkpoint_matches_fixture(upgraded, fixture) else None
     new_fields = (
+        "raw_tail",
         "kickoff_utc",
         "kickoff_epoch",
         "source_timezone",
@@ -1021,62 +1287,33 @@ def upgrade_legacy_checkpoint_record(
         return None
     if (
         record.get("schema_version") != SCHEMA_VERSION
-        or record.get("collector_version") != COLLECTOR_VERSION
+        or record.get("collector_version") != LEGACY_COLLECTOR_VERSION
         or str(record.get("match_id") or "") != str(fixture.get("match_id") or "")
     ):
         return None
-    status = str(record.get("corner_data_status") or "")
-    if status not in {
-        "complete",
-        "missing",
-        "conflicting",
-        "extra_time_ambiguous",
-        "fetch_error",
-    }:
+    if not _checkpoint_source_shape_is_valid(record, fixture):
         return None
-    if status != "fetch_error":
-        source_hash = record.get("source_response_sha256")
-        if not isinstance(source_hash, str) or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", source_hash
-        ):
-            return None
-    source_url = str(record.get("source_url") or "")
-    allowed_source_urls = {
-        header_url(str(fixture["match_id"])),
-        HANDICAP_ENDPOINT.format(match_id=str(fixture["match_id"])),
-    }
-    if source_url not in allowed_source_urls:
+    legacy_fields = tuple(
+        field
+        for field in LEGACY_CHECKPOINT_IDENTITY_FIELDS
+        if field not in {"kickoff_utc", "kickoff_epoch", "source_timezone"}
+    )
+    if not _checkpoint_identity_matches(
+        record,
+        fixture,
+        legacy_fields,
+        allow_legacy_regular=True,
+    ):
         return None
-
-    numeric_fields = {
-        "season_start_year",
-        "home_team_id",
-        "away_team_id",
-        "home_goals",
-        "away_goals",
-    }
-    for field in CHECKPOINT_IDENTITY_FIELDS:
-        if field in {"kickoff_utc", "kickoff_epoch", "source_timezone"}:
-            continue
-        expected = fixture.get(field)
-        actual = record.get(field)
-        if field == "competition_regime":
-            actual_regime = str(actual or "").strip()
-            if actual_regime == "standard":
-                actual_regime = "regular"
-            if actual_regime != str(expected or "").strip():
-                return None
-        elif field in numeric_fields:
-            if expected is None or actual is None:
-                if expected is not actual:
-                    return None
-            elif str(actual) != str(expected):
-                return None
-        elif str(actual or "").strip() != str(expected or "").strip():
-            return None
+    if not _legacy_efl_extra_time_classification_matches(record, fixture):
+        # Old v1.0 rows did not bind the raw schedule tail.  In the League Cup,
+        # that tail is what distinguishes regulation-time direct penalties from
+        # actual extra time, so a changed classification must be refetched.
+        return None
 
     upgraded = dict(record)
     upgraded.update(_fixture_binding(fixture))
+    upgraded["collector_version"] = COLLECTOR_VERSION
     return upgraded if checkpoint_matches_fixture(upgraded, fixture) else None
 
 
@@ -1096,6 +1333,9 @@ def pending_fixtures(
             )
             or checkpoint[str(fixture["match_id"])].get("corner_data_status")
             == "fetch_error"
+            or _checkpoint_requires_policy_refresh(
+                checkpoint[str(fixture["match_id"])], fixture
+            )
         )
     ]
 

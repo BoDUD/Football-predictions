@@ -374,6 +374,11 @@ class LeagueModelManagerTests(unittest.TestCase):
                     },
                 }
             )
+            if "titan_competition_id" in specification:
+                leagues[-1]["titan_source"] = {
+                    "competition_id": specification["titan_competition_id"],
+                    "source_kind": specification["titan_source_kind"],
+                }
         manifest = {
             "artifact_type": "soccer_history_dataset_bundle",
             "schema_version": league_model_manager.history_importer.DATASET_SCHEMA_VERSION,
@@ -382,8 +387,8 @@ class LeagueModelManagerTests(unittest.TestCase):
             "season_completeness_policy": dict(
                 league_model_manager.history_importer.SEASON_COMPLETENESS_POLICY
             ),
-            "administrative_result_exclusion_policy": (
-                league_model_manager.history_importer._administrative_result_exclusion_policy()
+            "immutable_result_exclusion_policy": (
+                league_model_manager.history_importer._immutable_result_exclusion_policy()
             ),
             "source_timezone": "Asia/Shanghai",
             "leagues": leagues,
@@ -929,6 +934,28 @@ class LeagueModelManagerTests(unittest.TestCase):
             "formal_htft_eligible does not satisfy the deployment gate",
         ):
             league_model_manager.validate_registry_inspection(tampered)
+
+    def test_bounded_integrity_verification_opens_and_binds_every_model(self):
+        manifest, registry, _calls = self._train_with_fake_models(all_leagues=False)
+        entry = registry["leagues"][0]
+        expected_model = _fake_model(entry["league_key"], manifest["bundle_hash"])
+        with mock.patch.object(
+            league_model_manager.htft_model,
+            "load_model",
+            return_value=expected_model,
+        ) as loaded:
+            verification = league_model_manager.verify_registry_integrity(
+                self.model_dir
+            )
+        self.assertEqual(verification["model_count"], 1)
+        self.assertEqual(loaded.call_count, 1)
+        self.assertIn("without_refit", verification["validation_scope"])
+
+        with self.assertRaisesRegex(
+            league_model_manager.LeagueModelManagerError,
+            "model integrity validation failed",
+        ):
+            league_model_manager.verify_registry_integrity(self.model_dir)
 
     def test_cli_inspect_writes_the_validated_deployment_artifact(self):
         _manifest, registry, _calls = self._train_with_fake_models(

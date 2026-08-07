@@ -280,10 +280,13 @@ class PlainTextFormatterTests(unittest.TestCase):
             "japan_j1": "日职",
             "usa_mls": "美职联",
             "england_premier_league": "英超",
+            "england_league_cup": "英联杯",
+            "netherlands_eerste_divisie": "荷乙",
             "france_ligue_1": "法甲",
             "spain_la_liga": "西甲",
             "germany_bundesliga": "德甲",
             "italy_serie_a": "意甲",
+            "portugal_primeira_liga": "葡超",
             "korea_k_league_1": "韩K联",
             "sweden_allsvenskan": "瑞典超",
             "finland_veikkausliiga": "芬超",
@@ -339,6 +342,12 @@ class PlainTextFormatterTests(unittest.TestCase):
         self.assertEqual(
             formatter.league_display_name({"league": "2026巴西杯16强次回合"}),
             "巴西杯",
+        )
+
+    def test_efl_cup_stage_label_renders_as_chinese_competition(self):
+        self.assertEqual(
+            formatter.league_display_name({"league": "2025英联杯半决赛次回合"}),
+            "英联杯",
         )
 
     def test_verified_competition_evidence_overrides_proxy_model_league(self):

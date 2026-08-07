@@ -405,10 +405,16 @@ class HistoryImporterTests(unittest.TestCase):
         expected = {
             "巴西杯": ("brazil_cup", "brazil-cup"),
             "英超": ("england_premier_league", "england-premier-league"),
+            "英联杯": ("england_league_cup", "england-league-cup"),
+            "荷乙": (
+                "netherlands_eerste_divisie",
+                "netherlands-eerste-divisie",
+            ),
             "法甲": ("france_ligue_1", "france-ligue-1"),
             "西甲": ("spain_la_liga", "spain-la-liga"),
             "德甲": ("germany_bundesliga", "germany-bundesliga"),
             "意甲": ("italy_serie_a", "italy-serie-a"),
+            "葡超": ("portugal_primeira_liga", "portugal-primeira-liga"),
             "韩K联": ("korea_k_league_1", "korea-k-league-1"),
             "瑞典超": ("sweden_allsvenskan", "sweden-allsvenskan"),
             "芬超": ("finland_veikkausliiga", "finland-veikkausliiga"),
@@ -422,7 +428,7 @@ class HistoryImporterTests(unittest.TestCase):
                 summary, score_rows, _market_rows = self._import(
                     [_data_row(1, "08-01 20:00", league=league)],
                     sheet_name=league,
-                    corner_extension=league == "欧国联",
+                    corner_extension=league in {"欧国联", "英联杯", "荷乙"},
                 )
                 self.assertEqual(summary["league_key"], league_key)
                 self.assertEqual(summary["output_stem"], output_stem)
@@ -447,6 +453,35 @@ class HistoryImporterTests(unittest.TestCase):
             brazil_rows[0]["format_version"], "copa_do_brasil_2026_expanded"
         )
         self.assertEqual(brazil_rows[0]["phase_group"], "knockout")
+
+        expected_efl_formats = {
+            2020: "efl_cup_2020_single_leg_semifinal",
+            2021: "efl_cup_2021_2024_two_leg_semifinal",
+            2025: "efl_cup_2025_onward_preliminary_round",
+        }
+        for season, expected_format in expected_efl_formats.items():
+            with self.subTest(efl_season=season):
+                efl_summary, efl_rows, _ = self._import(
+                    [
+                        _data_row(
+                            1,
+                            "12-15 20:00",
+                            season=season,
+                            league="英联杯",
+                            round_label="半决赛首回合",
+                        )
+                    ],
+                    sheet_name="英联杯",
+                    as_of_date=f"{season}-12-31",
+                    corner_extension=True,
+                )
+                self.assertEqual(efl_summary["league_key"], "england_league_cup")
+                self.assertEqual(
+                    efl_rows[0]["competition_regime"], "national_knockout_cup"
+                )
+                self.assertEqual(efl_rows[0]["format_version"], expected_format)
+                self.assertEqual(efl_rows[0]["phase_group"], "knockout")
+                self.assertEqual(efl_rows[0]["round"], "半决赛首回合")
 
         nations_summary, nations_rows, _ = self._import(
             [
@@ -621,7 +656,7 @@ class HistoryImporterTests(unittest.TestCase):
                 self.subTest(match_id=match_id),
                 self.assertRaisesRegex(
                     history_importer.HistoryImportError,
-                    rf"administrative result.*{match_id}|match {match_id}.*administrative",
+                    rf"immutable result exclusion.*{match_id}|match {match_id}.*immutable",
                 ),
             ):
                 self._import(
@@ -639,6 +674,164 @@ class HistoryImporterTests(unittest.TestCase):
                     corner_extension=True,
                     corner_match_ids=(match_id,),
                 )
+
+    def test_efl_cup_unplayed_walkovers_are_rejected_by_titan_match_id(self):
+        for match_id in (1927696, 2044807):
+            with (
+                self.subTest(match_id=match_id),
+                self.assertRaisesRegex(
+                    history_importer.HistoryImportError,
+                    rf"immutable result exclusion.*{match_id}|match {match_id}.*immutable",
+                ),
+            ):
+                self._import(
+                    [
+                        _data_row(
+                            1,
+                            "09-22 20:00",
+                            season=2020,
+                            league="英联杯",
+                            full_score="3-0",
+                            round_label="第三圈",
+                        )
+                    ],
+                    sheet_name="英联杯",
+                    corner_extension=True,
+                    corner_match_ids=(match_id,),
+                )
+
+    def test_efl_cup_requires_source_bound_titan_match_id(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "Titan比赛ID is required",
+        ):
+            self._import(
+                [_data_row(1, "09-22 20:00", league="英联杯")],
+                sheet_name="英联杯",
+            )
+
+    def test_eerste_divisie_source_identity_calendar_and_regular_regime_are_frozen(
+        self,
+    ):
+        summary, score_rows, market_rows = self._import(
+            [
+                _data_row(
+                    1,
+                    "12-19 20:00",
+                    season=2025,
+                    home="Cambuur",
+                    away="Team A",
+                    league="荷乙",
+                    round_label="第20轮",
+                ),
+                _data_row(
+                    2,
+                    "01-16 20:00",
+                    season=2025,
+                    home="Team B",
+                    away="Vitesse",
+                    league="荷乙",
+                    round_label="第21轮",
+                ),
+            ],
+            sheet_name="荷乙",
+            as_of_date="2026-12-31",
+            corner_extension=True,
+            corner_match_ids=(2871500, 2871600),
+        )
+
+        self.assertEqual(summary["league_key"], "netherlands_eerste_divisie")
+        self.assertEqual(summary["output_stem"], "netherlands-eerste-divisie")
+        self.assertEqual(
+            summary["aliases"],
+            [
+                "netherlands_eerste_divisie",
+                "荷乙",
+                "Eerste Divisie",
+                "Keuken Kampioen Divisie",
+                "Netherlands Eerste Divisie",
+            ],
+        )
+        self.assertEqual(
+            summary["titan_source"],
+            {"competition_id": 17, "source_kind": "SubLeague"},
+        )
+        self.assertEqual(
+            [row["source_kickoff"] for row in score_rows],
+            ["2025-12-19T20:00+08:00", "2026-01-16T20:00+08:00"],
+        )
+        self.assertEqual({row["competition_regime"] for row in score_rows}, {"regular"})
+        self.assertEqual(
+            {row["format_version"] for row in score_rows},
+            {"standard_league_format"},
+        )
+        self.assertEqual({row["phase_group"] for row in score_rows}, {"regular_season"})
+        self.assertEqual(
+            {row["competition_regime"] for row in market_rows}, {"regular"}
+        )
+
+    def test_eerste_divisie_non_regulation_result_is_rejected_by_match_id(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            r"immutable result exclusion.*2871575|match 2871575.*immutable",
+        ):
+            self._import(
+                [
+                    _data_row(
+                        1,
+                        "04-24 20:00",
+                        season=2025,
+                        home="Cambuur",
+                        away="Vitesse",
+                        league="荷乙",
+                        full_score="2-1",
+                        round_label="第38轮",
+                    )
+                ],
+                sheet_name="荷乙",
+                corner_extension=True,
+                corner_match_ids=(2871575,),
+            )
+
+    def test_eerste_divisie_requires_source_bound_titan_match_id(self):
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError,
+            "Titan比赛ID is required",
+        ):
+            self._import(
+                [_data_row(1, "08-08 20:00", league="荷乙")],
+                sheet_name="荷乙",
+            )
+
+    def test_new_competition_schedule_expectations_are_frozen(self):
+        self.assertEqual(
+            history_importer.EXPECTED_SEASON_MATCH_COUNTS["portugal_primeira_liga"],
+            {season: 306 for season in range(2020, 2027)},
+        )
+        self.assertEqual(
+            history_importer.EXPECTED_SEASON_MATCH_COUNTS["england_league_cup"],
+            {
+                2020: 90,
+                2021: 92,
+                2022: 93,
+                2023: 93,
+                2024: 93,
+                2025: 93,
+                2026: 93,
+            },
+        )
+        self.assertEqual(
+            history_importer.EXPECTED_SEASON_MATCH_COUNTS["netherlands_eerste_divisie"],
+            {
+                2020: 380,
+                2021: 380,
+                2022: 380,
+                2023: 380,
+                2024: 380,
+                2025: 379,
+                2026: 380,
+            },
+        )
 
     def test_nations_requires_source_bound_titan_match_id(self):
         with self.assertRaisesRegex(
@@ -1384,6 +1577,23 @@ class HistoryImporterTests(unittest.TestCase):
             ],
         )
         self.assertEqual(history_importer.validate_bundle(output_dir), manifest)
+
+    def test_dataset_schema_1_4_is_explicitly_rejected_after_policy_rename(self):
+        output_dir, manifest = self._bundle(
+            "legacy-schema", [_data_row(1, "08-01 20:00")]
+        )
+        self.assertEqual(history_importer.DATASET_SCHEMA_VERSION, "1.5.0")
+        manifest["schema_version"] = "1.4.0"
+        manifest["bundle_hash"] = history_importer._canonical_manifest_hash(manifest)
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            history_importer.HistoryImportError, "schema_version is unsupported"
+        ):
+            history_importer.validate_bundle(output_dir)
 
     def test_semantic_validator_rejects_rehashed_regime_tampering(self):
         workbook = self.base / "japan-history.xlsx"

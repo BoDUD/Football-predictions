@@ -2908,6 +2908,36 @@ class MemoryStoreTests(unittest.TestCase):
                     memory_store.normalize_league_name(label), "brazil_cup"
                 )
 
+    def test_efl_cup_stage_labels_normalize_to_one_competition_key(self):
+        labels = (
+            "英联杯",
+            "2025英联杯半决赛次回合",
+            "英格兰联赛杯决赛",
+            "Carabao Cup",
+        )
+        for label in labels:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    memory_store.normalize_league_name(label),
+                    "england_league_cup",
+                )
+
+    def test_primeira_liga_aliases_normalize_to_chinese_label(self):
+        for label in ("葡超", "2025葡超第10轮", "葡萄牙超级联赛", "Liga Portugal"):
+            with self.subTest(label=label):
+                self.assertEqual(memory_store.normalize_league_name(label), "葡超")
+
+    def test_eerste_divisie_aliases_normalize_to_chinese_label(self):
+        for label in (
+            "荷乙",
+            "2025荷乙第10轮",
+            "Eerste Divisie",
+            "Keuken Kampioen Divisie",
+            "Netherlands Eerste Divisie",
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(memory_store.normalize_league_name(label), "荷乙")
+
     def test_competition_evidence_build_validate_and_tamper_fail_closed(self):
         match_id = "2991125"
         values = competition_evidence_values(match_id)

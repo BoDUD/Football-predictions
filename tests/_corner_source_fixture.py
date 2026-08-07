@@ -54,6 +54,7 @@ def _record(
         "away_team": away,
         "home_goals": 1,
         "away_goals": 0,
+        "raw_tail": [],
         "home_corners": home_corners,
         "away_corners": away_corners,
         "total_corners": home_corners + away_corners,

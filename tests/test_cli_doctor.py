@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -64,7 +65,7 @@ class DoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             (workspace / "pyproject.toml").write_text(
-                '[project]\nversion = "3.4.0"\n',
+                '[project]\nversion = "3.5.0"\n',
                 encoding="utf-8",
             )
             with mock.patch.object(
@@ -74,9 +75,9 @@ class DoctorTests(unittest.TestCase):
             ):
                 result = doctor._check_package_version(workspace)
         self.assertEqual(result.status, "pass")
-        self.assertEqual(result.details["package_version"], "3.4.0")
-        self.assertEqual(result.details["distribution_version"], "3.4.0")
-        self.assertEqual(result.details["project_version"], "3.4.0")
+        self.assertEqual(result.details["package_version"], "3.5.0")
+        self.assertEqual(result.details["distribution_version"], "3.5.0")
+        self.assertEqual(result.details["project_version"], "3.5.0")
 
     def test_package_version_check_fails_on_distribution_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -87,7 +88,7 @@ class DoctorTests(unittest.TestCase):
             ):
                 result = doctor._check_package_version(Path(temporary))
         self.assertEqual(result.status, "fail")
-        self.assertEqual(result.details["package_version"], "3.4.0")
+        self.assertEqual(result.details["package_version"], "3.5.0")
         self.assertEqual(result.details["mismatches"], {"distribution": "0.0.0"})
 
     def test_registry_rejects_invalid_json(self) -> None:
@@ -98,7 +99,7 @@ class DoctorTests(unittest.TestCase):
                 / ".codex"
                 / "soccer-predict"
                 / "models"
-                / "sample"
+                / "league-history-expanded"
                 / "registry.json"
             )
             registry.parent.mkdir(parents=True)
@@ -115,7 +116,7 @@ class DoctorTests(unittest.TestCase):
                 / ".codex"
                 / "soccer-predict"
                 / "models"
-                / "sample"
+                / "league-history-expanded"
                 / "registry.json"
             )
             registry.parent.mkdir(parents=True)
@@ -130,7 +131,244 @@ class DoctorTests(unittest.TestCase):
     def test_registry_validates_model_file_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
-            model_dir = workspace / ".codex" / "soccer-predict" / "models" / "sample"
+            scripts = workspace / "scripts"
+            scripts.mkdir()
+            (scripts / "league_model_manager.py").write_text(
+                "raise SystemExit(0)\n", encoding="utf-8"
+            )
+            (scripts / "corner_model_manager.py").write_text(
+                "raise SystemExit(0)\n", encoding="utf-8"
+            )
+            model_dir = (
+                workspace
+                / ".codex"
+                / "soccer-predict"
+                / "models"
+                / "league-history-expanded"
+            )
+            model_dir.mkdir(parents=True)
+            model = model_dir / "model.json"
+            model.write_bytes(b"{}")
+            digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()
+            (model_dir / "registry.json").write_text(
+                json.dumps(
+                    {
+                        "leagues": [
+                            {
+                                "model_file": model.name,
+                                "model_file_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            corner_dir = (
+                workspace
+                / ".codex"
+                / "soccer-predict"
+                / "models"
+                / "corner-history-expanded"
+            )
+            corner_dir.mkdir(parents=True)
+            corner_model = corner_dir / "corner-model.json"
+            corner_model.write_bytes(b"{}")
+            (corner_dir / "corner-registry.json").write_text(
+                json.dumps(
+                    {
+                        "leagues": [
+                            {
+                                "model_file": corner_model.name,
+                                "model_file_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = doctor._check_registry(workspace)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.details["model_count"], 2)
+
+    def test_registry_requires_both_canonical_model_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            scripts = workspace / "scripts"
+            scripts.mkdir()
+            (scripts / "league_model_manager.py").write_text(
+                "raise SystemExit(0)\n", encoding="utf-8"
+            )
+            model_dir = (
+                workspace
+                / ".codex"
+                / "soccer-predict"
+                / "models"
+                / "league-history-expanded"
+            )
+            model_dir.mkdir(parents=True)
+            model = model_dir / "model.json"
+            model.write_bytes(b"{}")
+            digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()
+            (model_dir / "registry.json").write_text(
+                json.dumps(
+                    {
+                        "leagues": [
+                            {
+                                "model_file": model.name,
+                                "model_file_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = doctor._check_registry(workspace)
+
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(
+            result.details["missing_active_registries"],
+            [
+                str(
+                    workspace
+                    / ".codex"
+                    / "soccer-predict"
+                    / "models"
+                    / "corner-history-expanded"
+                    / "corner-registry.json"
+                )
+            ],
+        )
+
+    def test_registry_discovers_htft_and_corner_and_calls_matching_managers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            scripts = workspace / "scripts"
+            scripts.mkdir()
+            for name in ("league_model_manager.py", "corner_model_manager.py"):
+                (scripts / name).touch()
+            model_root = workspace / ".codex" / "soccer-predict" / "models"
+            for directory, registry_name in (
+                ("league-history-expanded", "registry.json"),
+                ("corner-history-expanded", "corner-registry.json"),
+            ):
+                model_dir = model_root / directory
+                model_dir.mkdir(parents=True)
+                model = model_dir / "model.json"
+                model.write_bytes(b"{}")
+                digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()
+                (model_dir / registry_name).write_text(
+                    json.dumps(
+                        {
+                            "leagues": [
+                                {
+                                    "model_file": model.name,
+                                    "model_file_sha256": digest,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            historical = model_root / "league-history-expanded-pre-3.5.0"
+            historical.mkdir()
+            (historical / "registry.json").write_text(
+                "{intentionally-invalid-historical-registry",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+            with mock.patch.object(
+                doctor.subprocess, "run", return_value=completed
+            ) as run:
+                result = doctor._check_registry(workspace)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(len(result.details["semantic_validations"]), 2)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertTrue(
+            any(
+                "league_model_manager.py" in str(part)
+                for command in commands
+                for part in command
+            )
+        )
+        self.assertTrue(
+            any(
+                "corner_model_manager.py" in str(part)
+                for command in commands
+                for part in command
+            )
+        )
+        htft_command = next(
+            command
+            for command in commands
+            if any("league_model_manager.py" in str(part) for part in command)
+        )
+        corner_command = next(
+            command
+            for command in commands
+            if any("corner_model_manager.py" in str(part) for part in command)
+        )
+        self.assertIn("verify-integrity", htft_command)
+        self.assertIn("verify-integrity", corner_command)
+
+    def test_registry_reports_semantic_manager_failure_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            scripts = workspace / "scripts"
+            scripts.mkdir()
+            (scripts / "corner_model_manager.py").touch()
+            model_dir = (
+                workspace
+                / ".codex"
+                / "soccer-predict"
+                / "models"
+                / "corner-history-expanded"
+            )
+            model_dir.mkdir(parents=True)
+            model = model_dir / "model.json"
+            model.write_bytes(b"{}")
+            digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()
+            registry = model_dir / "corner-registry.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "leagues": [
+                            {
+                                "model_file": model.name,
+                                "model_file_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = registry.read_bytes()
+            completed = subprocess.CompletedProcess(
+                [], 1, stdout="", stderr="unsupported corner manager version"
+            )
+            with mock.patch.object(doctor.subprocess, "run", return_value=completed):
+                result = doctor._check_registry(workspace)
+            after = registry.read_bytes()
+
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(before, after)
+        failure = result.details["semantic_failures"][0]
+        self.assertEqual(failure["kind"], "corner")
+        self.assertIn("unsupported corner manager version", failure["error"])
+
+    def test_registry_missing_runtime_manager_is_explicit_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            model_dir = (
+                workspace
+                / ".codex"
+                / "soccer-predict"
+                / "models"
+                / "league-history-expanded"
+            )
             model_dir.mkdir(parents=True)
             model = model_dir / "model.json"
             model.write_bytes(b"{}")
@@ -149,8 +387,12 @@ class DoctorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = doctor._check_registry(workspace)
-        self.assertEqual(result.status, "pass")
-        self.assertEqual(result.details["model_count"], 1)
+
+        self.assertEqual(result.status, "fail")
+        failure = result.details["semantic_failures"][0]
+        self.assertEqual(failure["kind"], "htft")
+        self.assertIn("semantic registry validator is unavailable", failure["error"])
+        self.assertTrue(failure["validator"].endswith("league_model_manager.py"))
 
     def test_network_timeout_is_bounded_when_explicitly_enabled(self) -> None:
         response = mock.MagicMock()

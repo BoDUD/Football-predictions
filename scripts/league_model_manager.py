@@ -56,10 +56,13 @@ LEAGUE_NAMES = {
     "japan_j1": "日职",
     "usa_mls": "美职联",
     "england_premier_league": "英超",
+    "england_league_cup": "英联杯",
+    "netherlands_eerste_divisie": "荷乙",
     "france_ligue_1": "法甲",
     "spain_la_liga": "西甲",
     "germany_bundesliga": "德甲",
     "italy_serie_a": "意甲",
+    "portugal_primeira_liga": "葡超",
     "korea_k_league_1": "韩K联",
     "sweden_allsvenskan": "瑞典超",
     "finland_veikkausliiga": "芬超",
@@ -157,10 +160,11 @@ VALIDATED_TRAINING_CONFIG = {
     # influence after the score marginals have already decayed.
     "association_half_life_days": 365.0,
 }
-TRAINING_REGIME_POLICY_VERSION = "competition-specific-production-v2"
+TRAINING_REGIME_POLICY_VERSION = "competition-specific-production-v3"
 PRODUCTION_TRAINING_REGIMES = ("regular",)
 PRODUCTION_TRAINING_REGIMES_BY_LEAGUE = {
     "brazil_cup": ("national_knockout_cup",),
+    "england_league_cup": ("national_knockout_cup",),
     "uefa_nations_league": ("national_team_league_and_knockout",),
 }
 
@@ -1626,6 +1630,55 @@ def inspect_registry(
     return inspection
 
 
+def verify_registry_integrity(model_dir: str | Path) -> dict[str, Any]:
+    """Verify current registry semantics and every bound model without refitting."""
+
+    directory = Path(model_dir).resolve()
+    registry = load_registry(directory)
+    for index, entry in enumerate(registry["leagues"]):
+        name = f"registry.leagues[{index}]"
+        filename = _safe_filename(
+            entry.get("model_file"), f"{name}.model_file", suffix=".json"
+        )
+        model_path = directory / filename
+        expected_file_hash = _required_hash(
+            entry.get("model_file_sha256"), f"{name}.model_file_sha256"
+        )
+        if _file_hash(model_path) != expected_file_hash:
+            raise LeagueModelManagerError(
+                f"{name} registered model file hash does not match"
+            )
+        try:
+            model = htft_model.load_model(model_path)
+        except htft_model.HTFTModelError as exc:
+            raise LeagueModelManagerError(
+                f"{name} model integrity validation failed: {exc}"
+            ) from exc
+        _validate_model_binding(
+            model,
+            league_key=entry["league_key"],
+            bundle_hash=registry["dataset_manifest_hash"],
+            entry=entry,
+            promoted_config=registry["validated_training_config"],
+        )
+        full_time = model.get("components", {}).get("full_time")
+        if not isinstance(full_time, Mapping) or full_time.get(
+            "model_hash"
+        ) != entry.get("full_time_component_model_hash"):
+            raise LeagueModelManagerError(
+                f"{name} full-time component hash does not match registry"
+            )
+    return {
+        "artifact_type": "soccer_league_model_registry_integrity_verification",
+        "schema_version": "1.0.0",
+        "generated_at": _utc_now(),
+        "registry_hash": registry["registry_hash"],
+        "registry_schema_version": REGISTRY_SCHEMA_VERSION,
+        "validation_scope": "registry_semantics_and_internal_model_integrity_without_refit",
+        "model_count": len(registry["leagues"]),
+    }
+
+
 def _validate_prediction_timing(
     entry: Mapping[str, Any],
     *,
@@ -2362,6 +2415,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect_command.add_argument("--output", help="optional inspection JSON artifact")
 
+    verify_command = subparsers.add_parser(
+        "verify-integrity",
+        help="verify registry semantics and internal model hashes without refitting",
+    )
+    verify_command.add_argument("--model-dir", required=True)
+    verify_command.add_argument("--output")
+
     predict = subparsers.add_parser(
         "predict", help="predict with a registered league model"
     )
@@ -2440,6 +2500,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.output:
                 _atomic_json(Path(arguments.output).resolve(), inspection)
             sys.stdout.write(_json_bytes(inspection).decode("utf-8"))
+            return 0
+
+        if arguments.command == "verify-integrity":
+            verification = verify_registry_integrity(arguments.model_dir)
+            if arguments.output:
+                _atomic_json(Path(arguments.output).resolve(), verification)
+            sys.stdout.write(_json_bytes(verification).decode("utf-8"))
             return 0
 
         if arguments.score_output and not arguments.manifest_output:
