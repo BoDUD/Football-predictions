@@ -95,7 +95,11 @@ def cohort_manifest(policy: dict, *, status: str = "active") -> dict:
         "kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
         "status": status,
         "starts_at": "2026-08-01T00:01:00+00:00",
-        "policy_file": str(Path("C:/forward-policies") / f"{policy['policy_id']}.json"),
+        "policy_file": str(
+            Path(tempfile.gettempdir()).resolve()
+            / "forward-policies"
+            / f"{policy['policy_id']}.json"
+        ),
         "policy_id": policy["policy_id"],
         "policy_hash": policy["policy_hash"],
         "retrospective_records_allowed": False,
