@@ -3533,6 +3533,12 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             defaults = memory_store.build_parser().parse_args(["due-lineup-check"])
             self.assertEqual((defaults.min_minutes, defaults.max_minutes), (0.0, 30.0))
+            stats_defaults = memory_store.build_parser().parse_args(["stats"])
+            gate_defaults = memory_store.build_parser().parse_args(["gate-stats"])
+            calibration_defaults = memory_store.build_parser().parse_args(["calibrate"])
+            self.assertEqual(stats_defaults.gate_windows, [50, 100])
+            self.assertEqual(gate_defaults.windows, [50, 100])
+            self.assertEqual(calibration_defaults.gate_windows, [50, 100])
             memory_store.cmd_record(
                 record_args(base, asian_side=None, primary_market="total")
             )

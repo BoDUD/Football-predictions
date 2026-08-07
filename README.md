@@ -2,7 +2,7 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
-当前发布版本：**3.5.0**（2026-08-07）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+当前发布版本：**3.6.0**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
 
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
@@ -49,7 +49,9 @@ watchdog，也不修改模型或归档；只有显式传入 `--network` 才执�
 
 Titan 中文页时间默认按 `Asia/Shanghai` 解析，再转换为 Codex 环境中的用户时区。比赛状态始终以页面明确的未开场、进行中或完场标识为准。
 
-默认输出为“简单图片 + 正常分析文字”。初盘和临场复查统一使用同一张 8 列表格：`编号`、`时间`、`赛事`、`主队 vs 客队`、`主推`、`联合首选情景总球`、`半全场`、`波胆`；日期、标题与阶段副标题全部从归档派生，同一张图禁止混合阶段、比赛日期或同一场的两个版本。`主推` 只显示通过全部门槛的正式主推；没有正式方向时固定显示 `无正式主推`，绝不拿独立 1X2 或总进球 marginal 首位补位。图片中的 `联合首选情景总球` 先显示由冻结联合事件 Rank 1 比分确定性映射的一个区间，再显示从完整归档联合分布重算的 Top-2 累计概率、其余情景质量和版本化不确定度；不显示 Rank 2 区间，也不拿独立总进球 marginal Top-1 替换联合区间。随附文字会另列 `总进球边际第一` 及概率，并明确它只用于边际审计、不替代联合情景。`半全场` 与 `波胆` 只展示冻结且通过校验的全局联合事件 Top 2，严格按联合概率降序。每一行的 HT/FT、全场比分与联合概率是不可拆分的同一事件；若两个事件拥有相同 HT/FT 但比分不同，保留两行并重复该标签。绝不展示第三项，也不按半场根节点补齐胜平负分支。系统内部仍完整计算并校验两个事件各自的 score-derived goal range，以及半场、1X2、全部总进球区间、BTTS、EV/edge 与证据审计。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件波胆 Top 2 只保留审计，不得占用或重排公开位置。正式主推后标红色 `★`；通过诊断资格的独立观察只能在随附文字或审计中标 `◇`，不占 `主推` 栏且不计战绩。严禁独立排列半全场与比分后暗示对应，也严禁按终场方向硬配比分或手填 fallback；没有通过校验并绑定指定 `analysis_stage` 与版本哈希的联合后验 artifact 时，`联合首选情景总球`、`半全场`、`波胆` 三栏必须整体显示 `数据不足`，同时主推栏仍如实保留正式主推或 `无正式主推`。
+默认输出为“简单图片 + 正常分析文字”。初盘和临场复查统一使用同一张 8 列表格：`编号`、`时间`、`赛事`、`主队 vs 客队`、`主推`、`联合首选情景总球`、`半全场`、`波胆`；日期、标题与阶段副标题全部从归档派生，同一张图禁止混合阶段、比赛日期或同一场的两个版本。`主推` 只显示通过全部门槛的正式主推；没有正式方向时固定显示 `无正式主推`，绝不拿独立 1X2 或总进球 marginal 首位补位。图片中的 `联合首选情景总球` 先显示由冻结联合事件 Rank 1 比分确定性映射的一个区间，再显示从完整归档联合分布重算的 Top-2 累计概率、其余情景质量和版本化不确定度；不显示 Rank 2 区间，也不拿独立总进球 marginal Top-1 替换联合区间。随附文字会另列 `总进球边际第一` 及概率，并明确它只用于边际审计、不替代联合情景。`半全场` 与 `波胆` 只展示冻结且通过校验的全局联合事件 Top 2，严格按联合概率降序。每一行的 HT/FT、全场比分与联合概率是不可拆分的同一事件；若两个事件拥有相同 HT/FT 但比分不同，保留两行并重复该标签。绝不展示第三项，也不按半场根节点补齐胜平负分支。系统内部仍完整计算并校验两个事件各自的 score-derived goal range，以及半场、1X2、全部总进球区间、BTTS、EV/edge 与证据审计。独立 1X2/总进球 marginal、独立 HT/FT Top 2 与独立无条件波胆 Top 2 只保留审计，不得占用或重排公开位置。正式主推后标红色 `★`；通过完整 v3 重放且非发布 Gate 全过的唯一观察可在表外发布状态区、随附文字或审计中标 `◇`，不占 `主推` 栏且不计战绩。严禁独立排列半全场与比分后暗示对应，也严禁按终场方向硬配比分或手填 fallback；没有通过校验并绑定指定 `analysis_stage` 与版本哈希的联合后验 artifact 时，`联合首选情景总球`、`半全场`、`波胆` 三栏必须整体显示 `数据不足`，同时主推栏仍如实保留正式主推或 `无正式主推`。
+
+主表的 8 列与正式主推定义保持不变。主表下新增独立的“观察与发布状态”区，它不是第 9 列：仅当归档 v3 候选完整重放、非发布 Gate 全过且 `shadow_selected=true` 时才显示唯一 `◇ 观察首选`，同时列出 EV、edge、`不下注、不计战绩` 和数据/价值/政策/安全阻断；否则显示 `— 无可用方向`。初盘提示待 T−30 核验首发与即时盘口，临场提示已升级为正式主推、仍受阻、改变或消失。旧归档没有当时的 v3 审计时不会用现模型回填观察方向。
 
 所有图片都禁止用 `…` 或三个点截断内容；必须通过语义换行、缩小至可读字号、增加行高或扩展画布显示完整文字。赛后复盘同样生成同风格图片，绑定最终有效赛前版本和已核验赛果，不得根据结果回改赛前结论；无主推复盘图片保留 `主推：无正式推荐（不结算、不计战绩）`，配套文字继续保留本场关键及联赛/累计战绩。项目不包含微信或其他聊天软件的自动发送、RPA、账号配置或外部消息投递能力，也不承诺胜率、收益或盈利。
 
@@ -105,12 +107,12 @@ python scripts/htft_holdout_evaluator.py \
 
 python scripts/league_model_manager.py train \
   --dataset-dir .codex/soccer-predict/datasets/league-history-expanded \
-  --model-dir .codex/soccer-predict/models/league-history-expanded-3.5.0-staging \
+  --model-dir .codex/soccer-predict/models/league-history-expanded-3.6.0-staging \
   --evaluation-artifact .codex/soccer-predict/evaluations/htft-fixed-seasons.json
 
 python scripts/league_model_manager.py inspect \
-  --model-dir .codex/soccer-predict/models/league-history-expanded-3.5.0-staging \
-  --output .codex/soccer-predict/models/league-history-expanded-3.5.0-staging/inspection.json
+  --model-dir .codex/soccer-predict/models/league-history-expanded-3.6.0-staging \
+  --output .codex/soccer-predict/models/league-history-expanded-3.6.0-staging/inspection.json
 ```
 
 半全场模型分别拟合半场和全场 Dixon-Coles 边际，再用训练窗的九格历史关联和 IPF 构成一致的 HH–AA 联合矩阵。Dixon-Coles 现在联合优化攻击、防守、主场优势和受动态安全边界约束的 `rho`，并保存收敛、迭代、目标函数、投影梯度和边界诊断；旧制品继续只读兼容。正式 evaluator 与 manager 将九格关联的指数时间半衰期冻结为 365 天，与全场边际的时间尺度一致，并把该值写入评估、模型与注册表后重放校验；缺失、非正或不同半衰期的制品会失败关闭。扩展导入覆盖 19 项赛事，并保存 Titan 展示的所有阶段所对应的 `format_version`、`phase_group`、`season_status` 和 `competition_regime`，供数据质量审计与评估切片使用。注册 manager 使用按赛事冻结的赛制白名单：常规联赛（含葡超、荷乙）只用 `regular`，巴西杯与英联杯分别只用自己的 `national_knockout_cup`，欧国联只用自己的 `national_team_league_and_knockout`；不同赛事始终分别拟合，不能把球队强度混在同一尺度。挪超赛程文本明确标记的保级/降级附加赛使用 `relegation_playoff` phase/regime，留在完整历史中审计，但不进入常规赛生产训练或晋级 cohort。荷乙比赛 `2871575` 只踢到第 88 分钟，KNVB 确定的 2-1 不是严格 FT90 训练目标，因此在足球与角球链路按不可变比赛 ID 隔离。其他未放行赛制保留排除计数与漂移证据。
@@ -146,7 +148,7 @@ python scripts/corner_history_dataset_builder.py \
 
 python scripts/corner_model_manager.py train \
   --input .codex/soccer-predict/datasets/corner-history-expanded/finland_veikkausliiga-corners.csv \
-  --model-dir .codex/soccer-predict/models/corner-history-expanded-3.5.0-staging \
+  --model-dir .codex/soccer-predict/models/corner-history-expanded-3.6.0-staging \
   --league-key finland_veikkausliiga \
   --league 芬超
 ```
@@ -170,7 +172,7 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 暂停的 HT/FT 不再是“算完后丢弃”。`memory_store.py record` 可通过 `--htft-observation-model-file` 与 `--htft-observation-ranker-file` 固化矩阵、诊断 Top 2、pair mass、模型/预测/制品哈希和逐门槛失败原因；该诊断 Top 2 只服务内部校准，不能与独立比分榜单组成用户卡片。赛后只计算观察用 Top-1/Top-2、九分类 Brier 与 log loss，并在 `stats`/`calibrate` 输出 gate funnel；它始终不计主推、注额、胜负、收益或 ROI，复盘文字继续保留 `主推：无正式推荐（不结算、不计战绩）`。
 
-正常初盘与临场归档现在默认要求有效的 `--joint-scenario-file`；`record` 会以完整分析模式拒绝缺失、过期或身份不一致的联合路径，避免先生成一张“数据不足”的完成图。有效联合模型存在但正式盘口门槛未通过时，图片固定显示 `无正式主推`，并展示由冻结 Rank 1 比分映射的联合首选情景总球、从完整联合分布重算的集中度/不确定度，以及冻结且通过校验的全局联合事件 Top 2；每项的半全场与代表波胆保持原始配对，它们不计正式主推、注额或收益。独立 1X2 与总进球 marginal 首位只能作为分布审计。合格观察仅可在随附文字或审计中单独标注，不占主推栏。旧冻结版本若当时有有效联合制品，可从其 Rank 1 比分重渲染区间并重算集中度而不改档案或哈希；若当时没有联合制品，三栏仍如实显示 `数据不足`，不得用赛果或其他版本回填。
+正常初盘与临场归档现在默认要求有效的 `--joint-scenario-file`；`record` 会以完整分析模式拒绝缺失、过期或身份不一致的联合路径，避免先生成一张“数据不足”的完成图。有效联合模型存在但正式盘口门槛未通过时，图片固定显示 `无正式主推`，并展示由冻结 Rank 1 比分映射的联合首选情景总球、从完整联合分布重算的集中度/不确定度，以及冻结且通过校验的全局联合事件 Top 2；每项的半全场与代表波胆保持原始配对，它们不计正式主推、注额或收益。独立 1X2 与总进球 marginal 首位只能作为分布审计。通过完整 v3 重放且非发布 Gate 全过的唯一观察可在表外发布状态区、随附文字或审计中单独标注，仍不占主推栏。旧冻结版本若当时有有效联合制品，可从其 Rank 1 比分重渲染区间并重算集中度而不改档案或哈希；若当时没有联合制品，三栏仍如实显示 `数据不足`，不得用赛果或其他版本回填。
 
 新的正常初盘与临场归档还必须传入当前 `candidate-evaluation/3.0.0` 与 `--require-candidate-evaluations`，把亚盘、大小球、半场、半全场、总进球区间、BTTS 和两类角球市场逐一记为已评估或明确不可用。候选制品的生成时间不得早于其使用的盘口快照或联合/角球上游模型；系统从冻结 source payload、活动版本及模型/证据绑定重算完整盘口、五态 EV/edge、门槛、信心排序和 shadow 选择。四分盘的 edge 按半赢/半输各半注折算，push 不进入有效赢亏质量。只因市场发布政策暂停而失败的候选仍可进入每场每市场最多一个的 shadow 样本，但永远不占主推、不下注、不计战绩或 ROI。赛后复盘会按最终比分重新结算并核对冻结诊断；改派生字段后重算自哈希、或仅改变 JSON 格式/字节哈希复制同场样本，都不能污染 `stats`/`calibrate`。单市场达到 20 个已结算 shadow 只触发人工模型/政策复核，不会自动解禁、调参或回改旧档案。旧 `candidate-evaluation/2.0.0` 仅用于历史隔离读取，不能进入新的活动 cohort 写入。
 
@@ -195,6 +197,8 @@ python scripts/forward_validation.py --input forward-observations.json --output 
 [`analysis/htft_history_validation.ipynb`](analysis/htft_history_validation.ipynb)。
 
 ## 小样本 Guardrail
+
+`stats`、`calibrate` 和独立 `gate-stats` 诊断输出最近 50/100 个不同比赛的候选漏斗。窗口按每场最新赛前归档时间取样，并对入窗比赛的所有冻结初盘/临场 v3 版本分阶段重放。待赛与已复盘都纳入收集/发布摩擦诊断，但该漏斗不是战绩或 ROI。旧版本缺少 v3 审计、重放失败或市场显式 unavailable 都保留为覆盖率/数据缺口；窗口不足时必须标记不完整，不得凭感觉放宽 Gate。
 
 - EV 和模型边际必须为正，但都不能代替完整市场、统一模型和专属证据。
 - 盘口与相关欧赔同时明显反向时，普通低 EV 方向降为观察。只有 EV ≥ 8%、边际 ≥ 4pp、至少 5 家公司且有独立阵容或基本面支持，才可成为正式方向或主推。

@@ -35,6 +35,14 @@ Initial and lineup-check results use the same compact eight-column table, in thi
 7. `半全场`
 8. `波胆`
 
+The eight columns never change. A separate `观察与发布状态` panel is rendered below the table
+and above the footer. It is not a ninth column and cannot change the row's formal primary. For
+each no-primary row it shows either one replay-validated v3 `◇ 观察首选` with EV/edge and
+`不下注、不计战绩`, or `— 无可用方向` when no candidate passed every non-release gate. It also
+shows compact data, value, policy, and mixed-safety blockers. Initial rows say that lineups and
+current prices remain due at T−30; lineup rows say whether the direction upgraded to formal,
+remained blocked, changed, or disappeared.
+
 The stage is identified in the title/subtitle, not by changing the table structure. Date,
 title, and subtitle are derived by the renderer from the bound archive and must not appear in
 the caller payload. Each row must bind `archive_match_id`, `archive_stage`, and
@@ -62,8 +70,9 @@ The compact cells follow these display rules:
 - `主推` shows the single archived formal primary that ranked highest after all active gates,
   with the archive-derived `★`. If no formal direction qualifies, show exactly
   `无正式主推`. Never fill this cell from a marginal 1X2 or goal-range leader. A separately
-  qualified observation may appear once as `◇` in the accompanying text or audit, explicitly
-  outside the card primary and joint-event rows; it never receives a stake or settlement.
+  qualified observation may appear once as `◇` in the dedicated panel and accompanying text,
+  explicitly outside the card primary and joint-event rows; it never receives a stake or
+  settlement.
 - `联合首选情景总球` shows exactly one range, deterministically mapped from the frozen global
   joint-event Rank 1 score total. The same cell also shows the Top-2 cumulative probability,
   remaining-scenario mass, and a versioned normalized-entropy uncertainty level recomputed
@@ -255,9 +264,9 @@ python scripts/review_card_renderer.py \
 - `★` means one unique archived, policy-enabled formal primary passed every active model,
   market, data-quality, evidence, and timing gate. A slate may have multiple starred matches,
   but never more than one starred direction per match.
-- `◇` means a separately archived, diagnostically qualified observation shown only in
-  accompanying text or audit. It remains non-primary, has no stake or settlement, and must not
-  be described as a bet or occupy the card's `主推` cell.
+- `◇` means one separately archived, replay-validated observation shown in the dedicated
+  table-external panel or accompanying text. It remains non-primary, has no stake or settlement,
+  and must not be described as a bet or occupy the card's `主推` cell.
 - `无正式主推` means no executable direction qualified for the card. It never receives a star
   and must not be replaced by a marginal 1X2 or goal-range leader.
 - `数据不足` means the required joint artifact is absent or invalid. It is not a synonym for

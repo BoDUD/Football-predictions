@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import memory_store
 import public_market_outlook
+import publication_outlook
 
 RESULT_LABELS = {
     "win": "红",
@@ -77,6 +78,55 @@ ZERO_ZERO_CONTINUATION = re.compile(
     r"(?:概率|总?排名|全分布|赔率|EV|期望值|未进前二|进入前二|未进\s*Top-?2)",
     re.IGNORECASE,
 )
+
+PUBLICATION_BLOCKER_LABELS = {
+    "canonical_model_binding": "模型绑定未通过",
+    "odds_provenance": "赔率来源或时效未通过",
+    "complete_current_market": "当前市场不完整",
+    "positive_ev": "当前模型 EV 未为正",
+    "positive_edge": "模型相对无水边际未为正",
+    "bookmaker_depth": "公司数量不足",
+    "data_quality": "数据质量不足",
+    "market_signal_classified": "市场信号未完成分类",
+    "adverse_signal_gate": "反向或冲突盘口安全检查未通过",
+    "market_specific_evidence": "市场专项证据不足",
+    "market_policy_enabled": "该市场当前仅允许观察",
+    "league_forward_evidence": "联赛前向发布证据不足",
+    "upstream_formal_policy": "上游模型尚未开放正式发布",
+    "market_availability": "当前市场候选不可用",
+    "market_unavailable": "当前市场候选不可用",
+    "candidate_evaluation_unavailable": "候选评估不可用",
+}
+PUBLICATION_REASON_LABELS = {
+    "market_source_missing": "缺少盘口来源",
+    "price_basis_missing_or_invalid": "缺少共识或中位数价格依据",
+    "market_collected_at_missing": "缺少盘口采集时间",
+    "market_complete_false": "当前盘口不完整",
+    "positive_current_ev_unavailable": "缺少可复算的当前 EV",
+    "current_ev_not_positive": "当前 EV 不为正",
+    "positive_model_market_edge_unavailable": "缺少可比无水市场边际",
+    "model_market_edge_not_positive": "模型相对无水市场边际不为正",
+    "medium_or_high_data_quality_required": "数据质量未达到中或高",
+    "market_signal_unclassified": "市场信号未完成分类",
+    "adverse_market_safety_thresholds_not_met": "反向或冲突盘口安全阈值未通过",
+    "attacking_or_chance_quality_evidence_required": (
+        "缺少机会质量证据，或确认首发与进攻配置证据"
+    ),
+    "corner_profile_evidence_required": "缺少独立角球画像证据",
+    "deep_favorite_safety_evidence_required": "深盘热门专项安全证据不足",
+    "market_observation_only_under_active_policy": "当前政策仅允许该市场观察",
+    "league_forward_release_evidence_unavailable": "联赛级前向发布证据不足",
+    "upstream_corner_model_remains_non_formal": "角球模型尚未开放正式发布",
+    "source_market_identity_unavailable": "当前盘口身份不可用",
+    "canonical_corner_observation_missing": "缺少可验证角球模型候选",
+    "canonical_decimal_price_snapshot_unavailable": "缺少规范十进制赔率快照",
+    "decision_time_price_snapshot_unavailable": "缺少决策时点赔率快照",
+    "candidate_evaluation_missing": "该归档版本缺少当前候选评估",
+    "candidate_evaluation_legacy_only": "该归档版本只有历史只读候选评估",
+    "candidate_evaluation_ambiguous": "该归档版本包含多份冲突候选评估",
+    "candidate_evaluation_invalid": "候选评估未通过重放验证",
+}
+SAFE_MACHINE_CODE = re.compile(r"[a-z0-9_.:-]+", re.IGNORECASE)
 
 
 def clean_text(value: Any, limit: int | None = None) -> str:
@@ -242,6 +292,255 @@ def format_pick(
     return clean_text(pick)
 
 
+def _candidate_pick_for_display(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    pick = dict(candidate)
+    if candidate.get("market") == "half_time":
+        pick["market"] = candidate.get("submarket")
+    return pick
+
+
+def _signed_percentage(value: Any) -> str:
+    if value is None:
+        return "未取得"
+    return f"{float(value) * 100:+.1f}%"
+
+
+def _edge_percentage_points(value: Any) -> str:
+    if value is None:
+        return "未取得"
+    return f"{float(value):+.1f}pp"
+
+
+def _safe_machine_reason(value: Any) -> str:
+    code = str(value or "").strip()
+    if not code:
+        return "原因未记录"
+    translated = PUBLICATION_REASON_LABELS.get(code)
+    if translated:
+        return translated
+    bookmaker_match = re.fullmatch(r"bookmaker_count_below_(\d+)", code)
+    if bookmaker_match:
+        return f"公司数未达到{bookmaker_match.group(1)}家"
+    if SAFE_MACHINE_CODE.fullmatch(code) and "..." not in code:
+        return code
+    return "未映射原因（详见归档审计）"
+
+
+def _publication_blocker_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        gate = str(value.get("gate") or "").strip()
+        label = PUBLICATION_BLOCKER_LABELS.get(gate)
+        if label is None:
+            label = (
+                gate
+                if SAFE_MACHINE_CODE.fullmatch(gate) and "..." not in gate
+                else "未映射阻断"
+            )
+        reasons_raw = value.get("reasons")
+        reasons = (
+            [_safe_machine_reason(item) for item in reasons_raw]
+            if isinstance(reasons_raw, (list, tuple))
+            else []
+        )
+        reasons = list(dict.fromkeys(reasons))
+        return f"{label}（{'；'.join(reasons)}）" if reasons else label
+    return _safe_machine_reason(value)
+
+
+def _publication_blockers(summary: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    raw = summary.get("blockers")
+    raw = raw if isinstance(raw, Mapping) else {}
+    output: dict[str, tuple[str, ...]] = {}
+    for category in ("data", "value", "policy", "safety"):
+        values = (
+            summary.get("safety_blockers")
+            if category == "safety"
+            else raw.get(category)
+        )
+        normalized = (
+            [_publication_blocker_text(item) for item in values]
+            if isinstance(values, (list, tuple))
+            else []
+        )
+        output[category] = tuple(dict.fromkeys(normalized))
+    return output
+
+
+def _blocker_line(summary: Mapping[str, Any]) -> str:
+    blockers = _publication_blockers(summary)
+
+    def category_text(category: str) -> str:
+        values = blockers[category]
+        return "、".join(values) if values else "无"
+
+    line = (
+        f"未正式发布｜数据阻断：{category_text('data')}｜"
+        f"价值阻断：{category_text('value')}｜"
+        f"政策阻断：{category_text('policy')}"
+    )
+    if blockers["safety"]:
+        line += f"｜安全阻断：{category_text('safety')}"
+    return line
+
+
+def _publication_stage_text(
+    version: dict[str, Any],
+    summary: Mapping[str, Any],
+    previous: dict[str, Any] | None = None,
+) -> str:
+    stage = str(summary.get("stage") or version.get("analysis_stage") or "initial")
+    if stage == "initial":
+        return "初盘结论待 T−30 复核首发与即时盘口"
+
+    transition: Mapping[str, Any] = {}
+    if previous is not None:
+        raw_transition = publication_outlook.observation_transition(previous, version)
+        if isinstance(raw_transition, Mapping):
+            transition = raw_transition
+    transition_status = str(transition.get("status") or "not_applicable")
+    state = str(summary.get("state") or "no_usable_direction")
+    primary_change = version.get("primary_change")
+    primary_change = primary_change if isinstance(primary_change, Mapping) else {}
+    if state == "formal_primary":
+        if transition_status == "upgraded_to_formal":
+            return "临场已从观察首选升级为正式主推"
+        if transition_status == "formalized_other_direction":
+            return "临场已发布正式主推，方向不同于原观察首选"
+        if primary_change.get("status") == "maintained":
+            return "临场正式主推维持"
+        if primary_change.get("status") == "changed":
+            return "临场正式主推已变更"
+        return "临场正式主推已发布"
+    if state == "observation_primary":
+        return {
+            "maintained": "临场仍受政策阻断，观察首选维持",
+            "changed": "临场仍受阻断，观察首选已变更",
+            "appeared": "临场出现观察首选，但仍未达到正式发布门槛",
+            "disappeared": "临场观察首选已消失，当前无可用方向",
+            "formal_cancelled_to_observation": "临场正式主推已取消，当前降为观察首选",
+        }.get(transition_status, "临场仍受阻断，保持观察")
+    return "临场复核后仍无可用方向"
+
+
+def publication_display(
+    version: dict[str, Any], previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return one archive-bound publication view shared by text and images."""
+
+    summary = publication_outlook.publication_summary(version)
+    if not isinstance(summary, Mapping):
+        raise ValueError("publication summary must be an object")
+    state = str(summary.get("state") or "")
+    if state not in {"formal_primary", "observation_primary", "no_usable_direction"}:
+        raise ValueError("publication summary has an unsupported state")
+
+    formal = summary.get("formal_primary")
+    formal_label: str | None = None
+    formal_pick: dict[str, Any] | None = None
+    if isinstance(formal, Mapping):
+        market = str(formal.get("market") or "")
+        raw_pick = formal.get("pick")
+        if not market or not isinstance(raw_pick, Mapping):
+            raise ValueError("formal publication summary is incomplete")
+        formal_pick = dict(raw_pick)
+        formal_label = format_pick(market, formal_pick, version)
+
+    observation = summary.get("observation_primary")
+    observation_label: str | None = None
+    observation_value: dict[str, Any] | None = None
+    if isinstance(observation, Mapping):
+        observation_value = dict(observation)
+        market = str(observation_value.get("market") or "")
+        if not market:
+            raise ValueError("observation publication summary has no market")
+        observation_label = format_pick(
+            market, _candidate_pick_for_display(observation_value), version
+        )
+
+    if state == "formal_primary" and formal_label is None:
+        raise ValueError("formal publication state has no formal primary")
+    if state != "formal_primary" and formal_label is not None:
+        raise ValueError("non-formal publication state contains a formal primary")
+    if state == "observation_primary" and observation_label is None:
+        raise ValueError("observation publication state has no observation primary")
+    if state != "observation_primary" and observation_label is not None:
+        raise ValueError(
+            "non-observation publication state contains an observation primary"
+        )
+
+    return {
+        "state": state,
+        "formal_label": formal_label,
+        "formal_pick": formal_pick,
+        "observation_label": observation_label,
+        "observation": observation_value,
+        "blocker_line": _blocker_line(summary),
+        "stage_text": _publication_stage_text(version, summary, previous),
+        "audit_status": summary.get("candidate_evaluation_status"),
+    }
+
+
+def publication_text_lines(
+    version: dict[str, Any], previous: dict[str, Any] | None = None
+) -> list[str]:
+    view = publication_display(version, previous)
+    if view["state"] == "formal_primary":
+        pick = view["formal_pick"] or {}
+        return [
+            f"正式主推：{view['formal_label']}",
+            "主推指标："
+            f"概率 {percentage(pick.get('probability'))}｜"
+            f"EV {_signed_percentage(pick.get('ev'))}｜"
+            f"edge {_edge_percentage_points(pick.get('edge_pp'))}",
+            f"发布状态：{view['stage_text']}",
+        ]
+    if view["state"] == "observation_primary":
+        observation = view["observation"] or {}
+        return [
+            "正式主推：无",
+            f"◇ 观察首选：{view['observation_label']}｜"
+            f"模型 EV {_signed_percentage(observation.get('ev'))}｜"
+            f"edge {_edge_percentage_points(observation.get('edge_pp'))}｜"
+            "不下注、不计战绩",
+            str(view["blocker_line"]),
+            f"发布状态：{view['stage_text']}",
+        ]
+    return [
+        "正式主推：无",
+        "— 无可用方向",
+        str(view["blocker_line"]),
+        f"发布状态：{view['stage_text']}",
+    ]
+
+
+def publication_panel_lines(
+    version: dict[str, Any],
+    identifier: str,
+    previous: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    view = publication_display(version, previous)
+    if view["state"] == "formal_primary":
+        return (
+            f"[{identifier}] 正式主推已发布：{view['formal_label']}",
+            f"发布状态：{view['stage_text']}",
+        )
+    if view["state"] == "observation_primary":
+        observation = view["observation"] or {}
+        return (
+            f"[{identifier}] ◇ 观察首选：{view['observation_label']}",
+            f"模型 EV {_signed_percentage(observation.get('ev'))}｜"
+            f"相对无水边际 {_edge_percentage_points(observation.get('edge_pp'))}｜"
+            "不下注、不计战绩",
+            str(view["blocker_line"]),
+            f"发布状态：{view['stage_text']}",
+        )
+    return (
+        f"[{identifier}] — 无可用方向",
+        str(view["blocker_line"]),
+        f"发布状态：{view['stage_text']}",
+    )
+
+
 def version_candidates(record: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in record.get("revisions", []) if isinstance(item, dict)] + [
         record
@@ -273,6 +572,13 @@ def merged_version(record: dict[str, Any], version: dict[str, Any]) -> dict[str,
     # rendering merely because an old revision predates the joint schema.
     if version is not record and "joint_scenario_audit" not in version:
         merged["joint_scenario_audit"] = None
+    if version is not record and "candidate_audits" not in version:
+        merged["candidate_audits"] = []
+    # A reviewed top-level record may bind its final candidate audit through
+    # settlement_basis.  That later binding must not authorize an earlier
+    # revision; a revision may only restore a settlement basis of its own.
+    if version is not record:
+        merged.pop("settlement_basis", None)
     merged.update(version)
     return merged
 
@@ -604,11 +910,6 @@ def validate_plain_text(lines: list[str]) -> str:
 
 def render_initial(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "initial"))
-    primary = (
-        version.get("primary_pick")
-        if isinstance(version.get("primary_pick"), dict)
-        else {}
-    )
     outlook = joint_outlook(version)
     return validate_plain_text(
         [
@@ -616,9 +917,7 @@ def render_initial(record: dict[str, Any]) -> str:
             f"赛事：{league_display_name(version)}",
             f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
             f"开赛：{format_time(version.get('kickoff'))}",
-            f"主推：{primary_line(version, version)}",
-            model_leader_reference(version),
-            f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
+            *publication_text_lines(version),
             f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
             f"半场倾向：{outlook['half_time']}",
             f"胜平负：{outlook['one_x_two']}",
@@ -634,12 +933,14 @@ def render_initial(record: dict[str, Any]) -> str:
 
 def render_lineup(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "lineup-check"))
-    primary = (
-        version.get("primary_pick")
-        if isinstance(version.get("primary_pick"), dict)
-        else {}
-    )
     outlook = joint_outlook(version)
+    primary = resolved_primary_pick(version)
+    previous_versions = [
+        item for item in record.get("revisions", []) if isinstance(item, dict)
+    ]
+    previous = (
+        merged_version(record, previous_versions[-1]) if previous_versions else {}
+    )
     change = (
         version.get("primary_change")
         if isinstance(version.get("primary_change"), dict)
@@ -649,12 +950,6 @@ def render_lineup(record: dict[str, Any]) -> str:
     if status == "maintained":
         change_line = f"主推维持：{primary_line(version, version)}"
     else:
-        previous_versions = [
-            item for item in record.get("revisions", []) if isinstance(item, dict)
-        ]
-        previous = (
-            merged_version(record, previous_versions[-1]) if previous_versions else {}
-        )
         previous_text = primary_line(previous, previous) if previous else "原方向"
         if not primary:
             change_line = f"主推取消：{previous_text} → 不下注"
@@ -662,6 +957,8 @@ def render_lineup(record: dict[str, Any]) -> str:
             change_line = (
                 f"主推变更：{previous_text} → {primary_line(version, version)}"
             )
+    publication_lines = publication_text_lines(version, previous or None)
+    publication_lines[-1] = f"{change_line}｜{publication_lines[-1]}"
     return validate_plain_text(
         [
             f"【临场分析｜{version.get('match_id')}】",
@@ -669,10 +966,7 @@ def render_lineup(record: dict[str, Any]) -> str:
             f"比赛：{version.get('home_team')} vs {version.get('away_team')}",
             f"检查时间：{format_time(version.get('lineup_rechecked_at'))}",
             "比赛状态：赛前，临场版本已归档",
-            change_line,
-            f"当前主推：{primary_line(version, version)}",
-            model_leader_reference(version),
-            f"主推概率：{percentage(primary.get('probability'))}｜EV {percentage(primary.get('ev'))}",
+            *publication_lines,
             f"次选参考：{secondary_picks(version, version)}（不结算、不计战绩、不计金额）",
             f"半场倾向：{outlook['half_time']}",
             f"胜平负：{outlook['one_x_two']}",

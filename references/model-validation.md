@@ -276,6 +276,18 @@ it remains an observation with no stake, monetary settlement, primary result, ac
 ROI. `formal_eligible` still requires every gate, including release gates, and the evaluation
 artifact never creates or promotes a formal primary by itself.
 
+The public publication summary is a read-only projection of that validated audit. It may show
+one cross-market `observation_primary` only when the selected candidate is both
+`shadow_selected=true` and `counterfactual_eligible=true`, remains
+`formal_eligible=false`, and the archived version has no formal primary. The cross-market
+tie-break reuses the frozen shadow confidence, settlement-safety, bookmaker-depth, and stable
+identity ordering. It never edits the candidate artifact, fills a formal-pick field, creates a
+stake, or changes settlement. Failed gates are exposed separately as data, value, policy, or
+mixed safety blockers; the original machine gate category and reason remain available so the
+display taxonomy cannot be mistaken for a changed release rule. When no candidate passes all
+non-release gates, the publication summary reports `no_usable_direction` and must not expose a failed
+near-miss as an observation.
+
 The archive freezes the original source payload, its canonical hash, and an active-version
 binding covering fixture, stage, archive time, joint/score lineage, data quality, and guardrail
 evidence. The reviewed settlement basis freezes the same evaluation context. Before review or
@@ -292,6 +304,15 @@ selection cohort and a release-blocker funnel separately from primary performanc
 graded shadow selections in one market is only a manual model/policy validation trigger;
 `parameter_change_authorized` remains false, market status is unchanged, and no automatic
 release, threshold change, or historical rewrite is permitted.
+
+They also expose recent 50- and 100-match candidate-gate windows as diagnostic coverage, not
+performance evidence. Each window selects distinct matches by their latest immutable pre-match
+archive time, then replays every initial and lineup-check v3 candidate audit belonging to those
+matches. Pending records are included because the purpose is to diagnose collection and release
+friction before settlement. Missing historical v3 audits, rejected replay, and explicitly
+unavailable markets remain counted as coverage gaps; they are never backfilled from the current
+model. Stage, market, raw gate, and blocker-type denominators are reported independently, and an
+incomplete 50/100 window must say so rather than implying a full sample.
 
 ## Untouched live-forward confirmation
 

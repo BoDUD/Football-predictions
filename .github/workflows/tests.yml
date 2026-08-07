@@ -65,6 +65,8 @@ jobs:
               Path("scripts/joint_scenario_model.py"),
               Path("scripts/joint_path_kernel.py"),
               Path("scripts/public_market_outlook.py"),
+              Path("scripts/publication_outlook.py"),
+              Path("scripts/gate_stats.py"),
               Path("scripts/prediction_card_renderer.py"),
               Path("scripts/review_card_renderer.py"),
               Path("scripts/plain_text_formatter.py"),
@@ -80,6 +82,8 @@ jobs:
               Path("references/half-time-full-time.md"),
               Path("references/model-validation.md"),
               Path("references/prediction-framework.md"),
+              Path("references/image-output.md"),
+              Path("references/plain-text-output.md"),
               Path("references/review-framework.md"),
           ]
           missing = [str(path) for path in required if not path.is_file()]

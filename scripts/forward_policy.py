@@ -108,6 +108,8 @@ DEFAULT_PROTECTED_FILES = (
     "scripts/corner_ranker.py",
     "scripts/memory_store.py",
     "scripts/public_market_outlook.py",
+    "scripts/publication_outlook.py",
+    "scripts/gate_stats.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -126,21 +128,26 @@ DEFAULT_PROTECTED_FILES = (
     "references/expanded-markets.md",
     "references/half-time-full-time.md",
     "references/image-output.md",
+    "references/plain-text-output.md",
 )
 REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "scripts/forward_policy.py",
     "scripts/forward_validation.py",
     "scripts/memory_store.py",
     "scripts/public_market_outlook.py",
+    "scripts/publication_outlook.py",
+    "scripts/gate_stats.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
     "soccer_predict/__init__.py",
     "pyproject.toml",
     "clawhub.json",
+    "references/plain-text-output.md",
 }
 RENDERER_POLICY_PROTECTED_FILES = (
     "scripts/public_market_outlook.py",
+    "scripts/publication_outlook.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -329,7 +336,13 @@ def _protected_file_hashes(
 def _runtime_policy() -> dict[str, Any]:
     # Imports are intentionally lazy so the policy helper remains usable by packaging and
     # doctor commands even when optional rendering dependencies are absent.
-    from scripts import htft_ranker, memory_store, public_market_outlook
+    from scripts import (
+        gate_stats,
+        htft_ranker,
+        memory_store,
+        public_market_outlook,
+        publication_outlook,
+    )
 
     return {
         "market_policy_version": memory_store.STRICT_OOS_POLICY_VERSION,
@@ -362,6 +375,9 @@ def _runtime_policy() -> dict[str, Any]:
             "gate_categories": list(memory_store.CANDIDATE_GATE_CATEGORIES),
             "at_most_one_shadow_per_match_market": True,
             "shadow_never_counts_as_primary_or_money": True,
+            "recent_gate_diagnostics_schema_version": gate_stats.SCHEMA_VERSION,
+            "recent_distinct_match_windows": [50, 100],
+            "recent_gate_diagnostics_are_not_performance": True,
         },
         "display_policy": {
             "public_joint_events": "frozen_global_joint_top2",
@@ -377,6 +393,19 @@ def _runtime_policy() -> dict[str, Any]:
             "uncertainty_policy": public_market_outlook.JOINT_UNCERTAINTY_POLICY,
             "caller_may_not_reorder_or_replace": True,
             "ellipsis_forbidden": True,
+            "formal_primary_definition_unchanged": True,
+            "observation_primary_schema_version": (
+                publication_outlook.PUBLICATION_OUTLOOK_SCHEMA_VERSION
+            ),
+            "observation_primary_selection_policy": (
+                publication_outlook.OBSERVATION_PRIMARY_SELECTION_POLICY
+            ),
+            "observation_requires_all_non_release_gates": True,
+            "observation_never_occupies_primary_cell": True,
+            "observation_never_counts_as_primary_or_money": True,
+            "blocker_types": ["data", "value", "policy", "safety"],
+            "initial_stage_requires_t_minus_30_followup_message": True,
+            "lineup_stage_reports_observation_transition": True,
         },
         "validation_protocol": deepcopy(DEFAULT_VALIDATION_PROTOCOL),
     }

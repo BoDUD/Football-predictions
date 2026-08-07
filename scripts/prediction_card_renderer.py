@@ -35,8 +35,20 @@ PANEL_VERTICAL_MARGIN = 28
 TITLE_HEIGHT = 190
 HEADER_HEIGHT = 70
 ROW_HEIGHT = 132
-FOOTER_HEIGHT = 190
+# Reserve enough bottom breathing room for Linux Noto CJK and Windows YaHei.
+# Their glyph bounding boxes differ by a few pixels; the larger fixed footer
+# keeps the final provenance line safely inside the rounded panel on both.
+FOOTER_HEIGHT = 200
 TABLE_WIDTH = WIDTH - 2 * SIDE_MARGIN
+PUBLICATION_MARGIN_TOP = 18
+PUBLICATION_HEADER_HEIGHT = 46
+PUBLICATION_BLOCK_PADDING = 14
+PUBLICATION_BLOCK_GAP = 10
+PUBLICATION_BOTTOM_PADDING = 16
+PUBLICATION_LINE_HEIGHT = 25
+PUBLICATION_FONT_SIZE = 17
+PUBLICATION_WRAP_UNITS = 140
+FOOTER_CONTENT_OFFSET = 32
 
 # Keep this layout intentionally close to the compact card the user selected.
 # Widths sum to TABLE_WIDTH exactly.
@@ -123,16 +135,41 @@ class CardRow:
 
 
 @dataclass(frozen=True)
+class PublicationPanelRow:
+    state: str
+    lines: tuple[str, ...]
+
+    @property
+    def height(self) -> int:
+        return 2 * PUBLICATION_BLOCK_PADDING + len(self.lines) * PUBLICATION_LINE_HEIGHT
+
+
+@dataclass(frozen=True)
 class Card:
     date: str
     title: str
     subtitle: str
     rows: tuple[CardRow, ...]
+    publication_rows: tuple[PublicationPanelRow, ...]
+
+    @property
+    def publication_height(self) -> int:
+        return (
+            PUBLICATION_MARGIN_TOP
+            + PUBLICATION_HEADER_HEIGHT
+            + sum(row.height for row in self.publication_rows)
+            + PUBLICATION_BLOCK_GAP * max(len(self.publication_rows) - 1, 0)
+            + PUBLICATION_BOTTOM_PADDING
+        )
 
     @property
     def height(self) -> int:
         return (
-            TITLE_HEIGHT + HEADER_HEIGHT + len(self.rows) * ROW_HEIGHT + FOOTER_HEIGHT
+            TITLE_HEIGHT
+            + HEADER_HEIGHT
+            + len(self.rows) * ROW_HEIGHT
+            + self.publication_height
+            + FOOTER_HEIGHT
         )
 
 
@@ -250,6 +287,33 @@ def _select_archived_version(
     except ValueError as exc:
         raise ValueError(f"{prefix} cannot bind archive_stage={stage}: {exc}") from exc
     return plain_text_formatter.merged_version(dict(record), selected)
+
+
+def _previous_archived_version(
+    record: Mapping[str, Any], stage: str
+) -> dict[str, Any] | None:
+    if stage != "lineup-check":
+        return None
+    try:
+        selected = plain_text_formatter.select_version(dict(record), "initial")
+    except ValueError:
+        return None
+    return plain_text_formatter.merged_version(dict(record), selected)
+
+
+def _publication_panel_row(
+    version: dict[str, Any], identifier: str, previous: dict[str, Any] | None
+) -> PublicationPanelRow:
+    view = plain_text_formatter.publication_display(version, previous)
+    semantic_lines = plain_text_formatter.publication_panel_lines(
+        version, identifier, previous
+    )
+    wrapped: list[str] = []
+    for line in semantic_lines:
+        if any(token in line for token in FORBIDDEN_ELLIPSES):
+            raise ValueError("publication panel must not contain an ellipsis")
+        wrapped.extend(_cell_lines(line, PUBLICATION_WRAP_UNITS))
+    return PublicationPanelRow(state=str(view["state"]), lines=tuple(wrapped))
 
 
 def _expected_kickoff_time(version: Mapping[str, Any]) -> str:
@@ -436,6 +500,7 @@ def validate_payload(
         raise ValueError("rows must be a non-empty JSON array")
 
     rows: list[CardRow] = []
+    publication_rows: list[PublicationPanelRow] = []
     seen_match_ids: set[str] = set()
     archive_stages: set[str] = set()
     kickoff_dates: set[str] = set()
@@ -561,14 +626,20 @@ def validate_payload(
         total_goals, htft, scores = _joint_artifact_display(archived_version)
 
         archived_primary = _archived_primary(archived_version, prefix)
-        authorized_labels = _archived_observation_labels(archived_version, prefix)
-        derived_status = (
-            "formal_primary"
-            if archived_primary is not None
-            else "observation"
-            if authorized_labels
-            else "no_bet"
+        previous_version = _previous_archived_version(archived, archive_stage)
+        publication = plain_text_formatter.publication_display(
+            archived_version, previous_version
         )
+        publication_state = publication["state"]
+        derived_status = {
+            "formal_primary": "formal_primary",
+            "observation_primary": "observation",
+            "no_usable_direction": "no_bet",
+        }[publication_state]
+        if publication.get("formal_label") != archived_primary:
+            raise ValueError(
+                f"{prefix} publication summary conflicts with the archived formal primary"
+            )
         if status != derived_status:
             if status == "formal_primary":
                 raise ValueError(
@@ -601,11 +672,13 @@ def validate_payload(
             primary = "无正式主推"
             star = False
 
+        identifier = _safe_metadata_text(
+            raw["id"], f"{prefix}.id", max_length=24, max_visual_units=20
+        )
+
         rows.append(
             CardRow(
-                identifier=_safe_metadata_text(
-                    raw["id"], f"{prefix}.id", max_length=24, max_visual_units=20
-                ),
+                identifier=identifier,
                 time=supplied_time,
                 league=expected_league,
                 match=f"{home}\nvs {away}",
@@ -616,6 +689,9 @@ def validate_payload(
                 status=status,
                 star=star,
             )
+        )
+        publication_rows.append(
+            _publication_panel_row(archived_version, identifier, previous_version)
         )
     if len(archive_stages) != 1:
         raise ValueError("one prediction card cannot mix initial and lineup-check rows")
@@ -630,7 +706,13 @@ def validate_payload(
     else:
         title = "今日足球扫盘"
         subtitle = f"{stage_label}｜{len(rows)}场"
-    return Card(date=date, title=title, subtitle=subtitle, rows=tuple(rows))
+    return Card(
+        date=date,
+        title=title,
+        subtitle=subtitle,
+        rows=tuple(rows),
+        publication_rows=tuple(publication_rows),
+    )
 
 
 def _char_units(char: str) -> float:
@@ -707,6 +789,29 @@ def _row_values(row: CardRow) -> tuple[str, ...]:
     )
 
 
+def _publication_geometry(
+    card: Card, table_bottom: int
+) -> tuple[int, tuple[tuple[PublicationPanelRow, int, int], ...], int]:
+    header_top = table_bottom + PUBLICATION_MARGIN_TOP
+    current_top = header_top + PUBLICATION_HEADER_HEIGHT
+    blocks: list[tuple[PublicationPanelRow, int, int]] = []
+    for index, row in enumerate(card.publication_rows):
+        if index:
+            current_top += PUBLICATION_BLOCK_GAP
+        blocks.append((row, current_top, row.height))
+        current_top += row.height
+    bottom = current_top + PUBLICATION_BOTTOM_PADDING
+    return header_top, tuple(blocks), bottom
+
+
+def _publication_color(state: str) -> str:
+    return {
+        "formal_primary": COLORS["header_dark"],
+        "observation_primary": COLORS["observation"],
+        "no_usable_direction": COLORS["no_bet"],
+    }.get(state, COLORS["text"])
+
+
 def _svg_font_size(
     lines: Sequence[str], width: int, height: int, base: int, minimum: int = 11
 ) -> int:
@@ -746,6 +851,9 @@ def render_svg(card: Card) -> str:
     table_top = TITLE_HEIGHT
     rows_top = table_top + HEADER_HEIGHT
     table_bottom = rows_top + len(card.rows) * ROW_HEIGHT
+    publication_header_top, publication_blocks, publication_bottom = (
+        _publication_geometry(card, table_bottom)
+    )
     formal_count = sum(row.status == "formal_primary" for row in card.rows)
 
     title_size = _svg_font_size((card.title,), 1160, 62, 48, 24)
@@ -836,7 +944,41 @@ def render_svg(card: Card) -> str:
         f'<rect x="{SIDE_MARGIN}" y="{table_top}" width="{TABLE_WIDTH}" height="{table_bottom - table_top}" fill="none" stroke="{COLORS["grid"]}"/>'
     )
 
-    footer_y = table_bottom + 36
+    parts.append(
+        f'<text x="72" y="{publication_header_top + 30}" '
+        'font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" '
+        f'font-size="21" font-weight="700" fill="{COLORS["text"]}">'
+        "观察首选与发布状态</text>"
+    )
+    for publication_row, top, block_height in publication_blocks:
+        parts.append(
+            f'<rect x="58" y="{top}" width="{WIDTH - 116}" height="{block_height}" '
+            f'rx="12" fill="{COLORS["row_alt"]}" stroke="{COLORS["grid"]}"/>'
+        )
+        first_fill = _publication_color(publication_row.state)
+        for line_index, line in enumerate(publication_row.lines):
+            fill = (
+                first_fill
+                if line_index == 0
+                else COLORS["warning"]
+                if line.startswith("未正式发布")
+                else COLORS["text"]
+            )
+            weight = "700" if line_index == 0 else "500"
+            baseline = (
+                top
+                + PUBLICATION_BLOCK_PADDING
+                + PUBLICATION_FONT_SIZE
+                + line_index * PUBLICATION_LINE_HEIGHT
+            )
+            parts.append(
+                f'<text x="74" y="{baseline}" '
+                'font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" '
+                f'font-size="{PUBLICATION_FONT_SIZE}" font-weight="{weight}" '
+                f'fill="{fill}">{escape(line)}</text>'
+            )
+
+    footer_y = publication_bottom + FOOTER_CONTENT_OFFSET
     parts.extend(
         [
             f'<text x="72" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["star"]}">★ 正式主推中的最高信心方向</text>',
@@ -965,6 +1107,9 @@ def render_raster(card: Card, output_format: str) -> bytes:
     header_font = _load_font(20, bold=True)
     footer_font = _load_font(20)
     small_font = _load_font(16)
+    publication_header_font = _load_font(21, bold=True)
+    publication_font = _load_font(PUBLICATION_FONT_SIZE)
+    publication_bold_font = _load_font(PUBLICATION_FONT_SIZE, bold=True)
 
     draw.rounded_rectangle(
         (
@@ -993,6 +1138,9 @@ def render_raster(card: Card, output_format: str) -> bytes:
     table_top = TITLE_HEIGHT
     rows_top = table_top + HEADER_HEIGHT
     table_bottom = rows_top + len(card.rows) * ROW_HEIGHT
+    publication_header_top, publication_blocks, publication_bottom = (
+        _publication_geometry(card, table_bottom)
+    )
     draw.rectangle(
         (SIDE_MARGIN, table_top, SIDE_MARGIN + TABLE_WIDTH, rows_top),
         fill=COLORS["header"],
@@ -1048,7 +1196,42 @@ def render_raster(card: Card, output_format: str) -> bytes:
         outline=COLORS["grid"],
     )
 
-    footer_y = table_bottom + 22
+    draw.text(
+        (72, publication_header_top + 6),
+        "观察首选与发布状态",
+        font=publication_header_font,
+        fill=COLORS["text"],
+    )
+    for publication_row, top, block_height in publication_blocks:
+        draw.rounded_rectangle(
+            (58, top, WIDTH - 58, top + block_height),
+            radius=12,
+            fill=COLORS["row_alt"],
+            outline=COLORS["grid"],
+        )
+        first_fill = _publication_color(publication_row.state)
+        for line_index, line in enumerate(publication_row.lines):
+            fill = (
+                first_fill
+                if line_index == 0
+                else COLORS["warning"]
+                if line.startswith("未正式发布")
+                else COLORS["text"]
+            )
+            font = publication_bold_font if line_index == 0 else publication_font
+            draw.text(
+                (
+                    74,
+                    top
+                    + PUBLICATION_BLOCK_PADDING
+                    + line_index * PUBLICATION_LINE_HEIGHT,
+                ),
+                line,
+                font=font,
+                fill=fill,
+            )
+
+    footer_y = publication_bottom + FOOTER_CONTENT_OFFSET
     draw.text(
         (72, footer_y),
         "★ 正式主推中的最高信心方向",

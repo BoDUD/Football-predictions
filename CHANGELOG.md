@@ -4,6 +4,16 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-08-08
+
+### Added
+- Added a replay-derived, non-counting observation-primary view for archived `candidate-evaluation/3.0.0` records, with explicit data, value, policy, and safety blockers while keeping every formal-primary gate unchanged.
+- Added recent 50/100-match candidate-gate funnel diagnostics across immutable initial and lineup-check versions, including archive coverage, unavailable markets, stage splits, and raw failure reasons.
+
+### Changed
+- Kept the eight-column prediction table and formal-primary cell unchanged, while adding a separate observation/publication-status panel and stage-specific initial versus T−30 messaging to image and plain-text output.
+- Require any active live-forward cohort to close before these display semantics change; a replacement cohort may start only after this release's final merge commit is frozen.
+
 ## [3.5.0] - 2026-08-07
 
 ### Added
