@@ -4,6 +4,11 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-08-08
+
+### Fixed
+- Reproduce the canonical corner dataset builder and model manager artifacts when freezing role-aware lineage: `forward-artifact-lineage/1.2.0` now validates the manifest's `dataset_sha256` field and the registry's list-shaped 19-league entries instead of synthetic fixture-only shapes, while historical `1.1.0` snapshots remain replayable.
+
 ## [3.7.0] - 2026-08-08
 
 - Freeze a complete, role-aware football/HTFT and corner data/model lineage instead of a single registry pair.
