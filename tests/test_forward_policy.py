@@ -97,7 +97,7 @@ class ForwardPolicyTests(unittest.TestCase):
                     "leagues": [
                         {
                             "league_key": "test_league",
-                            "dataset_hash": "sha256:" + "4" * 64,
+                            "dataset_sha256": "sha256:" + "4" * 64,
                         }
                     ],
                 }
@@ -111,8 +111,9 @@ class ForwardPolicyTests(unittest.TestCase):
                     "schema_version": "test/1",
                     "registry_hash": "sha256:" + "5" * 64,
                     "dataset_hashes": {"test_league": "sha256:" + "4" * 64},
-                    "leagues": {
-                        "test_league": {
+                    "leagues": [
+                        {
+                            "league_key": "test_league",
                             "model_hash": "sha256:" + "8" * 64,
                             "dataset_hash": "sha256:" + "4" * 64,
                             "source_lineage": {
@@ -120,7 +121,7 @@ class ForwardPolicyTests(unittest.TestCase):
                                 "dataset_hash": "sha256:" + "4" * 64,
                             },
                         }
-                    },
+                    ],
                 }
             ),
             encoding="utf-8",

@@ -50,7 +50,7 @@ class ArtifactLineageTests(unittest.TestCase):
                     "leagues": [
                         {
                             "league_key": "test_league",
-                            "dataset_hash": "sha256:" + "4" * 64,
+                            "dataset_sha256": "sha256:" + "4" * 64,
                         }
                     ],
                 }
@@ -64,8 +64,9 @@ class ArtifactLineageTests(unittest.TestCase):
                     "schema_version": "corner-registry/1",
                     "registry_hash": "sha256:" + "5" * 64,
                     "dataset_hashes": {"test_league": "sha256:" + "4" * 64},
-                    "leagues": {
-                        "test_league": {
+                    "leagues": [
+                        {
+                            "league_key": "test_league",
                             "model_hash": "sha256:" + "8" * 64,
                             "dataset_hash": "sha256:" + "4" * 64,
                             "source_lineage": {
@@ -73,7 +74,7 @@ class ArtifactLineageTests(unittest.TestCase):
                                 "dataset_hash": "sha256:" + "4" * 64,
                             },
                         }
-                    },
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -106,6 +107,62 @@ class ArtifactLineageTests(unittest.TestCase):
                 lineage["model_registries"]["corner"]["dataset_role"],
                 "corner_history",
             )
+
+    def test_historical_1_1_mapping_shape_remains_replayable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._write_artifacts(Path(temporary))
+            manifest_path = paths["data"]["corner_history"]
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["leagues"][0]["dataset_hash"] = manifest["leagues"][0].pop(
+                "dataset_sha256"
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            registry_path = paths["models"]["corner"]
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            item = registry["leagues"][0]
+            item.pop("league_key")
+            registry["leagues"] = {"test_league": item}
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+            lineage = artifact_lineage._build_lineage(
+                repo_root=temporary,
+                data_manifests=paths["data"],
+                model_registries=paths["models"],
+                schema_version=artifact_lineage.PREVIOUS_SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                artifact_lineage.verify_files(lineage, repo_root=temporary), lineage
+            )
+
+    def test_current_schema_rejects_synthetic_corner_shapes_and_duplicate_keys(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._write_artifacts(Path(temporary))
+            registry_path = paths["models"]["corner"]
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            item = registry["leagues"][0]
+            registry["leagues"] = {"test_league": item}
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            with self.assertRaisesRegex(
+                artifact_lineage.ArtifactLineageError, "leagues are missing"
+            ):
+                artifact_lineage.build_lineage(
+                    repo_root=temporary,
+                    data_manifests=paths["data"],
+                    model_registries=paths["models"],
+                )
+
+            registry["leagues"] = [item, deepcopy(item)]
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            with self.assertRaisesRegex(
+                artifact_lineage.ArtifactLineageError, "league keys are invalid"
+            ):
+                artifact_lineage.build_lineage(
+                    repo_root=temporary,
+                    data_manifests=paths["data"],
+                    model_registries=paths["models"],
+                )
 
     def test_missing_role_and_cross_registry_substitution_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -10,7 +10,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-SCHEMA_VERSION = "forward-artifact-lineage/1.1.0"
+PREVIOUS_SCHEMA_VERSION = "forward-artifact-lineage/1.1.0"
+SCHEMA_VERSION = "forward-artifact-lineage/1.2.0"
 DATA_ROLES = ("football_history", "corner_history")
 MODEL_ROLES = ("football_htft", "corner")
 MODEL_DATA_ROLE = {
@@ -76,7 +77,9 @@ def _relative(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _corner_manifest_dataset_hashes(manifest: Mapping[str, Any]) -> dict[str, str]:
+def _corner_manifest_dataset_hashes(
+    manifest: Mapping[str, Any], *, schema_version: str
+) -> dict[str, str]:
     leagues = manifest.get("leagues")
     if not isinstance(leagues, list) or not leagues:
         raise ArtifactLineageError("corner manifest leagues are missing")
@@ -85,12 +88,44 @@ def _corner_manifest_dataset_hashes(manifest: Mapping[str, Any]) -> dict[str, st
         if not isinstance(item, Mapping):
             raise ArtifactLineageError(f"corner manifest leagues[{index}] is invalid")
         key = str(item.get("league_key") or "")
+        field = (
+            "dataset_hash"
+            if schema_version == PREVIOUS_SCHEMA_VERSION
+            else "dataset_sha256"
+        )
         dataset_hash = _require_hash(
-            item.get("dataset_hash"), f"corner manifest leagues[{index}].dataset_hash"
+            item.get(field), f"corner manifest leagues[{index}].{field}"
         )
         if not key or key in result:
             raise ArtifactLineageError("corner manifest league keys are invalid")
         result[key] = dataset_hash
+    return result
+
+
+def _corner_registry_leagues(
+    registry: Mapping[str, Any], *, schema_version: str
+) -> dict[str, Mapping[str, Any]]:
+    raw_leagues = registry.get("leagues")
+    if schema_version == PREVIOUS_SCHEMA_VERSION:
+        if not isinstance(raw_leagues, Mapping) or not raw_leagues:
+            raise ArtifactLineageError("corner registry leagues are missing")
+        result: dict[str, Mapping[str, Any]] = {}
+        for raw_key, item in raw_leagues.items():
+            key = str(raw_key or "")
+            if not key or key in result or not isinstance(item, Mapping):
+                raise ArtifactLineageError("corner registry league keys are invalid")
+            result[key] = item
+        return result
+    if not isinstance(raw_leagues, list) or not raw_leagues:
+        raise ArtifactLineageError("corner registry leagues are missing")
+    result: dict[str, Mapping[str, Any]] = {}
+    for index, item in enumerate(raw_leagues):
+        if not isinstance(item, Mapping):
+            raise ArtifactLineageError(f"corner registry leagues[{index}] is invalid")
+        key = str(item.get("league_key") or "")
+        if not key or key in result:
+            raise ArtifactLineageError("corner registry league keys are invalid")
+        result[key] = item
     return result
 
 
@@ -100,6 +135,7 @@ def _validate_registry_dataset_link(
     *,
     manifest: Mapping[str, Any],
     manifest_hash: str,
+    schema_version: str,
 ) -> dict[str, Any]:
     if role == "football_htft":
         if registry.get("dataset_manifest_hash") != manifest_hash:
@@ -109,7 +145,9 @@ def _validate_registry_dataset_link(
         return {"dataset_manifest_hash": manifest_hash}
     if role != "corner":
         raise ArtifactLineageError(f"unsupported model role: {role}")
-    expected_dataset_hashes = _corner_manifest_dataset_hashes(manifest)
+    expected_dataset_hashes = _corner_manifest_dataset_hashes(
+        manifest, schema_version=schema_version
+    )
     raw_dataset_hashes = registry.get("dataset_hashes")
     if (
         not isinstance(raw_dataset_hashes, Mapping)
@@ -119,8 +157,8 @@ def _validate_registry_dataset_link(
         raise ArtifactLineageError(
             "corner registry dataset_hashes do not reproduce the corner manifest"
         )
-    leagues = registry.get("leagues")
-    if not isinstance(leagues, Mapping) or set(leagues) != set(expected_dataset_hashes):
+    leagues = _corner_registry_leagues(registry, schema_version=schema_version)
+    if set(leagues) != set(expected_dataset_hashes):
         raise ArtifactLineageError("corner registry league coverage is incomplete")
     for key, item in leagues.items():
         lineage = item.get("source_lineage") if isinstance(item, Mapping) else None
@@ -142,7 +180,7 @@ def _validate_registry_dataset_link(
 
 
 def _registered_models(
-    role: str, registry: Mapping[str, Any]
+    role: str, registry: Mapping[str, Any], *, schema_version: str
 ) -> dict[str, dict[str, str]]:
     raw_leagues = registry.get("leagues")
     if role == "football_htft":
@@ -157,9 +195,9 @@ def _registered_models(
             iterable.append((str(item.get("league_key") or ""), item))
         required = ("model_hash", "full_time_component_model_hash")
     elif role == "corner":
-        if not isinstance(raw_leagues, Mapping) or not raw_leagues:
-            raise ArtifactLineageError("corner registry leagues are missing")
-        iterable = [(str(key), item) for key, item in raw_leagues.items()]
+        iterable = list(
+            _corner_registry_leagues(registry, schema_version=schema_version).items()
+        )
         required = ("model_hash", "dataset_hash")
     else:
         raise ArtifactLineageError(f"unsupported model role: {role}")
@@ -174,12 +212,15 @@ def _registered_models(
     return result
 
 
-def build_lineage(
+def _build_lineage(
     *,
     repo_root: str | Path,
     data_manifests: Mapping[str, str | Path],
     model_registries: Mapping[str, str | Path],
+    schema_version: str,
 ) -> dict[str, Any]:
+    if schema_version not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
+        raise ArtifactLineageError("unsupported artifact lineage schema_version")
     root = Path(repo_root).resolve()
     if set(data_manifests) != set(DATA_ROLES):
         raise ArtifactLineageError(
@@ -215,6 +256,7 @@ def build_lineage(
             payload,
             manifest=data_payloads[data_role],
             manifest_hash=data_blocks[data_role]["declared_manifest_hash"],
+            schema_version=schema_version,
         )
         model_blocks[role] = {
             "role": role,
@@ -226,11 +268,13 @@ def build_lineage(
             "validated_training_config": deepcopy(
                 payload.get("validated_training_config")
             ),
-            "registered_models": _registered_models(role, payload),
+            "registered_models": _registered_models(
+                role, payload, schema_version=schema_version
+            ),
             **links,
         }
     value: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "artifact_type": "soccer_forward_artifact_lineage",
         "data_manifests": data_blocks,
         "model_registries": model_blocks,
@@ -243,6 +287,20 @@ def build_lineage(
     }
     value["lineage_hash"] = _hash_json(value)
     return value
+
+
+def build_lineage(
+    *,
+    repo_root: str | Path,
+    data_manifests: Mapping[str, str | Path],
+    model_registries: Mapping[str, str | Path],
+) -> dict[str, Any]:
+    return _build_lineage(
+        repo_root=repo_root,
+        data_manifests=data_manifests,
+        model_registries=model_registries,
+        schema_version=SCHEMA_VERSION,
+    )
 
 
 def validate_lineage(raw: Any) -> dict[str, Any]:
@@ -260,7 +318,7 @@ def validate_lineage(raw: Any) -> dict[str, Any]:
         "candidate_role_policy",
     }:
         raise ArtifactLineageError("artifact lineage fields are incomplete")
-    if value.get("schema_version") != SCHEMA_VERSION:
+    if value.get("schema_version") not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
         raise ArtifactLineageError("unsupported artifact lineage schema_version")
     if value.get("artifact_type") != "soccer_forward_artifact_lineage":
         raise ArtifactLineageError("artifact lineage artifact_type is invalid")
@@ -348,10 +406,11 @@ def verify_files(raw: Any, *, repo_root: str | Path) -> dict[str, Any]:
                 )
             target = resolved_data if group == "data_manifests" else resolved_models
             target[str(role)] = path.resolve()
-    rebuilt = build_lineage(
+    rebuilt = _build_lineage(
         repo_root=root,
         data_manifests=resolved_data,
         model_registries=resolved_models,
+        schema_version=str(value["schema_version"]),
     )
     if rebuilt != value:
         raise ArtifactLineageError(

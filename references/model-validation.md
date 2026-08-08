@@ -398,7 +398,7 @@ hash-chained. A request may end only as a frozen archive record or an explicit t
 `request_event_hash` must reproduce the event log exactly. This defines the estimand as distinct
 user-requested fixtures instead of the subset that happened to produce usable odds.
 
-The policy's `forward-artifact-lineage/1.1.0` has separate roles for football history, corner
+The policy's `forward-artifact-lineage/1.2.0` has separate roles for football history, corner
 history, football HT/FT models, and corner models. File hashes alone are insufficient: validation
 rebuilds both registries from disk, checks their dataset links, and freezes every registered
 league's model hash (plus the football full-time component or corner dataset hash). A candidate
