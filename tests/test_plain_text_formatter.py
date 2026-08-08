@@ -855,6 +855,161 @@ class PlainTextFormatterTests(unittest.TestCase):
         self.assertEqual(initial_summary["state"], "no_usable_direction")
         self.assertEqual(lineup_summary["state"], "observation_primary")
 
+    def test_publication_baseline_uses_initial_without_mutating_record(self):
+        record = base_record()
+        initial = copy.deepcopy(record)
+        initial.update(
+            {
+                "analysis_stage": "initial",
+                "candidate_audits": [],
+                "revisions": [],
+                "transition_marker": "initial",
+            }
+        )
+        lineup_revision = copy.deepcopy(initial)
+        lineup_revision.update(
+            {
+                "analysis_stage": "lineup-check",
+                "transition_marker": "lineup-1",
+            }
+        )
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "candidate_audits": [{"later": True}],
+                "transition_marker": "lineup-2",
+                "revisions": [initial, lineup_revision],
+            }
+        )
+        frozen = copy.deepcopy(record)
+
+        baseline = formatter.publication_baseline_version(record, "lineup-check")
+
+        self.assertIsNotNone(baseline)
+        assert baseline is not None
+        self.assertEqual(baseline["transition_marker"], "initial")
+        self.assertEqual(baseline["candidate_audits"], [])
+        self.assertEqual(record, frozen)
+        self.assertIsNone(formatter.publication_baseline_version(record, "initial"))
+        missing_initial = copy.deepcopy(record)
+        missing_initial["revisions"] = [lineup_revision]
+        self.assertIsNone(
+            formatter.publication_baseline_version(missing_initial, "lineup-check")
+        )
+
+    def test_lineup_observation_transition_compares_initial_not_last_revision(self):
+        record = base_record()
+        record.update(
+            {
+                "primary_market": None,
+                "primary_pick": None,
+                "total_pick": None,
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T19:00:00+09:00",
+                "primary_change": {"status": "maintained"},
+                "transition_marker": "lineup-2",
+            }
+        )
+        initial = copy.deepcopy(record)
+        initial.update(
+            {
+                "analysis_stage": "initial",
+                "transition_marker": "initial",
+                "revisions": [],
+            }
+        )
+        lineup_revision = copy.deepcopy(record)
+        lineup_revision.update(
+            {
+                "transition_marker": "lineup-1",
+                "revisions": [initial],
+            }
+        )
+        record["revisions"] = [initial, lineup_revision]
+
+        def summary(version):
+            marker = version.get("transition_marker")
+            side = "over" if marker == "initial" else "under"
+            return {
+                "stage": version.get("analysis_stage", "initial"),
+                "state": "observation_primary",
+                "formal_primary": None,
+                "observation_primary": {
+                    "candidate_id": "sha256:" + "c" * 64,
+                    "market": "total",
+                    "identity": f"total:{side}:2.5",
+                    "side": side,
+                    "line": 2.5,
+                    "odds": 0.91,
+                    "ev": 0.042,
+                    "edge_pp": 2.1,
+                },
+                "blockers": {
+                    "data": [],
+                    "value": [],
+                    "policy": [
+                        {
+                            "gate": "market_policy_enabled",
+                            "reasons": ["market_observation_only_under_active_policy"],
+                        }
+                    ],
+                },
+                "safety_blockers": [],
+                "candidate_evaluation_status": "valid",
+            }
+
+        with patch.object(
+            formatter.publication_outlook,
+            "publication_summary",
+            side_effect=summary,
+        ):
+            text = formatter.render_lineup(record)
+
+        self.assertIn("临场仍受阻断，观察首选已变更", text)
+        self.assertNotIn("观察首选维持", text)
+        self.assert_plain(text)
+
+    def test_lineup_primary_arrow_keeps_immediate_change_baseline(self):
+        record = base_record()
+        initial = copy.deepcopy(record)
+        initial["primary_pick"]["odds"] = 0.86
+        initial["total_pick"]["odds"] = 0.86
+        initial["revisions"] = []
+        lineup_revision = copy.deepcopy(initial)
+        lineup_revision.update(
+            {
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T18:55:00+09:00",
+                "revisions": [initial],
+            }
+        )
+        lineup_revision["primary_pick"]["odds"] = 0.93
+        lineup_revision["total_pick"]["odds"] = 0.93
+        record.update(
+            {
+                "analysis_stage": "lineup-check",
+                "lineup_rechecked_at": "2026-07-23T19:00:00+09:00",
+                "primary_market": "corner_total",
+                "primary_pick": {
+                    "side": "over",
+                    "line": 9.5,
+                    "odds": 0.95,
+                    "role": "primary",
+                },
+                "primary_change": {"status": "changed"},
+                "revisions": [initial, lineup_revision],
+            }
+        )
+
+        text = formatter.render_lineup(record)
+
+        self.assertIn(
+            "主推变更：小2.5 @0.93 → 角球大9.5 @0.95",
+            text,
+        )
+        self.assertNotIn("主推变更：小2.5 @0.86", text)
+        self.assert_plain(text)
+
     def test_zero_zero_is_displayed_only_when_it_ranks_in_top_two(self):
         record = base_record()
         record["predicted_score"] = "0-0"

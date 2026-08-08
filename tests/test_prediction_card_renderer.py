@@ -555,6 +555,95 @@ class PredictionCardRendererTests(unittest.TestCase):
             self.assertNotIn("…", "\n".join(publication_row.lines))
             self.assertNotIn("...", "\n".join(publication_row.lines))
 
+    def test_primary_column_color_is_formal_only_in_svg_and_pillow(self) -> None:
+        card = renderer.validate_payload(_payload(), _history_index())
+        self.assertEqual(
+            [renderer._primary_cell_color(row) for row in card.rows],
+            [
+                renderer.COLORS["header_dark"],
+                renderer.COLORS["no_bet"],
+                renderer.COLORS["no_bet"],
+            ],
+        )
+
+        root = ET.fromstring(renderer.render_svg(card))
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        text_nodes = root.findall("svg:text", namespace)
+
+        def node_for_text(expected: str, occurrence: int = 0):
+            matches = [
+                node for node in text_nodes if "".join(node.itertext()) == expected
+            ]
+            self.assertGreater(len(matches), occurrence)
+            return matches[occurrence]
+
+        self.assertEqual(
+            node_for_text("小2.5 @0.92 ★").attrib["fill"],
+            renderer.COLORS["header_dark"],
+        )
+        no_primary_nodes = [
+            node for node in text_nodes if "".join(node.itertext()) == "无正式主推"
+        ]
+        self.assertEqual(len(no_primary_nodes), 2)
+        self.assertEqual(
+            {node.attrib["fill"] for node in no_primary_nodes},
+            {renderer.COLORS["no_bet"]},
+        )
+        observation_node = next(
+            node
+            for node in text_nodes
+            if "◇ 观察首选：角球大9.5 @0.91" in "".join(node.itertext())
+        )
+        self.assertEqual(
+            observation_node.attrib["fill"], renderer.COLORS["observation"]
+        )
+        footer_node = node_for_text("无正式主推＝不下注、不结算、不计战绩")
+        self.assertEqual(footer_node.attrib["fill"], renderer.COLORS["no_bet"])
+
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+
+        image = Image.open(BytesIO(renderer.render_raster(card, "PNG"))).convert("RGB")
+
+        def rgb(name: str) -> tuple[int, int, int]:
+            value = renderer.COLORS[name].lstrip("#")
+            return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4))
+
+        def image_colors(value) -> set[tuple[int, int, int]]:
+            counted = value.getcolors(maxcolors=value.width * value.height)
+            self.assertIsNotNone(counted)
+            assert counted is not None
+            return {color for _count, color in counted}
+
+        primary_left = renderer.SIDE_MARGIN + sum(
+            width for _label, _key, width in renderer.COLUMNS[:4]
+        )
+        primary_right = primary_left + renderer.COLUMNS[4][2]
+        rows_top = renderer.TITLE_HEIGHT + renderer.HEADER_HEIGHT
+        for row_index, expected_color in enumerate(("header_dark", "no_bet", "no_bet")):
+            crop = image.crop(
+                (
+                    primary_left,
+                    rows_top + row_index * renderer.ROW_HEIGHT,
+                    primary_right,
+                    rows_top + (row_index + 1) * renderer.ROW_HEIGHT,
+                )
+            )
+            colors = image_colors(crop)
+            self.assertIn(rgb(expected_color), colors)
+            if row_index == 1:
+                self.assertNotIn(rgb("observation"), colors)
+
+        table_bottom = rows_top + len(card.rows) * renderer.ROW_HEIGHT
+        _header_top, blocks, _bottom = renderer._publication_geometry(
+            card, table_bottom
+        )
+        _row, top, height = blocks[1]
+        observation_panel = image.crop((58, top, renderer.WIDTH - 58, top + height))
+        self.assertIn(rgb("observation"), image_colors(observation_panel))
+
     def test_lineup_panel_reports_maintained_observation_and_formal_upgrade(
         self,
     ) -> None:
@@ -589,6 +678,48 @@ class PredictionCardRendererTests(unittest.TestCase):
             "临场已从观察首选升级为正式主推",
             "\n".join(upgraded.publication_rows[0].lines),
         )
+
+    def test_lineup_text_and_card_share_initial_observation_baseline(self) -> None:
+        history = _history_index()
+        initial = copy.deepcopy(history["9002"])
+
+        def set_side(version: dict, side: str) -> None:
+            audit = _valid_corner_observation_audit()
+            candidate = audit["candidates"][0]
+            candidate["side"] = side
+            candidate["identity"] = f"corner_total:{side}:9.5"
+            version["candidate_audits"] = [audit]
+
+        set_side(initial, "over")
+        initial["analysis_stage"] = "initial"
+        initial["revisions"] = []
+        lineup_revision = copy.deepcopy(initial)
+        lineup_revision["analysis_stage"] = "lineup-check"
+        lineup_revision["lineup_rechecked_at"] = "2026-08-03T10:25:00Z"
+        set_side(lineup_revision, "under")
+        current = copy.deepcopy(lineup_revision)
+        current["lineup_rechecked_at"] = "2026-08-03T10:30:00Z"
+        current["primary_change"] = {"status": "maintained"}
+        current["revisions"] = [initial, lineup_revision]
+        history["9002"] = current
+
+        payload = _payload()
+        payload["rows"] = payload["rows"][1:2]
+        payload["rows"][0]["archive_stage"] = "lineup-check"
+        _rebind_row(payload, 0, history)
+
+        card = renderer.validate_payload(payload, history)
+        panel_text = "\n".join(card.publication_rows[0].lines)
+        plain_text = renderer.plain_text_formatter.render_lineup(current)
+        svg_text = "".join(ET.fromstring(renderer.render_svg(card)).itertext())
+
+        expected = "临场仍受阻断，观察首选已变更"
+        self.assertIn(expected, panel_text)
+        self.assertIn(expected, plain_text)
+        self.assertIn(expected, svg_text)
+        self.assertNotIn("观察首选维持", panel_text)
+        self.assertNotIn("观察首选维持", plain_text)
+        self.assertTrue(renderer.render_raster(card, "PNG"))
 
     def test_publication_panel_geometry_grows_and_fits_svg_and_pillow(self) -> None:
         payload = _payload()

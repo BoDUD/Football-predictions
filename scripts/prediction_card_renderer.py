@@ -292,13 +292,7 @@ def _select_archived_version(
 def _previous_archived_version(
     record: Mapping[str, Any], stage: str
 ) -> dict[str, Any] | None:
-    if stage != "lineup-check":
-        return None
-    try:
-        selected = plain_text_formatter.select_version(dict(record), "initial")
-    except ValueError:
-        return None
-    return plain_text_formatter.merged_version(dict(record), selected)
+    return plain_text_formatter.publication_baseline_version(dict(record), stage)
 
 
 def _publication_panel_row(
@@ -812,6 +806,14 @@ def _publication_color(state: str) -> str:
     }.get(state, COLORS["text"])
 
 
+def _primary_cell_color(row: CardRow) -> str:
+    """Color the primary column by formal publication state only."""
+
+    if row.status == "formal_primary" and row.star:
+        return COLORS["header_dark"]
+    return COLORS["no_bet"]
+
+
 def _svg_font_size(
     lines: Sequence[str], width: int, height: int, base: int, minimum: int = 11
 ) -> int:
@@ -908,14 +910,8 @@ def render_svg(card: Card) -> str:
             font_size = _svg_font_size(lines, width, ROW_HEIGHT, base)
             fill = COLORS["text"]
             weight = "600" if key in {"time", "primary"} else "500"
-            if key == "primary" and (
-                row.status == "observation" or row.primary.startswith("◇")
-            ):
-                fill = COLORS["observation"]
-            elif key == "primary" and row.status == "no_bet":
-                fill = COLORS["no_bet"]
-            elif key == "primary" and row.star:
-                fill = COLORS["header_dark"]
+            if key == "primary":
+                fill = _primary_cell_color(row)
             parts.append(
                 _svg_text(
                     center_x=x + width / 2,
@@ -982,7 +978,7 @@ def render_svg(card: Card) -> str:
     parts.extend(
         [
             f'<text x="72" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["star"]}">★ 正式主推中的最高信心方向</text>',
-            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["observation"]}">无正式主推＝不下注、不结算、不计战绩</text>',
+            f'<text x="455" y="{footer_y}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["no_bet"]}">无正式主推＝不下注、不结算、不计战绩</text>',
             f'<text x="{WIDTH - 76}" y="{footer_y}" text-anchor="end" font-family="Microsoft YaHei, sans-serif" font-size="20" fill="{COLORS["muted"]}">正式主推 {formal_count} 场</text>',
             f'<line x1="72" y1="{footer_y + 22}" x2="{WIDTH - 72}" y2="{footer_y + 22}" stroke="{COLORS["grid"]}"/>',
             f'<text x="72" y="{footer_y + 61}" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" font-size="20" font-weight="600" fill="{COLORS["warning"]}">提示：仅供比赛分析与模型复盘，不承诺收益；请理性参考。</text>',
@@ -1173,14 +1169,8 @@ def render_raster(card: Card, output_format: str) -> bytes:
             box = (x, y, x + width, y + ROW_HEIGHT)
             font = _fit_pil_font(draw, lines, box, base, bold=bold)
             fill = COLORS["text"]
-            if key == "primary" and (
-                row.status == "observation" or row.primary.startswith("◇")
-            ):
-                fill = COLORS["observation"]
-            elif key == "primary" and row.status == "no_bet":
-                fill = COLORS["no_bet"]
-            elif key == "primary" and row.star:
-                fill = COLORS["header_dark"]
+            if key == "primary":
+                fill = _primary_cell_color(row)
             _pil_center_multiline(draw, box, lines, font, fill)
             x += width
 
@@ -1242,7 +1232,7 @@ def render_raster(card: Card, output_format: str) -> bytes:
         (455, footer_y),
         "无正式主推＝不下注、不结算、不计战绩",
         font=footer_font,
-        fill=COLORS["observation"],
+        fill=COLORS["no_bet"],
     )
     count_text = (
         f"正式主推 {sum(row.status == 'formal_primary' for row in card.rows)} 场"
