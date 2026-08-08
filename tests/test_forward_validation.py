@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import tempfile
@@ -11,7 +12,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from scripts import forward_policy, forward_validation, source_evidence
+from scripts import (
+    execution_evidence,
+    forward_policy,
+    forward_validation,
+    source_evidence,
+)
 
 OUTCOMES = ["H", "D", "A"]
 TEST_HASH = "sha256:" + "1" * 64
@@ -30,6 +36,22 @@ ONE_X_TWO_IDENTITY_HASH = source_evidence.market_identity_hash(ONE_X_TWO_IDENTIT
 
 
 def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
+    registered_model = globals().get("_FORWARD_MEMORY_JOINT_MODEL")
+    football_dataset_hash = (
+        registered_model["training"]["dataset_manifest_hash"]
+        if isinstance(registered_model, dict)
+        else TEST_HASH
+    )
+    registered_htft_hash = (
+        registered_model["model_hash"]
+        if isinstance(registered_model, dict)
+        else "sha256:" + "3" * 64
+    )
+    registered_score_hash = (
+        registered_model["components"]["full_time"]["model_hash"]
+        if isinstance(registered_model, dict)
+        else "sha256:" + "1" * 64
+    )
     protocol = deepcopy(forward_policy.DEFAULT_VALIDATION_PROTOCOL)
     protocol.update(
         {
@@ -60,13 +82,68 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
         "data": {
             "manifest_path": "data/manifest.json",
             "file_sha256": TEST_HASH,
-            "declared_manifest_hash": TEST_HASH,
+            "declared_manifest_hash": football_dataset_hash,
         },
         "models": {
             "registry_path": "models/registry.json",
             "file_sha256": TEST_HASH,
             "declared_registry_hash": TEST_HASH,
-            "dataset_manifest_hash": TEST_HASH,
+            "dataset_manifest_hash": football_dataset_hash,
+        },
+        "artifact_lineage": {
+            "schema_version": "forward-artifact-lineage/1.1.0",
+            "artifact_type": "soccer_forward_artifact_lineage",
+            "data_manifests": {
+                "football_history": {
+                    "role": "football_history",
+                    "manifest_path": "data/manifest.json",
+                    "file_sha256": TEST_HASH,
+                    "declared_manifest_hash": football_dataset_hash,
+                },
+                "corner_history": {
+                    "role": "corner_history",
+                    "manifest_path": "corner/manifest.json",
+                    "file_sha256": TEST_HASH,
+                    "declared_manifest_hash": "sha256:" + "2" * 64,
+                },
+            },
+            "model_registries": {
+                "football_htft": {
+                    "role": "football_htft",
+                    "dataset_role": "football_history",
+                    "registry_path": "models/registry.json",
+                    "file_sha256": TEST_HASH,
+                    "declared_registry_hash": TEST_HASH,
+                    "dataset_manifest_hash": football_dataset_hash,
+                    "registered_models": {
+                        "test_league": {
+                            "model_hash": registered_htft_hash,
+                            "full_time_component_model_hash": registered_score_hash,
+                        }
+                    },
+                },
+                "corner": {
+                    "role": "corner",
+                    "dataset_role": "corner_history",
+                    "registry_path": "corner/corner-registry.json",
+                    "file_sha256": TEST_HASH,
+                    "declared_registry_hash": "sha256:" + "3" * 64,
+                    "dataset_manifest_hash": "sha256:" + "2" * 64,
+                    "dataset_hashes": {"test": "sha256:" + "4" * 64},
+                    "registered_models": {
+                        "test": {
+                            "model_hash": "sha256:" + "6" * 64,
+                            "dataset_hash": "sha256:" + "4" * 64,
+                        }
+                    },
+                },
+            },
+            "candidate_role_policy": {
+                "score_model": ["football_history", "football_htft"],
+                "htft": ["football_history", "football_htft"],
+                "corner_total": ["corner_history", "corner"],
+                "corner_handicap": ["corner_history", "corner"],
+            },
         },
         "policy": {
             "market_policy_version": "test-policy",
@@ -81,6 +158,21 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
             forward_policy.LOCAL_INTEGRITY_SHADOW_KIND
         ),
     }
+    value["artifact_lineage"]["lineage_hash"] = forward_policy._hash_json(
+        value["artifact_lineage"]
+    )
+    scope = forward_policy.cohort_scope.build_scope(
+        scope_id="test-forward-scope",
+        competition_keys=["league-a", "league-b", "test_league"],
+        starts_at="2026-08-01T00:00:00Z",
+    )
+    value["cohort_scope"] = {
+        "scope_path": "scopes/test.json",
+        "file_sha256": TEST_HASH,
+        "scope_id": scope["scope_id"],
+        "scope_hash": scope["scope_hash"],
+        "scope_snapshot": scope,
+    }
     value["policy_hash"] = forward_policy._hash_json(value)
     value["policy_id"] = (
         "untouched-live-forward-" + value["policy_hash"].split(":", 1)[1][:16]
@@ -88,7 +180,17 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
     return value
 
 
-def cohort_manifest(policy: dict, *, status: str = "active") -> dict:
+def cohort_manifest(
+    policy: dict, *, status: str = "active", base_dir: Path | None = None
+) -> dict:
+    policy_path = (
+        Path(tempfile.gettempdir()).resolve()
+        / "forward-policies"
+        / f"{policy['policy_id']}.json"
+    )
+    if base_dir is not None:
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(json.dumps(policy, ensure_ascii=False), encoding="utf-8")
     value = {
         "schema_version": forward_policy.COHORT_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort",
@@ -96,13 +198,11 @@ def cohort_manifest(policy: dict, *, status: str = "active") -> dict:
         "kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
         "status": status,
         "starts_at": "2026-08-01T00:01:00+00:00",
-        "policy_file": str(
-            Path(tempfile.gettempdir()).resolve()
-            / "forward-policies"
-            / f"{policy['policy_id']}.json"
-        ),
+        "policy_file": str(policy_path),
         "policy_id": policy["policy_id"],
         "policy_hash": policy["policy_hash"],
+        "scope_id": policy["cohort_scope"]["scope_id"],
+        "scope_hash": policy["cohort_scope"]["scope_hash"],
         "retrospective_records_allowed": False,
         "closed_at": "2027-01-01T00:00:00+00:00" if status == "closed" else None,
     }
@@ -122,6 +222,37 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
         "record_count": len(entries),
         "records": entries,
     }
+    if "scope_hash" in cohort:
+        for entry in entries:
+            entry.setdefault("request_event_hash", "sha256:" + "9" * 64)
+        denominator_entries = [
+            {
+                "fixture_id": str(entry["fixture_id"]),
+                "request_event_hash": "sha256:" + "9" * 64,
+                "requested_at": cohort["starts_at"],
+                "disposition": "recorded",
+                "unavailable_event_hash": None,
+                "unavailable_reason": None,
+            }
+            for entry in entries
+        ]
+        denominator = {
+            "schema_version": forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION,
+            "artifact_type": "soccer_live_forward_cohort_denominator",
+            "cohort_id": cohort["cohort_id"],
+            "scope_id": cohort["scope_id"],
+            "scope_hash": cohort["scope_hash"],
+            "event_count": len(entries),
+            "last_event_hash": "sha256:" + "9" * 64 if entries else None,
+            "requested_fixture_count": len(entries),
+            "recorded_fixture_count": len(entries),
+            "unavailable_fixture_count": 0,
+            "entries": denominator_entries,
+            "complete": True,
+        }
+        denominator["denominator_hash"] = forward_policy._hash_json(denominator)
+        value["denominator"] = denominator
+        value["denominator_hash"] = denominator["denominator_hash"]
     value["manifest_hash"] = forward_policy._hash_json(value)
     return value
 
@@ -145,7 +276,9 @@ def cohort_closure(cohort: dict, record_manifest: dict | None = None) -> dict:
     return value
 
 
-def base_policy_binding(policy: dict, cohort: dict, archived_at: str) -> dict:
+def base_policy_binding(
+    policy: dict, cohort: dict, archived_at: str, *, fixture_id: str | None = None
+) -> dict:
     value = {
         "schema_version": forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
         "cohort_id": cohort["cohort_id"],
@@ -163,6 +296,15 @@ def base_policy_binding(policy: dict, cohort: dict, archived_at: str) -> dict:
             policy, cohort_id=cohort["cohort_id"]
         ),
     }
+    if fixture_id is not None:
+        value["cohort_request_binding"] = {
+            "schema_version": "forward-cohort-request-binding/1.0.0",
+            "scope_id": policy["cohort_scope"]["scope_id"],
+            "scope_hash": policy["cohort_scope"]["scope_hash"],
+            "fixture_id": fixture_id,
+            "request_event_hash": "sha256:" + "9" * 64,
+            "requested_at": cohort["starts_at"],
+        }
     value["binding_hash"] = forward_policy._hash_json(value)
     return value
 
@@ -203,6 +345,59 @@ def seal(value: dict, hash_field: str) -> dict:
     return sealed
 
 
+def write_execution_offer(
+    base: Path,
+    *,
+    fixture_id: str,
+    home_team: str,
+    away_team: str,
+    kickoff: str,
+    identity: dict,
+    selection: str,
+    accepted_at: str,
+    quoted_price: float,
+    accepted_price: float,
+    stake_units: float = 1.0,
+) -> tuple[Path, dict]:
+    suffix = hashlib.sha256(
+        f"{fixture_id}:{source_evidence.market_identity_hash(identity)}:{selection}".encode()
+    ).hexdigest()[:12]
+    source = base / f"execution-offer-{suffix}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": execution_evidence.RAW_SCHEMA_VERSION,
+                "source_url": f"https://bookmaker.example/betslip/{suffix}",
+                "receipt_id": f"receipt-{suffix}",
+                "fixture": {
+                    "match_id": fixture_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "kickoff": kickoff,
+                },
+                "market_identity": identity,
+                "market_identity_hash": source_evidence.market_identity_hash(identity),
+                "selection": selection,
+                "firm": {
+                    "firm_id": "bookmaker-x",
+                    "firm_name": "Bookmaker X",
+                    "account_region": "test-region",
+                },
+                "quoted_at": accepted_at,
+                "accepted_at": accepted_at,
+                "quoted_decimal_odds": quoted_price,
+                "accepted_decimal_odds": accepted_price,
+                "max_stake_units": max(5.0, stake_units),
+                "stake_units": stake_units,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return execution_evidence.build_evidence(
+        source, output_dir=base / f"execution-evidence-{suffix}"
+    )
+
+
 def build_payload(
     base: Path,
     count: int = 6,
@@ -212,7 +407,7 @@ def build_payload(
     git_commit: str = REAL_GIT_COMMIT,
 ) -> dict:
     policy = policy_manifest(git_commit=git_commit)
-    cohort = cohort_manifest(policy)
+    cohort = cohort_manifest(policy, base_dir=base)
     market_schemas = {
         "1x2": {
             "settlement_states": OUTCOMES,
@@ -323,6 +518,18 @@ def build_payload(
             }
             for name in forward_validation.BASELINE_NAMES
         }
+        execution_file, execution_artifact = write_execution_offer(
+            base,
+            fixture_id=raw["fixture_id"],
+            home_team=raw["home_team"],
+            away_team=raw["away_team"],
+            kickoff=raw["kickoff"].isoformat(),
+            identity=ONE_X_TWO_IDENTITY,
+            selection=actual,
+            accepted_at=generated_text,
+            quoted_price=2.0,
+            accepted_price=2.0,
+        )
         prediction = {
             "provenance_binding": forward_policy.build_provenance_binding(
                 policy, cohort_id=cohort["cohort_id"]
@@ -368,14 +575,21 @@ def build_payload(
                 },
                 "entry_collected_at": generated_text,
                 "entry_source_evidence_hash": raw["evidence"]["evidence_hash"],
-                "entry_price_kind": "executable_after_slippage",
+                "entry_price_kind": "firm_accepted_offer",
                 "limit_verified": True,
                 "stake_units": 1.0,
+                "execution_evidence_file": str(execution_file),
+                "execution_evidence_hash": execution_artifact["evidence_hash"],
             },
             "unavailable_reasons": [],
         }
         binding = forward_policy.bind_observation_commitment(
-            base_policy_binding(policy, cohort, raw["archived"].isoformat()),
+            base_policy_binding(
+                policy,
+                cohort,
+                raw["archived"].isoformat(),
+                fixture_id=raw["fixture_id"],
+            ),
             forward_validation._hash(prediction),
         )
         commitment = seal(
@@ -596,7 +810,10 @@ def pending_micro_ledger(base: Path, *, start_index: int = 0) -> dict:
     ).isoformat()
     binding = forward_policy.bind_observation_commitment(
         base_policy_binding(
-            payload["policy_manifest"], payload["cohort_manifest"], archived_at
+            payload["policy_manifest"],
+            payload["cohort_manifest"],
+            archived_at,
+            fixture_id=prediction["fixture_id"],
         ),
         forward_validation._hash(prediction),
     )
@@ -637,6 +854,7 @@ def five_state_pending_micro_ledger(
 ) -> dict:
     """Build a canonical split-line ledger by resealing every affected artifact."""
 
+    _forward_memory_joint_model(base)
     payload = build_payload(base, 1, start_index=start_index)
     payload["cohort_closure"] = None
     policy = payload["policy_manifest"]
@@ -754,6 +972,18 @@ def five_state_pending_micro_ledger(
         }
         for name in forward_validation.MODEL_SPACE_BASELINE_NAMES
     }
+    execution_file, execution_artifact = write_execution_offer(
+        base,
+        fixture_id=fixture_id,
+        home_team=home_team,
+        away_team=away_team,
+        kickoff=kickoff,
+        identity=identity,
+        selection=reference_outcome,
+        accepted_at=generated,
+        quoted_price=prices[reference_outcome],
+        accepted_price=prices[reference_outcome],
+    )
     prediction = {
         **deepcopy(original_prediction),
         "home_team": home_team,
@@ -788,14 +1018,18 @@ def five_state_pending_micro_ledger(
             "entry_complete_market_odds": deepcopy(prices),
             "entry_collected_at": generated,
             "entry_source_evidence_hash": evidence["evidence_hash"],
-            "entry_price_kind": "executable_after_slippage",
+            "entry_price_kind": "firm_accepted_offer",
             "limit_verified": True,
             "stake_units": 1.0,
+            "execution_evidence_file": str(execution_file),
+            "execution_evidence_hash": execution_artifact["evidence_hash"],
         },
     }
     archived_at = payload["commitments"][0]["forward_policy_binding"]["archived_at"]
     binding = forward_policy.bind_observation_commitment(
-        base_policy_binding(policy, cohort, archived_at),
+        base_policy_binding(
+            policy, cohort, archived_at, fixture_id=prediction["fixture_id"]
+        ),
         forward_validation._hash(prediction),
     )
     commitment = seal(
@@ -976,7 +1210,9 @@ def categorical_half_time_pending_micro_ledger(
     }
     archived_at = (datetime.fromisoformat(generated) + timedelta(minutes=1)).isoformat()
     binding = forward_policy.bind_observation_commitment(
-        base_policy_binding(policy, cohort, archived_at),
+        base_policy_binding(
+            policy, cohort, archived_at, fixture_id=prediction["fixture_id"]
+        ),
         forward_validation._hash(prediction),
     )
     commitment = seal(
@@ -1020,18 +1256,10 @@ def categorical_half_time_pending_micro_ledger(
 _FORWARD_MEMORY_JOINT_MODEL: dict | None = None
 
 
-def active_record_args_for_five_state_ledger(
-    base: Path,
-    ledger: dict,
-    ledger_file: Path,
-    *,
-    history_base: Path | None = None,
-) -> SimpleNamespace:
-    """Build the real model and candidate-v3 inputs consumed by ``cmd_record``."""
+def _forward_memory_joint_model(base: Path) -> dict:
+    from test_memory_store import JOINT_SAMPLE_ROWS
 
-    from test_memory_store import JOINT_SAMPLE_ROWS, memory_store, record_args
-
-    from scripts import htft_model, joint_scenario_model, score_model
+    from scripts import htft_model
 
     global _FORWARD_MEMORY_JOINT_MODEL
     if _FORWARD_MEMORY_JOINT_MODEL is None:
@@ -1065,7 +1293,23 @@ def active_record_args_for_five_state_ledger(
         for component in _FORWARD_MEMORY_JOINT_MODEL["components"].values():
             component["generated_at"] = "2026-07-20T00:00:00Z"
         htft_model.validate_model(_FORWARD_MEMORY_JOINT_MODEL)
-    model = deepcopy(_FORWARD_MEMORY_JOINT_MODEL)
+    return _FORWARD_MEMORY_JOINT_MODEL
+
+
+def active_record_args_for_five_state_ledger(
+    base: Path,
+    ledger: dict,
+    ledger_file: Path,
+    *,
+    history_base: Path | None = None,
+) -> SimpleNamespace:
+    """Build the real model and candidate-v3 inputs consumed by ``cmd_record``."""
+
+    from test_memory_store import memory_store, record_args, write_fundamental_evidence
+
+    from scripts import htft_model, joint_scenario_model, score_model
+
+    model = deepcopy(_forward_memory_joint_model(base))
     prediction = ledger["commitments"][0]["prediction_payload"]
     kickoff = str(prediction["kickoff"])
     decision_time = datetime.fromisoformat(str(prediction["generated_at"]))
@@ -1369,6 +1613,7 @@ def active_record_args_for_five_state_ledger(
         args.total_half_loss_probability = distribution["half_loss"]
         args.total_loss_probability = distribution["loss"]
         args.total_market_signal = "aligned"
+    args.fundamental_evidence_file = write_fundamental_evidence(str(base), args)
     return args
 
 
@@ -1608,17 +1853,34 @@ def record_and_review_forward_fixture(base: Path, index: int) -> dict:
         reference_outcome="over",
         expected_state="full_win",
     )
+    prediction = ledger["commitments"][0]["prediction_payload"]
+    policy = ledger["policy_manifest"]
+    cohort = ledger["cohort_manifest"]
+    request = forward_policy.cohort_scope.append_event(
+        base_dir=base,
+        cohort_id=cohort["cohort_id"],
+        scope=policy["cohort_scope"]["scope_snapshot"],
+        event_type="requested",
+        fixture_id=str(prediction["fixture_id"]),
+        competition_key=str(prediction["league"]),
+        home_team=str(prediction["home_team"]),
+        away_team=str(prediction["away_team"]),
+        kickoff=str(prediction["kickoff"]),
+        occurred_at=(
+            datetime.fromisoformat(cohort["starts_at"]) + timedelta(seconds=index + 1)
+        ).isoformat(),
+    )
+    ledger["commitments"][0]["forward_policy_binding"]["cohort_request_binding"] = {
+        "schema_version": "forward-cohort-request-binding/1.0.0",
+        "scope_id": request["scope_id"],
+        "scope_hash": request["scope_hash"],
+        "fixture_id": request["fixture"]["fixture_id"],
+        "request_event_hash": request["event_hash"],
+        "requested_at": request["occurred_at"],
+    }
+    base_binding = reseal_single_commitment_ledger(ledger)
     ledger_file = fixture_base / "prematch-forward-ledger.json"
     ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
-    prediction = ledger["commitments"][0]["prediction_payload"]
-    committed = ledger["commitments"][0]["forward_policy_binding"]
-    base_binding = deepcopy(committed)
-    base_binding.pop("binding_hash")
-    base_binding.pop("observation_commitment_hash")
-    base_binding["schema_version"] = (
-        forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
-    )
-    base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
     archived_at = datetime.fromisoformat(base_binding["archived_at"])
     args = active_record_args_for_five_state_ledger(fixture_base, ledger, ledger_file)
     with (
@@ -1660,8 +1922,38 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
 
     ledger = records[0]["forward_validation_ledger"]["ledger_payload"]
     cohort = deepcopy(ledger["cohort_manifest"])
+    denominator_entries = []
+    for record in sorted(records, key=lambda item: str(item["match_id"])):
+        binding = record["forward_policy_binding"]["cohort_request_binding"]
+        denominator_entries.append(
+            {
+                "fixture_id": str(record["match_id"]),
+                "request_event_hash": binding["request_event_hash"],
+                "requested_at": binding["requested_at"],
+                "disposition": "recorded",
+                "unavailable_event_hash": None,
+                "unavailable_reason": None,
+            }
+        )
+    denominator = {
+        "schema_version": forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION,
+        "artifact_type": "soccer_live_forward_cohort_denominator",
+        "cohort_id": cohort["cohort_id"],
+        "scope_id": cohort["scope_id"],
+        "scope_hash": cohort["scope_hash"],
+        "event_count": len(denominator_entries),
+        "last_event_hash": denominator_entries[-1]["request_event_hash"]
+        if denominator_entries
+        else None,
+        "requested_fixture_count": len(denominator_entries),
+        "recorded_fixture_count": len(denominator_entries),
+        "unavailable_fixture_count": 0,
+        "entries": denominator_entries,
+        "complete": True,
+    }
+    denominator["denominator_hash"] = forward_policy._hash_json(denominator)
     manifest = memory_store.forward_record_manifest_for_records(
-        records, cohort_manifest=cohort
+        records, cohort_manifest=cohort, denominator=denominator
     )
     return cohort, cohort_closure(cohort, manifest)
 
@@ -1712,6 +2004,7 @@ class ForwardValidationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
+            _forward_memory_joint_model(base)
             ledger = categorical_half_time_pending_micro_ledger(
                 base, start_index=40, selection="H"
             )
@@ -2789,14 +3082,19 @@ class ForwardValidationTests(unittest.TestCase):
                 json.dumps(cohort, ensure_ascii=False), encoding="utf-8"
             )
             manifest_output = base / "record-manifest.json"
-            closed = memory_store.cmd_close_forward_cohort(
-                SimpleNamespace(
-                    base_dir=str(base),
-                    cohort_id=cohort["cohort_id"],
-                    closed_at="2027-01-01T00:00:00+00:00",
-                    record_manifest_output=str(manifest_output),
+            with mock.patch.object(
+                forward_policy,
+                "_require_canonical_policy_file",
+                side_effect=lambda _base, policy_file, **_kwargs: Path(policy_file),
+            ):
+                closed = memory_store.cmd_close_forward_cohort(
+                    SimpleNamespace(
+                        base_dir=str(base),
+                        cohort_id=cohort["cohort_id"],
+                        closed_at="2027-01-01T00:00:00+00:00",
+                        record_manifest_output=str(manifest_output),
+                    )
                 )
-            )
             closure = json.loads(
                 Path(closed["closure_path"]).read_text(encoding="utf-8")
             )
@@ -2947,6 +3245,7 @@ class ForwardValidationTests(unittest.TestCase):
                 value["policy_manifest"],
                 value["cohort_manifest"],
                 (kickoff + timedelta(minutes=2)).isoformat(),
+                fixture_id=prediction["fixture_id"],
             ),
             forward_validation._hash(prediction),
         )
@@ -3135,12 +3434,7 @@ class ForwardValidationTests(unittest.TestCase):
             records = [
                 record_and_review_forward_fixture(base, index) for index in range(2)
             ]
-            ledger = records[0]["forward_validation_ledger"]["ledger_payload"]
-            cohort = deepcopy(ledger["cohort_manifest"])
-            stale_manifest = memory_store.forward_record_manifest_for_records(
-                records[:1], cohort_manifest=cohort
-            )
-            stale_closure = cohort_closure(cohort, stale_manifest)
+            _cohort, stale_closure = closed_cohort_for_memory_records(records[:1])
             with self.assertRaisesRegex(
                 ValueError, "do not exactly cover the closed record manifest"
             ):
@@ -3254,6 +3548,7 @@ class ForwardValidationTests(unittest.TestCase):
                     value["policy_manifest"],
                     value["cohort_manifest"],
                     prediction["generated_at"],
+                    fixture_id=prediction["fixture_id"],
                 ),
                 forward_validation._hash(prediction),
             )
@@ -3328,6 +3623,7 @@ class ForwardValidationTests(unittest.TestCase):
                         datetime.fromisoformat(prediction["generated_at"])
                         + timedelta(minutes=1)
                     ).isoformat(),
+                    fixture_id=prediction["fixture_id"],
                 ),
                 forward_validation._hash(prediction),
             )

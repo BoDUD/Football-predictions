@@ -170,6 +170,14 @@ registry training, and final workbook-to-HTFT order, follow
 11. If the lineup evidence contract still fails, list the checked sources, mark the lineup unconfirmed, and proceed without enabling any lineup-dependent formal gate
 12. Compile all data into a structured format before proceeding to prediction
 
+For an active 3.7 forward cohort, register the fixture in the frozen cohort request log before
+step 1. Save the visible pre-kickoff fundamental/lineup exports and build
+`fundamental-evidence/1.0.0`; the archive derives evidence gates from that replay instead of
+trusting manual flags. Keep a consensus market snapshot separate from any real accepted offer.
+Only a firm-specific `execution-offer-evidence/1.0.0` bundle may support an executed entry, and it
+must include the firm, account region, quote/accept timestamps, limit, stake, and accepted price.
+The current JSON export adapters do not claim to preserve arbitrary raw HTTP response bodies.
+
 Do not calculate formal EV from a display screenshot that omits the opposite side, odds
 format, collection time, or market identity. Pass every complete outcome price to the
 archive command so it can reproduce and persist the no-vig transformation.

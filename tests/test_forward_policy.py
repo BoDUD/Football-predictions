@@ -23,6 +23,24 @@ def empty_record_manifest(cohort: dict) -> dict:
         "record_count": 0,
         "records": [],
     }
+    if "scope_hash" in cohort:
+        denominator = {
+            "schema_version": forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION,
+            "artifact_type": "soccer_live_forward_cohort_denominator",
+            "cohort_id": cohort["cohort_id"],
+            "scope_id": cohort["scope_id"],
+            "scope_hash": cohort["scope_hash"],
+            "event_count": 0,
+            "last_event_hash": None,
+            "requested_fixture_count": 0,
+            "recorded_fixture_count": 0,
+            "unavailable_fixture_count": 0,
+            "entries": [],
+            "complete": True,
+        }
+        denominator["denominator_hash"] = forward_policy._hash_json(denominator)
+        value["denominator"] = denominator
+        value["denominator_hash"] = denominator["denominator_hash"]
     value["manifest_hash"] = forward_policy._hash_json(value)
     return value
 
@@ -38,7 +56,7 @@ class ForwardPolicyTests(unittest.TestCase):
                 self.assertIn("python -m scripts.forward_policy", text)
                 self.assertNotIn("python scripts/forward_policy.py", text)
 
-    def _artifacts(self, base: Path) -> tuple[Path, Path]:
+    def _artifacts(self, base: Path) -> tuple[Path, Path, Path, Path, Path]:
         dataset = base / "manifest.json"
         dataset.write_text(
             json.dumps(
@@ -58,11 +76,67 @@ class ForwardPolicyTests(unittest.TestCase):
                     "registry_hash": "sha256:" + "2" * 64,
                     "dataset_manifest_hash": "sha256:" + "1" * 64,
                     "validated_training_config": {"half_life_days": 365},
+                    "leagues": [
+                        {
+                            "league_key": "test_league",
+                            "model_hash": "sha256:" + "6" * 64,
+                            "full_time_component_model_hash": "sha256:" + "7" * 64,
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",
         )
-        return dataset, registry
+        corner_dataset = base / "corner-manifest.json"
+        corner_dataset.write_text(
+            json.dumps(
+                {
+                    "schema_version": "test/1",
+                    "as_of_date": "2026-08-06",
+                    "bundle_hash": "sha256:" + "3" * 64,
+                    "leagues": [
+                        {
+                            "league_key": "test_league",
+                            "dataset_hash": "sha256:" + "4" * 64,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        corner_registry = base / "corner-registry.json"
+        corner_registry.write_text(
+            json.dumps(
+                {
+                    "schema_version": "test/1",
+                    "registry_hash": "sha256:" + "5" * 64,
+                    "dataset_hashes": {"test_league": "sha256:" + "4" * 64},
+                    "leagues": {
+                        "test_league": {
+                            "model_hash": "sha256:" + "8" * 64,
+                            "dataset_hash": "sha256:" + "4" * 64,
+                            "source_lineage": {
+                                "manifest_bundle_hash": "sha256:" + "3" * 64,
+                                "dataset_hash": "sha256:" + "4" * 64,
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        scope_file = base / "scope.json"
+        scope_file.write_text(
+            json.dumps(
+                forward_policy.cohort_scope.build_scope(
+                    scope_id="test-requested-fixtures",
+                    competition_keys=["test_league"],
+                    starts_at="2026-08-06T00:00:00Z",
+                )
+            ),
+            encoding="utf-8",
+        )
+        return dataset, registry, corner_dataset, corner_registry, scope_file
 
     def _policy(
         self,
@@ -70,11 +144,16 @@ class ForwardPolicyTests(unittest.TestCase):
         *,
         cohort_kind: str = forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
     ) -> dict:
-        dataset, registry = self._artifacts(base)
+        dataset, registry, corner_dataset, corner_registry, scope_file = (
+            self._artifacts(base)
+        )
         return forward_policy.build_policy_manifest(
             repo_root=self.repo_root,
             dataset_manifest=dataset,
             model_registry=registry,
+            corner_dataset_manifest=corner_dataset,
+            corner_model_registry=corner_registry,
+            cohort_scope_file=scope_file,
             expected_final_merge_commit="a" * 40,
             cohort_kind=cohort_kind,
             created_at="2026-08-06T01:00:00Z",
@@ -98,6 +177,8 @@ class ForwardPolicyTests(unittest.TestCase):
     def _previous_policy(self, base: Path) -> dict:
         value = self._policy(base)
         value["schema_version"] = forward_policy.PREVIOUS_POLICY_SCHEMA_VERSION
+        value.pop("artifact_lineage")
+        value.pop("cohort_scope")
         confirmation = value["confirmation_contract"]
         for field in (
             "cohort_kind",
@@ -472,17 +553,22 @@ class ForwardPolicyTests(unittest.TestCase):
     def test_policy_build_rejects_registry_without_dataset_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            dataset, registry = self._artifacts(base)
+            dataset, registry, corner_dataset, corner_registry, scope_file = (
+                self._artifacts(base)
+            )
             registry_payload = json.loads(registry.read_text(encoding="utf-8"))
             registry_payload.pop("dataset_manifest_hash")
             registry.write_text(json.dumps(registry_payload), encoding="utf-8")
             with self.assertRaisesRegex(
-                forward_policy.ForwardPolicyError, "declare the selected dataset"
+                forward_policy.ForwardPolicyError, "role-aware data/model lineage"
             ):
                 forward_policy.build_policy_manifest(
                     repo_root=self.repo_root,
                     dataset_manifest=dataset,
                     model_registry=registry,
+                    corner_dataset_manifest=corner_dataset,
+                    corner_model_registry=corner_registry,
+                    cohort_scope_file=scope_file,
                     expected_final_merge_commit="a" * 40,
                     cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
                     created_at="2026-08-06T01:00:00Z",
@@ -1171,6 +1257,18 @@ class ForwardPolicyTests(unittest.TestCase):
                     starts_at=start,
                     repo_root=self.repo_root,
                 )
+                forward_policy.cohort_scope.append_event(
+                    base_dir=base,
+                    cohort_id=cohort["cohort_id"],
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                    event_type="requested",
+                    fixture_id="fixture-a",
+                    competition_key="test_league",
+                    home_team="Home",
+                    away_team="Away",
+                    kickoff="2026-08-06T03:00:00Z",
+                    occurred_at="2026-08-06T02:00:00Z",
+                )
 
                 with self.assertRaisesRegex(
                     forward_policy.ForwardPolicyError, "predates"
@@ -1185,6 +1283,7 @@ class ForwardPolicyTests(unittest.TestCase):
                     base_dir=base,
                     repo_root=self.repo_root,
                     archived_at=start + timedelta(seconds=1),
+                    fixture_id="fixture-a",
                 )
             self.assertIsNotNone(binding)
             assert binding is not None
@@ -1264,9 +1363,37 @@ class ForwardPolicyTests(unittest.TestCase):
             with self.assertRaises(forward_policy.ForwardPolicyError):
                 forward_policy.validate_record_binding(tampered)
 
+            forward_policy.cohort_scope.append_event(
+                base_dir=base,
+                cohort_id=cohort["cohort_id"],
+                scope=policy["cohort_scope"]["scope_snapshot"],
+                event_type="unavailable",
+                fixture_id="fixture-a",
+                competition_key="test_league",
+                home_team="Home",
+                away_team="Away",
+                kickoff="2026-08-06T03:00:00Z",
+                occurred_at="2026-08-06T02:30:00Z",
+                reason="source_unavailable",
+            )
+            close_manifest = empty_record_manifest(cohort)
+            denominator = forward_policy.cohort_scope.build_denominator(
+                scope=policy["cohort_scope"]["scope_snapshot"],
+                cohort_id=cohort["cohort_id"],
+                events=forward_policy.cohort_scope.load_events(
+                    base,
+                    cohort["cohort_id"],
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                ),
+                record_manifest=close_manifest,
+            )
+            close_manifest.pop("manifest_hash")
+            close_manifest["denominator"] = denominator
+            close_manifest["denominator_hash"] = denominator["denominator_hash"]
+            close_manifest["manifest_hash"] = forward_policy._hash_json(close_manifest)
             closure_path, closure = forward_policy.close_cohort(
                 base_dir=base,
-                record_manifest=empty_record_manifest(cohort),
+                record_manifest=close_manifest,
                 closed_at=start + timedelta(hours=1),
             )
             self.assertTrue(closure_path.is_file())
@@ -1443,7 +1570,9 @@ class ForwardPolicyTests(unittest.TestCase):
     def test_frozen_3_5_protected_file_contract_replays_under_3_6(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            dataset, registry = self._artifacts(base)
+            dataset, registry, corner_dataset, corner_registry, scope_file = (
+                self._artifacts(base)
+            )
             historical_protected_files = (
                 "SKILL.md",
                 "scripts/score_model.py",
@@ -1487,6 +1616,9 @@ class ForwardPolicyTests(unittest.TestCase):
                     repo_root=self.repo_root,
                     dataset_manifest=dataset,
                     model_registry=registry,
+                    corner_dataset_manifest=corner_dataset,
+                    corner_model_registry=corner_registry,
+                    cohort_scope_file=scope_file,
                     expected_final_merge_commit="a" * 40,
                     cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
                     created_at="2026-08-07T16:19:59Z",
@@ -1584,7 +1716,9 @@ class ForwardPolicyTests(unittest.TestCase):
     def test_promotable_kind_fails_closed_without_required_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            dataset, registry = self._artifacts(base)
+            dataset, registry, corner_dataset, corner_registry, scope_file = (
+                self._artifacts(base)
+            )
             policy = self._policy(
                 base, cohort_kind=forward_policy.PROMOTABLE_CONFIRMATION_KIND
             )
@@ -1612,6 +1746,9 @@ class ForwardPolicyTests(unittest.TestCase):
                     repo_root=self.repo_root,
                     dataset_manifest=dataset,
                     model_registry=registry,
+                    corner_dataset_manifest=corner_dataset,
+                    corner_model_registry=corner_registry,
+                    cohort_scope_file=scope_file,
                     expected_final_merge_commit="a" * 40,
                     cohort_kind=forward_policy.PROMOTABLE_CONFIRMATION_KIND,
                 )
@@ -1778,7 +1915,9 @@ class ForwardPolicyTests(unittest.TestCase):
     def test_freeze_requires_caller_confirmed_clean_final_merge_head(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            dataset, registry = self._artifacts(base)
+            dataset, registry, corner_dataset, corner_registry, scope_file = (
+                self._artifacts(base)
+            )
             with mock.patch.object(
                 forward_policy,
                 "_git",
@@ -1792,6 +1931,9 @@ class ForwardPolicyTests(unittest.TestCase):
                         repo_root=self.repo_root,
                         dataset_manifest=dataset,
                         model_registry=registry,
+                        corner_dataset_manifest=corner_dataset,
+                        corner_model_registry=corner_registry,
+                        cohort_scope_file=scope_file,
                         expected_final_merge_commit="a" * 40,
                         cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
                     )
@@ -1818,6 +1960,9 @@ class ForwardPolicyTests(unittest.TestCase):
                         repo_root=self.repo_root,
                         dataset_manifest=dataset,
                         model_registry=registry,
+                        corner_dataset_manifest=corner_dataset,
+                        corner_model_registry=corner_registry,
+                        cohort_scope_file=scope_file,
                         expected_final_merge_commit="a" * 40,
                         cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
                     )
@@ -1852,6 +1997,12 @@ class ForwardPolicyTests(unittest.TestCase):
                 "manifest.json",
                 "--model-registry",
                 "registry.json",
+                "--corner-dataset-manifest",
+                "corner-manifest.json",
+                "--corner-model-registry",
+                "corner-registry.json",
+                "--cohort-scope-file",
+                "scope.json",
                 "--expected-final-merge-commit",
                 "a" * 40,
                 "--cohort-kind",

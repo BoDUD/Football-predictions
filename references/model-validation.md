@@ -330,8 +330,11 @@ branch:
 
 ```bash
 python -m scripts.forward_policy --base-dir <workspace> --repo-root <repo> freeze \
-  --dataset-manifest <dataset-manifest.json> \
-  --model-registry <registry.json> \
+  --dataset-manifest <football-dataset-manifest.json> \
+  --model-registry <football-model-registry.json> \
+  --corner-dataset-manifest <corner-dataset-manifest.json> \
+  --corner-model-registry <corner-model-registry.json> \
+  --cohort-scope-file <cohort-scope.json> \
   --expected-final-merge-commit <final-merge-git-sha> \
   --cohort-kind local-integrity-shadow-v2
 
@@ -388,6 +391,19 @@ rewrite it. Non-predictions, abstentions, and unavailable markets are all part o
 Old fixtures and the previous 25 selections remain useful quarantined history, but cannot be
 inserted into this untouched cohort.
 
+Before any fixture analysis, build a versioned `forward-cohort-scope/1.0.0` and append exactly
+one `requested` event for that user-requested fixture. The NDJSON event log is append-only and
+hash-chained. A request may end only as a frozen archive record or an explicit terminal
+`unavailable` event. At closure, the record manifest's fixture set and each record's
+`request_event_hash` must reproduce the event log exactly. This defines the estimand as distinct
+user-requested fixtures instead of the subset that happened to produce usable odds.
+
+The policy's `forward-artifact-lineage/1.1.0` has separate roles for football history, corner
+history, football HT/FT models, and corner models. File hashes alone are insufficient: validation
+rebuilds both registries from disk, checks their dataset links, and freezes every registered
+league's model hash (plus the football full-time component or corner dataset hash). A candidate
+cannot substitute an unregistered model from the same directory or another registry.
+
 An active cohort also requires `source-evidence/2.0.0`. Export the visible pre-kickoff page state
 to JSON, including fixture identity, exact kickoff, source URL, collection time, HTTP metadata,
 and complete per-company outcome prices. Build and replay the bundle with:
@@ -415,6 +431,22 @@ audit boundary for `local-integrity-shadow-v2`; an external trusted timestamp mu
 until an external service is actually configured, and it remains a mandatory prerequisite for
 `promotable-confirmation-v2` rather than an optional promotion enhancement. Legacy
 `source-evidence/1.0.0` is historical read-only and cannot satisfy an active cohort.
+
+Current active records additionally require `fundamental-evidence/1.0.0`. Build it from one or
+more saved visible pre-kickoff exports and pass it with `--fundamental-evidence-file`. Replay
+derives the six evidence gates (confirmed lineups, injuries, chance quality, attacking
+configuration, opponent-tail check, and corner profile) from content-addressed sources; command
+line booleans cannot unlock these gates. This adapter preserves raw exported JSON plus HTTP
+metadata, but it is not a generic raw-HTTP-body collector. That limitation, external timestamping,
+and the missing independent closing snapshot keep the cohort local shadow only.
+
+Market consensus and execution are separate evidence objects. Median/no-vig firm rows define the
+market baseline. A ledger row claiming an actual entry must instead bind
+`execution-offer-evidence/1.0.0`: one named firm and account region, exact market/selection,
+quote and accepted timestamps, quoted and accepted decimal odds, max stake, requested stake, and
+acceptance status. Replay rejects a stake above the limit, an improved post-hoc price, a fixture or
+market mismatch, or a derivative-only execution assertion. Missing execution remains an explicit
+evaluation blocker; it is never inferred from the consensus median.
 
 If the visible source contains no market table, archive a source snapshot with
 `availability_status=unavailable`, an empty market list, and at least one concrete reason. This

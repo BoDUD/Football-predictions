@@ -24,11 +24,12 @@ from statistics import mean
 from typing import Any, Mapping, Sequence
 
 try:
-    from scripts import forward_policy, source_evidence
+    from scripts import execution_evidence, forward_policy, source_evidence
 except ImportError:  # Direct execution from scripts/.
     script_directory = str(Path(__file__).resolve().parent)
     if script_directory not in sys.path:
         sys.path.insert(0, script_directory)
+    import execution_evidence  # type: ignore[no-redef]
     import forward_policy  # type: ignore[no-redef]
     import source_evidence  # type: ignore[no-redef]
 
@@ -1082,6 +1083,9 @@ def _validate_v3_input(
             "v3 forward observations require matching explicit policy/cohort kinds"
         )
     protocol = _validation_protocol(policy)
+    firm_execution_required = forward_policy._release_at_least(
+        policy["software"]["package_version"], (3, 7, 0)
+    )
     schemas = _market_schemas(value.get("market_schemas"))
     queue = value.get("queue_manifest")
     if not isinstance(queue, Mapping):
@@ -1279,6 +1283,14 @@ def _validate_v3_input(
             raise ForwardValidationError(
                 f"{label}.prediction_payload provenance does not match its record binding"
             )
+        if forward_policy._policy_uses_role_aware_lineage(policy):
+            request_binding = binding.get("cohort_request_binding")
+            if not isinstance(request_binding, Mapping) or request_binding.get(
+                "fixture_id"
+            ) != str(prediction.get("fixture_id") or ""):
+                raise ForwardValidationError(
+                    f"{label}.forward_policy_binding does not bind the requested fixture"
+                )
         queue_key = str(prediction.get("queue_key") or "")
         if (
             prediction.get("queue_hash") != supplied_queue_hash
@@ -1650,18 +1662,23 @@ def _validate_v3_input(
                 raise ForwardValidationError(
                     f"{label}.execution_entry is invalid for status"
                 )
+            expected_execution_fields = {
+                "selection",
+                "entry_decimal_odds",
+                "entry_complete_market_odds",
+                "entry_collected_at",
+                "entry_source_evidence_hash",
+                "entry_price_kind",
+                "limit_verified",
+                "stake_units",
+            }
+            if firm_execution_required:
+                expected_execution_fields.update(
+                    {"execution_evidence_file", "execution_evidence_hash"}
+                )
             _exact_keys(
                 execution_entry_raw,
-                {
-                    "selection",
-                    "entry_decimal_odds",
-                    "entry_complete_market_odds",
-                    "entry_collected_at",
-                    "entry_source_evidence_hash",
-                    "entry_price_kind",
-                    "limit_verified",
-                    "stake_units",
-                },
+                expected_execution_fields,
                 f"{label}.execution_entry",
             )
             selection = str(execution_entry_raw.get("selection") or "").strip()
@@ -1702,10 +1719,12 @@ def _validate_v3_input(
                 ) from exc
             if not math.isfinite(stake) or stake <= 0.0:
                 raise ForwardValidationError(f"{label}.stake_units must be positive")
-            if (
-                execution_entry_raw.get("entry_price_kind")
-                != "executable_after_slippage"
-            ):
+            expected_price_kind = (
+                "firm_accepted_offer"
+                if firm_execution_required
+                else "executable_after_slippage"
+            )
+            if execution_entry_raw.get("entry_price_kind") != expected_price_kind:
                 raise ForwardValidationError(f"{label}.entry_price_kind is invalid")
             if execution_entry_raw.get("limit_verified") is not True:
                 raise ForwardValidationError(f"{label}.entry limit must be verified")
@@ -1756,6 +1775,54 @@ def _validate_v3_input(
                     raise ForwardValidationError(
                         f"{label}.execution_entry may only apply conservative slippage to the selected price"
                     )
+            execution_binding = None
+            if firm_execution_required:
+                execution_evidence_file = str(
+                    execution_entry_raw.get("execution_evidence_file") or ""
+                ).strip()
+                try:
+                    replayed_offer = execution_evidence.validate_evidence_file(
+                        execution_evidence_file
+                    )
+                except (execution_evidence.ExecutionEvidenceError, OSError) as exc:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry firm offer cannot be replayed"
+                    ) from exc
+                execution_evidence_hash = _sha256(
+                    execution_entry_raw.get("execution_evidence_hash"),
+                    f"{label}.execution_entry.execution_evidence_hash",
+                )
+                if replayed_offer.get("evidence_hash") != execution_evidence_hash:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry evidence hash does not match"
+                    )
+                try:
+                    execution_binding = execution_evidence.match_offer(
+                        replayed_offer,
+                        fixture={
+                            "match_id": entry["fixture_id"],
+                            "home_team": entry["home_team"],
+                            "away_team": entry["away_team"],
+                            "kickoff": kickoff.isoformat(),
+                        },
+                        market_identity=prediction_identity,
+                        selection=selection,
+                        accepted_at=entry_collected.isoformat(),
+                        accepted_decimal_odds=entry_price,
+                        stake_units=stake,
+                    )
+                except execution_evidence.ExecutionEvidenceError as exc:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry does not match its accepted firm offer"
+                    ) from exc
+                accepted_at = _aware(
+                    replayed_offer.get("accepted_at"),
+                    f"{label}.execution_entry accepted_at",
+                )
+                if accepted_at > archived or accepted_at >= kickoff:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry accepted offer is not pre-archive"
+                    )
             execution_entry = {
                 "selection": selection,
                 "entry_decimal_odds": entry_price,
@@ -1769,10 +1836,20 @@ def _validate_v3_input(
                 ),
                 "entry_collected_at": entry_collected.isoformat(),
                 "entry_source_evidence_hash": entry_source_hash,
-                "entry_price_kind": "executable_after_slippage",
+                "entry_price_kind": expected_price_kind,
                 "limit_verified": True,
                 "stake_units": stake,
             }
+            if execution_binding is not None:
+                execution_entry.update(
+                    {
+                        "execution_evidence_file": str(
+                            Path(execution_evidence_file).resolve()
+                        ),
+                        "execution_evidence_hash": execution_evidence_hash,
+                        "execution_binding": execution_binding,
+                    }
+                )
         by_observation[observation_id] = {
             "commitment_hash": supplied_commitment_hash,
             "entry": entry,
@@ -1987,7 +2064,13 @@ def _validate_v3_input(
     value["legacy_uncommitted"] = False
     value["external_timestamp_anchor"] = False
     value["baseline_artifact_replay_complete"] = False
-    value["execution_price_source_replay_complete"] = False
+    value["execution_price_source_replay_complete"] = all(
+        metadata.get("execution_entry") is None
+        or isinstance(
+            metadata.get("execution_entry", {}).get("execution_binding"), Mapping
+        )
+        for metadata in by_observation.values()
+    )
     value["result_source_replay_complete"] = False
     value["closing_price_source_replay_complete"] = False
     return value
@@ -2039,16 +2122,29 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
                 f"forward cohort aggregate {field} does not match its history binding"
             )
     manifest_entries = closure["record_manifest"]["records"]
-    receipt_entries = [
-        {
+    receipt_entries = []
+    for receipt in binding["receipts"]:
+        receipt_entry = {
             "fixture_id": receipt["fixture_id"],
             "archive_version_hash": receipt["archive_version_hash"],
             "record_commitment_hash": receipt["record_commitment_hash"],
             "record_binding_hash": receipt["record_binding_hash"],
             "prematch_ledger_hash": receipt["prematch_ledger_hash"],
         }
-        for receipt in binding["receipts"]
-    ]
+        snapshot = receipt.get("archive_snapshot_payload")
+        record_binding = (
+            snapshot.get("forward_policy_binding")
+            if isinstance(snapshot, Mapping)
+            else None
+        )
+        request = (
+            record_binding.get("cohort_request_binding")
+            if isinstance(record_binding, Mapping)
+            else None
+        )
+        if request is not None:
+            receipt_entry["request_event_hash"] = request.get("request_event_hash")
+        receipt_entries.append(receipt_entry)
     if receipt_entries != manifest_entries:
         raise ForwardValidationError(
             "history record receipts do not exactly cover the closed cohort record manifest"

@@ -352,6 +352,12 @@ official-site → ESPN → Sofascore fallback in [lineup-sources.md](lineup-sour
 single-provider report, every predicted/probable XI, and every unresolved source conflict as
 `lineup_confirmed=false`; do not use them to unlock or change a lineup-dependent formal pick.
 
+For a current active forward cohort, these contextual statements are not caller assertions.
+Archive `fundamental-evidence/1.0.0` from content-addressed visible pre-kickoff snapshots and let
+its replayed claims set lineup, injury, chance-quality, attacking-configuration, opponent-tail,
+and corner-profile gates. If the evidence bundle is missing, stale, mismatched, or cannot replay,
+all dependent gates fail closed. Historical command-line evidence booleans cannot replace it.
+
 ---
 
 ## Step 5: Win Probability & Betting Advice
