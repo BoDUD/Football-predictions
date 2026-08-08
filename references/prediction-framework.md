@@ -395,6 +395,8 @@ format. A caller-supplied value is only an assertion to audit; it is never autho
 ### Final Output
 
 Version 3.6.0 keeps the eight-column table and formal-primary definition unchanged. A single replay-validated v3 `◇ 观察首选` may appear in a distinct table-external publication panel and accompanying text, but never authorizes a formal pick, stake, settlement, accuracy, profit, or ROI.
+
+Version 3.13.0 adds a parallel mandatory `official-primary/1.0.0` evaluation direction without changing that strict formal-primary definition. It is chosen deterministically from frozen inputs, cannot be caller-authored, and is reported/settled only in its own non-monetary accuracy stream. A review freezes all candidate distributions and verified outcomes in `review-training-sample/1.0.0`; only a closed cohort may be exported for training the next model version.
 1. Card headline: the best threshold-qualified formal primary; otherwise exactly `无正式主推`. A separately qualified replay-validated v3 observation may appear once as `◇ 观察首选/不下注` in the table-external panel, accompanying text, or audit. Never promote an independent 1X2 or goal-range marginal leader into the primary cell.
 2. One goal range mapped deterministically from the frozen joint Rank 1 score in the compact image; retain the complete independent goal-range marginal distribution only as text/audit context
 3. Exactly the frozen, validated global joint-event Top 2 in descending joint-probability order, with each HT/FT label, full-time score, and joint probability inseparably paired; internally validate both score-derived ranges but do not repeat two range labels in the image or normal text. If the artifact is unavailable, show `数据不足` across the public projections and no fallback scenarios

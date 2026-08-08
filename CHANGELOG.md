@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.0] - 2026-08-09
+
+- 保留现有严格实盘主推定义与全部 Gate，新增每场必有且不可由调用方指定的 `official-primary/1.0.0` 评测主推。
+- 评测主推采用严格正式、counterfactual shadow、可执行强制评测、全场 1X2 模型回退四级确定性选择，只统计独立命中率，不产生金额或 ROI。
+- 赛后冻结 `review-training-sample/1.0.0`，保存全部候选分布、真实赛果及独立评测结算；新增关闭 cohort 后的下一版本训练 bundle 导出器。
+- 旧归档不回填评测主推或训练样本，同一 active cohort 内禁止模型更新。
+
 ## [3.12.0] - 2026-08-09
 
 - Fail closed on denominator-event appends and record bindings whenever an immutable closure exists while the active pointer still says `active`, then allow an idempotent close retry to repair only the pointer.

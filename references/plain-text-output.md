@@ -27,7 +27,9 @@ Show user-facing text as ordinary wrapped text, not a fenced code block.
 ## Primary and observation placement
 
 Initial and lineup output separate publication states explicitly. The formal line is
-`正式主推：<direction>` or `正式主推：无`. When no formal primary exists, a second line is either
+For 3.13+ archives, start with `评测主推：<direction>` and its selection tier, followed by
+`正式主推：<direction>` or `正式主推：无`. The evaluation direction is mandatory but non-monetary;
+it has its own accuracy denominator and never substitutes for the strict betting primary. When no formal primary exists, a later line is either
 one replay-validated `◇ 观察首选` with recalculated EV/edge and the explicit state
 `不下注、不计战绩`, or `— 无可用方向` when no candidate passed every non-release gate. Compact
 data, value, policy, and mixed-safety blockers explain why formal publication did not happen.
@@ -40,6 +42,7 @@ Derive the card's `主推` cell from the archive; caller prose cannot change it:
 1. Show the unique formal primary, with archive-derived `★`.
 2. If no formal primary exists, show exactly `无正式主推` in the card's formal-primary cell and
    `正式主推：无` in initial/lineup text.
+3. Never place a non-formal evaluation primary in the eight-column formal-primary cell. Show it only in the table-external `评测主推与发布状态` panel and text.
 
 A separately archived and replay-validated v3 shadow may appear once in accompanying text and
 the card's distinct table-external observation panel with `◇` and an explicit

@@ -121,7 +121,9 @@ DEFAULT_PROTECTED_FILES = (
     "scripts/memory_store.py",
     "scripts/public_market_outlook.py",
     "scripts/publication_outlook.py",
+    "scripts/official_primary.py",
     "scripts/gate_stats.py",
+    "scripts/review_training_export.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -145,6 +147,7 @@ DEFAULT_PROTECTED_FILES = (
     "references/half-time-full-time.md",
     "references/image-output.md",
     "references/plain-text-output.md",
+    "references/review-framework.md",
 )
 REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "scripts/forward_policy.py",
@@ -156,7 +159,9 @@ REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "scripts/memory_store.py",
     "scripts/public_market_outlook.py",
     "scripts/publication_outlook.py",
+    "scripts/official_primary.py",
     "scripts/gate_stats.py",
+    "scripts/review_training_export.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -164,6 +169,7 @@ REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "pyproject.toml",
     "clawhub.json",
     "references/plain-text-output.md",
+    "references/review-framework.md",
 }
 PRE_3_6_PROVENANCE_PROTECTED_FILES = frozenset(
     {
@@ -182,12 +188,41 @@ PRE_3_6_PROVENANCE_PROTECTED_FILES = frozenset(
 RENDERER_POLICY_PROTECTED_FILES = (
     "scripts/public_market_outlook.py",
     "scripts/publication_outlook.py",
+    "scripts/official_primary.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
 )
 PRE_3_6_RENDERER_POLICY_PROTECTED_FILES = (
     "scripts/public_market_outlook.py",
+    "scripts/prediction_card_renderer.py",
+    "scripts/review_card_renderer.py",
+    "scripts/plain_text_formatter.py",
+)
+PRE_3_13_PROVENANCE_PROTECTED_FILES = frozenset(
+    {
+        "scripts/forward_policy.py",
+        "scripts/forward_validation.py",
+        "scripts/artifact_lineage.py",
+        "scripts/cohort_scope.py",
+        "scripts/fundamental_evidence.py",
+        "scripts/execution_evidence.py",
+        "scripts/memory_store.py",
+        "scripts/public_market_outlook.py",
+        "scripts/publication_outlook.py",
+        "scripts/gate_stats.py",
+        "scripts/prediction_card_renderer.py",
+        "scripts/review_card_renderer.py",
+        "scripts/plain_text_formatter.py",
+        "soccer_predict/__init__.py",
+        "pyproject.toml",
+        "clawhub.json",
+        "references/plain-text-output.md",
+    }
+)
+PRE_3_13_RENDERER_POLICY_PROTECTED_FILES = (
+    "scripts/public_market_outlook.py",
+    "scripts/publication_outlook.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -245,6 +280,11 @@ def _policy_contract_for_package(
         return (
             PRE_3_6_PROVENANCE_PROTECTED_FILES,
             PRE_3_6_RENDERER_POLICY_PROTECTED_FILES,
+        )
+    if release < (3, 13, 0):
+        return (
+            PRE_3_13_PROVENANCE_PROTECTED_FILES,
+            PRE_3_13_RENDERER_POLICY_PROTECTED_FILES,
         )
     return (
         frozenset(REQUIRED_PROVENANCE_PROTECTED_FILES),
@@ -451,6 +491,7 @@ def _runtime_policy() -> dict[str, Any]:
         gate_stats,
         htft_ranker,
         memory_store,
+        official_primary,
         public_market_outlook,
         publication_outlook,
     )
@@ -489,6 +530,16 @@ def _runtime_policy() -> dict[str, Any]:
             "recent_gate_diagnostics_schema_version": gate_stats.SCHEMA_VERSION,
             "recent_distinct_match_windows": [50, 100],
             "recent_gate_diagnostics_are_not_performance": True,
+            "mandatory_official_primary_schema_version": (
+                official_primary.OFFICIAL_PRIMARY_SCHEMA_VERSION
+            ),
+            "mandatory_official_primary_selection_policy": (
+                official_primary.OFFICIAL_PRIMARY_SELECTION_POLICY
+            ),
+            "betting_primary_definition_unchanged": True,
+            "official_primary_is_non_monetary": True,
+            "review_training_sample_schema_version": "review-training-sample/1.0.0",
+            "same_active_cohort_model_update_allowed": False,
         },
         "display_policy": {
             "public_joint_events": "frozen_global_joint_top2",

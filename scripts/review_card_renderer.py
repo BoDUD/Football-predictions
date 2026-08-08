@@ -569,6 +569,23 @@ def build_card(record: dict[str, Any]) -> ReviewCard:
         primary_result = None
         primary_settlement = "主推：无正式推荐\n（不结算、不计战绩）"
 
+    evaluation = basis.get("official_primary")
+    evaluation_settlement = record.get("official_primary_settlement")
+    if isinstance(evaluation, Mapping) and isinstance(evaluation_settlement, Mapping):
+        memory_store.validated_official_primary(record)
+        evaluation_text = plain_text_formatter.format_official_primary(
+            evaluation, record
+        )
+        raw_evaluation_result = evaluation_settlement.get("result")
+        normalized_evaluation_result = (
+            "win" if raw_evaluation_result == "full_win" else raw_evaluation_result
+        )
+        result_label = RESULT_LABELS.get(str(normalized_evaluation_result), "未取得")
+        primary_settlement = (
+            f"评测主推：{evaluation_text}\n评测结果：{result_label}\n"
+            f"{primary_settlement}"
+        )
+
     league = plain_text_formatter.league_display_name(record)
     league = _required_text(league, "league")
     reviewed_at = _required_text(record.get("reviewed_at"), "reviewed_at")

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 from xml.etree import ElementTree as ET
 
+from scripts import official_primary
 from scripts import review_card_renderer as renderer
 
 
@@ -194,6 +195,33 @@ class ReviewCardRendererTests(unittest.TestCase):
         )
         self.public_builder = builder.start()
         self.addCleanup(builder.stop)
+
+    def test_new_review_card_shows_evaluation_primary_separately(self) -> None:
+        record = _record()
+        record.update(
+            {
+                "probabilities": {
+                    "home_win": 0.55,
+                    "draw": 0.25,
+                    "away_win": 0.20,
+                },
+                "score_model_provenance": {"model_hash": "sha256:" + "f" * 64},
+                "candidate_audits": [],
+            }
+        )
+        evaluation = official_primary.select_official_primary(
+            record, {"candidates": []}
+        )
+        settlement = official_primary.settle_official_primary(
+            evaluation, {}, full_time_code="H"
+        )
+        record["official_primary"] = evaluation
+        record["official_primary_settlement"] = settlement
+        record["settlement_basis"]["official_primary"] = copy.deepcopy(evaluation)
+        card = renderer.build_card(record)
+        self.assertIn("评测主推：塞伊奈约基胜", card.primary_settlement)
+        self.assertIn("评测结果：红", card.primary_settlement)
+        self.assertIn("主推：无正式推荐", card.primary_settlement)
 
     def test_no_primary_wording_is_exact_and_all_references_share_joint_order(
         self,

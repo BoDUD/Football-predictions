@@ -944,7 +944,7 @@ def render_svg(card: Card) -> str:
         f'<text x="72" y="{publication_header_top + 30}" '
         'font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif" '
         f'font-size="21" font-weight="700" fill="{COLORS["text"]}">'
-        "观察首选与发布状态</text>"
+        "评测主推与发布状态</text>"
     )
     for publication_row, top, block_height in publication_blocks:
         parts.append(
@@ -1188,7 +1188,7 @@ def render_raster(card: Card, output_format: str) -> bytes:
 
     draw.text(
         (72, publication_header_top + 6),
-        "观察首选与发布状态",
+        "评测主推与发布状态",
         font=publication_header_font,
         fill=COLORS["text"],
     )
