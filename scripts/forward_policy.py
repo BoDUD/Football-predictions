@@ -2171,6 +2171,12 @@ def load_active_binding(
     cohort = validate_cohort(_read_json(path, "active cohort"))
     if cohort["status"] != "active":
         return None
+    closure_path = cohort_closure_path(base_dir, str(cohort["cohort_id"]))
+    if closure_path.exists() or closure_path.is_symlink():
+        raise ForwardPolicyError(
+            "immutable closure exists while pointer remains active; "
+            "repair the pointer before accepting new events or records"
+        )
     if cohort.get("schema_version") != COHORT_SCHEMA_VERSION:
         raise ForwardPolicyError(
             "active cohort without an explicit kind is historical read-only"

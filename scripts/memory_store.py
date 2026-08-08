@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 import unicodedata
 from contextlib import contextmanager
 from copy import deepcopy
@@ -8619,6 +8621,183 @@ def _write_forward_record_manifest_once(
     return path
 
 
+def _forward_record_manifest_export_directory(base_dir: str | Path) -> Path:
+    return (
+        Path(base_dir).resolve()
+        / ".codex"
+        / "soccer-predict"
+        / "forward-record-manifest-exports"
+    )
+
+
+def _reject_symlink_components(path: Path, *, boundary: Path) -> None:
+    """Reject a manifest target whose existing path components contain links."""
+
+    try:
+        relative = path.relative_to(boundary)
+    except ValueError as exc:
+        raise ValueError(
+            "Forward record manifest output is outside the workspace"
+        ) from exc
+    current = boundary
+    for part in relative.parts:
+        current /= part
+        is_junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or (callable(is_junction) and bool(is_junction())):
+            raise ValueError(
+                "Forward record manifest output cannot traverse a symbolic link or junction"
+            )
+
+
+def _safe_forward_record_manifest_output(
+    output: str | Path,
+    *,
+    base_dir: str | Path,
+    cohort_id: str,
+    allow_canonical: bool = True,
+) -> Path:
+    """Resolve a manifest publication target inside one of two safe locations."""
+
+    workspace = Path(os.path.abspath(os.fspath(base_dir)))
+    forward_policy.cohort_manifest_path(base_dir, cohort_id)
+    filename = f"{cohort_id}-record-manifest.json"
+    canonical_directory = workspace / ".codex" / "soccer-predict" / "forward-cohorts"
+    export_directory = (
+        workspace / ".codex" / "soccer-predict" / "forward-record-manifest-exports"
+    )
+    canonical = canonical_directory / filename
+    _reject_symlink_components(canonical_directory, boundary=workspace)
+    _reject_symlink_components(export_directory, boundary=workspace)
+    lexical = Path(os.path.abspath(os.fspath(output)))
+    is_junction = getattr(lexical, "is_junction", None)
+    if lexical.is_symlink() or (callable(is_junction) and bool(is_junction())):
+        raise ValueError(
+            "Forward record manifest output cannot traverse a symbolic link or junction"
+        )
+    resolved = lexical.resolve(strict=False)
+    resolved_canonical = canonical.resolve(strict=False)
+    resolved_export_directory = export_directory.resolve(strict=False)
+    safe_export = (
+        resolved.parent == resolved_export_directory and resolved.name == filename
+    )
+    if not ((allow_canonical and resolved == resolved_canonical) or safe_export):
+        raise ValueError(
+            "Forward record manifest output must be "
+            + ("the canonical cohort manifest or " if allow_canonical else "")
+            + "its exact cohort filename inside forward-record-manifest-exports"
+        )
+    _reject_symlink_components(resolved, boundary=workspace.resolve())
+    return resolved
+
+
+def _write_manifest_json_atomically(
+    path: Path, payload: Mapping[str, Any], *, boundary: Path
+) -> Path:
+    """Write through an exclusively created temp file after link-safe validation."""
+
+    _reject_symlink_components(path, boundary=boundary)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(
+                json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n"
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        _reject_symlink_components(path, boundary=boundary)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def _publish_forward_record_manifest(
+    output: str | Path,
+    manifest: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    cohort_id: str,
+    allow_canonical: bool,
+) -> Path:
+    """Publish a manifest without permitting state-file overwrite paths."""
+
+    clean_cohort_id = str(cohort_id or "").strip()
+    if manifest.get("cohort_id") != clean_cohort_id:
+        raise ValueError("Closed record manifest does not match its cohort_id")
+    path = _safe_forward_record_manifest_output(
+        output,
+        base_dir=base_dir,
+        cohort_id=clean_cohort_id,
+        allow_canonical=allow_canonical,
+    )
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            existing = None
+        if (
+            isinstance(existing, Mapping)
+            and existing.get("artifact_type")
+            == "soccer_untouched_live_forward_record_manifest"
+            and existing.get("cohort_id") != clean_cohort_id
+        ):
+            raise ValueError(
+                "Forward record manifest output belongs to a different cohort"
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_components(path, boundary=Path(base_dir).resolve())
+    return _write_manifest_json_atomically(
+        path,
+        manifest,
+        boundary=Path(base_dir).resolve(),
+    )
+
+
+def publish_closed_record_manifest(
+    output: str | Path,
+    manifest: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    cohort_id: str,
+) -> Path:
+    """Publish a closure-authorized manifest to a canonical or safe export path."""
+
+    return _publish_forward_record_manifest(
+        output,
+        manifest,
+        base_dir=base_dir,
+        cohort_id=cohort_id,
+        allow_canonical=True,
+    )
+
+
+def publish_record_manifest_preview(
+    output: str | Path,
+    manifest: dict[str, Any],
+    *,
+    base_dir: str | Path,
+    cohort_id: str,
+) -> Path:
+    """Publish a preview only inside the dedicated export directory."""
+
+    return _publish_forward_record_manifest(
+        output,
+        manifest,
+        base_dir=base_dir,
+        cohort_id=cohort_id,
+        allow_canonical=False,
+    )
+
+
 @locked_history_transaction
 def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, Any]:
     """Write the complete record index for one immutable cohort from history."""
@@ -8635,7 +8814,12 @@ def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, An
     manifest = forward_record_manifest_for_records(
         selected, cohort_manifest=cohort, denominator=denominator
     )
-    output = _write_json_atomically(args.output, manifest)
+    output = publish_record_manifest_preview(
+        args.output,
+        manifest,
+        base_dir=args.base_dir,
+        cohort_id=cohort_id,
+    )
     return {
         "ok": True,
         "path": str(output),
@@ -8663,11 +8847,15 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
         selected, cohort_manifest=cohort, denominator=denominator
     )
     requested_output = str(getattr(args, "record_manifest_output", "") or "").strip()
-    manifest_output = (
-        Path(requested_output).resolve()
-        if requested_output
-        else forward_policy.cohort_directory(args.base_dir)
-        / f"{cohort_id}-record-manifest.json"
+    manifest_output = _safe_forward_record_manifest_output(
+        (
+            requested_output
+            if requested_output
+            else forward_policy.cohort_directory(args.base_dir)
+            / f"{cohort_id}-record-manifest.json"
+        ),
+        base_dir=args.base_dir,
+        cohort_id=cohort_id,
     )
     try:
         closure_path, closure = forward_policy.close_cohort(
@@ -8680,7 +8868,12 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
     closed_manifest = closure.get("record_manifest")
     if not isinstance(closed_manifest, dict) or closed_manifest != manifest:
         raise ValueError("Closed cohort did not preserve the candidate record manifest")
-    manifest_path = _write_json_atomically(manifest_output, closed_manifest)
+    manifest_path = publish_closed_record_manifest(
+        manifest_output,
+        closed_manifest,
+        base_dir=args.base_dir,
+        cohort_id=cohort_id,
+    )
     return {
         "ok": True,
         "cohort_id": cohort_id,
@@ -13108,7 +13301,14 @@ def build_parser() -> argparse.ArgumentParser:
         "export-forward-record-manifest",
         help="Preview the complete canonical record manifest for one forward cohort",
     )
-    export_manifest.add_argument("--output", required=True)
+    export_manifest.add_argument(
+        "--output",
+        required=True,
+        help=(
+            "Exact COHORT_ID-record-manifest.json path inside "
+            ".codex/soccer-predict/forward-record-manifest-exports"
+        ),
+    )
     export_manifest.add_argument("--cohort-id", required=True)
 
     close_forward = sub.add_parser(
@@ -13122,7 +13322,11 @@ def build_parser() -> argparse.ArgumentParser:
     close_forward.add_argument("--closed-at")
     close_forward.add_argument(
         "--record-manifest-output",
-        help="Optional output path; defaults beside the immutable cohort manifests",
+        help=(
+            "Optional exact COHORT_ID-record-manifest.json path inside "
+            ".codex/soccer-predict/forward-record-manifest-exports; defaults beside "
+            "the immutable cohort manifests"
+        ),
     )
 
     export_forward = sub.add_parser(

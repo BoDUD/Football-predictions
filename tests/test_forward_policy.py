@@ -1289,6 +1289,39 @@ class ForwardPolicyTests(unittest.TestCase):
                 "active",
             )
             with self.assertRaisesRegex(
+                cohort_scope.CohortScopeError,
+                "immutable closure exists while pointer remains active",
+            ):
+                cohort_scope.append_event(
+                    base_dir=base,
+                    cohort_id=cohort["cohort_id"],
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                    event_type="requested",
+                    fixture_id="post-crash-event",
+                    competition_key="test_league",
+                    home_team="Home",
+                    away_team="Away",
+                    kickoff="2026-08-06T05:00:00Z",
+                    occurred_at="2026-08-06T02:30:00Z",
+                )
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "immutable closure exists while pointer remains active",
+            ):
+                forward_policy.load_active_binding(
+                    base_dir=base,
+                    repo_root=self.repo_root,
+                    archived_at="2026-08-06T02:30:00Z",
+                )
+            self.assertEqual(
+                cohort_scope.load_events(
+                    base,
+                    cohort["cohort_id"],
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                ),
+                [],
+            )
+            with self.assertRaisesRegex(
                 forward_policy.ForwardPolicyError, "different content"
             ):
                 forward_policy.close_cohort(
@@ -1542,7 +1575,13 @@ class ForwardPolicyTests(unittest.TestCase):
                     repo_root=self.repo_root,
                 )
             manifest = empty_record_manifest(cohort)
-            output = base / "published-record-manifest.json"
+            output = (
+                base
+                / ".codex"
+                / "soccer-predict"
+                / "forward-record-manifest-exports"
+                / f"{cohort['cohort_id']}-record-manifest.json"
+            )
             arguments = SimpleNamespace(
                 base_dir=str(base),
                 cohort_id=cohort["cohort_id"],
@@ -1598,6 +1637,7 @@ class ForwardPolicyTests(unittest.TestCase):
                     memory_store.cmd_close_forward_cohort.__wrapped__(arguments)
             self.assertFalse(output.exists())
 
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text('{"stale":true}\n', encoding="utf-8")
             closure_path = base / "closure.json"
             closure = {
@@ -1616,6 +1656,158 @@ class ForwardPolicyTests(unittest.TestCase):
                 result = memory_store.cmd_close_forward_cohort.__wrapped__(arguments)
             self.assertEqual(json.loads(output.read_text(encoding="utf-8")), manifest)
             self.assertEqual(result["manifest_hash"], manifest["manifest_hash"])
+
+    def test_close_rejects_unsafe_manifest_outputs_before_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cohort_id = "safe-output-boundary"
+            manifest = {
+                "cohort_id": cohort_id,
+                "artifact_type": "soccer_untouched_live_forward_record_manifest",
+            }
+            unsafe_targets = (
+                base / "history.json",
+                base / ".codex" / "soccer-predict" / "active-forward-cohort.json",
+                base
+                / ".codex"
+                / "soccer-predict"
+                / "forward-cohorts"
+                / f"{cohort_id}-closure.json",
+                base / "outside-record-manifest.json",
+                base
+                / ".codex"
+                / "soccer-predict"
+                / "forward-record-manifest-exports"
+                / "other-cohort-record-manifest.json",
+            )
+            for target in unsafe_targets:
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(
+                        ValueError, "must be the canonical cohort manifest"
+                    ):
+                        memory_store._safe_forward_record_manifest_output(
+                            target,
+                            base_dir=base,
+                            cohort_id=cohort_id,
+                        )
+            canonical_target = (
+                forward_policy.cohort_directory(base)
+                / f"{cohort_id}-record-manifest.json"
+            )
+            with self.assertRaisesRegex(
+                ValueError, "inside forward-record-manifest-exports"
+            ):
+                memory_store._safe_forward_record_manifest_output(
+                    canonical_target,
+                    base_dir=base,
+                    cohort_id=cohort_id,
+                    allow_canonical=False,
+                )
+
+            active_path = (
+                base / ".codex" / "soccer-predict" / "active-forward-cohort.json"
+            )
+            active_path.parent.mkdir(parents=True)
+            active_path.write_text('{"status":"active"}\n', encoding="utf-8")
+            arguments = SimpleNamespace(
+                base_dir=str(base),
+                cohort_id=cohort_id,
+                closed_at=None,
+                record_manifest_output=str(active_path),
+            )
+            with (
+                mock.patch.object(memory_store, "load_history", return_value=[]),
+                mock.patch.object(
+                    memory_store,
+                    "_load_immutable_forward_cohort",
+                    return_value={"cohort_id": cohort_id},
+                ),
+                mock.patch.object(
+                    memory_store,
+                    "_all_forward_records_for_cohort",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    memory_store, "_denominator_for_records", return_value=None
+                ),
+                mock.patch.object(
+                    memory_store,
+                    "forward_record_manifest_for_records",
+                    return_value=manifest,
+                ),
+                mock.patch.object(forward_policy, "close_cohort") as close_cohort,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "must be the canonical cohort manifest"
+                ):
+                    memory_store.cmd_close_forward_cohort.__wrapped__(arguments)
+            close_cohort.assert_not_called()
+            with self.assertRaisesRegex(
+                ValueError, "must be the canonical cohort manifest"
+            ):
+                memory_store.publish_closed_record_manifest(
+                    active_path,
+                    manifest,
+                    base_dir=base,
+                    cohort_id=cohort_id,
+                )
+            self.assertEqual(
+                json.loads(active_path.read_text(encoding="utf-8")),
+                {"status": "active"},
+            )
+            safe_target = (
+                base
+                / ".codex"
+                / "soccer-predict"
+                / "forward-record-manifest-exports"
+                / f"{cohort_id}-record-manifest.json"
+            )
+            safe_target.parent.mkdir(parents=True)
+            other_manifest = {
+                "artifact_type": "soccer_untouched_live_forward_record_manifest",
+                "cohort_id": "different-cohort",
+            }
+            safe_target.write_text(
+                json.dumps(other_manifest, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "different cohort"):
+                memory_store.publish_closed_record_manifest(
+                    safe_target,
+                    manifest,
+                    base_dir=base,
+                    cohort_id=cohort_id,
+                )
+            self.assertEqual(
+                json.loads(safe_target.read_text(encoding="utf-8")), other_manifest
+            )
+
+    def test_manifest_publication_rejects_symbolic_link_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            outside = base / "outside"
+            outside.mkdir()
+            export_parent = base / ".codex" / "soccer-predict"
+            export_parent.mkdir(parents=True)
+            export_directory = export_parent / "forward-record-manifest-exports"
+            try:
+                export_directory.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symbolic links are unavailable: {exc}")
+            cohort_id = "symlink-boundary"
+            target = export_directory / f"{cohort_id}-record-manifest.json"
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                memory_store.publish_closed_record_manifest(
+                    target,
+                    {
+                        "cohort_id": cohort_id,
+                        "artifact_type": (
+                            "soccer_untouched_live_forward_record_manifest"
+                        ),
+                    },
+                    base_dir=base,
+                    cohort_id=cohort_id,
+                )
+            self.assertEqual(list(outside.iterdir()), [])
 
     def test_current_closure_binds_event_archive_observation_and_microseconds(
         self,

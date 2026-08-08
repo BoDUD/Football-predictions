@@ -509,7 +509,14 @@ active pointer and complete log, reproduces `forward-cohort-denominator/2.2.0` w
 Only after that transaction succeeds does it atomically publish the external record-manifest file
 from the closure's exact embedded copy. A losing concurrent event therefore either precedes the
 closure and must be included, or observes the closed pointer and fails; a failed close cannot leave
-a stale final manifest that blocks retry. Each
+a stale final manifest that blocks retry. If a process exits after the immutable closure is durable
+but before the closed pointer is durable, the closure itself becomes a write barrier: every event
+append and record binding fails even though the stale pointer still says `active`. Re-running the
+same close must reproduce the existing closure exactly and repair only the pointer; no writer may
+extend the event log in between. The external record manifest may be published only to its canonical
+cohort path or to the exact cohort filename under
+`.codex/soccer-predict/forward-record-manifest-exports/`; state files, arbitrary paths, and symbolic
+links are rejected before closure begins. Each
 canonically sorted manifest entry binds the fixture ID, original request fixture ID, current full
 fixture, request and fixture event hashes, latest fixture event time, execution receipt identities, archive-version hash,
 record archive time, record-commitment hash, committed-binding hash, and pre-match-ledger hash.

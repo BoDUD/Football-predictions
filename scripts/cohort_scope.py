@@ -270,6 +270,21 @@ def _active_cohort_path(base_dir: str | Path) -> Path:
     )
 
 
+def _committed_closure_path(base_dir: str | Path, cohort_id: str) -> Path:
+    """Return the canonical immutable closure path without importing policy code."""
+
+    clean_cohort_id = _require_token(cohort_id, "cohort_id")
+    root = Path(base_dir).resolve() / ".codex" / "soccer-predict" / "forward-cohorts"
+    candidate = root / f"{clean_cohort_id}-closure.json"
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:  # pragma: no cover - defensive after token validation
+        raise CohortScopeError("cohort closure path is non-canonical") from exc
+    if relative.parent != Path("."):
+        raise CohortScopeError("cohort closure path is non-canonical")
+    return candidate
+
+
 def _load_active_event_binding(
     base_dir: str | Path,
     *,
@@ -299,6 +314,12 @@ def _load_active_event_binding(
         raise CohortScopeError("denominator events require an active cohort")
     if value.get("cohort_id") != _require_token(cohort_id, "cohort_id"):
         raise CohortScopeError("denominator event cohort_id is not active")
+    closure_path = _committed_closure_path(base_dir, cohort_id)
+    if closure_path.exists() or closure_path.is_symlink():
+        raise CohortScopeError(
+            "immutable closure exists while pointer remains active; "
+            "repair the pointer before accepting new events or records"
+        )
     if (
         value.get("scope_id") != frozen["scope_id"]
         or value.get("scope_hash") != frozen["scope_hash"]
