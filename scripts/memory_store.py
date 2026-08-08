@@ -8658,21 +8658,36 @@ def _safe_forward_record_manifest_output(
 ) -> Path:
     """Resolve a manifest publication target inside one of two safe locations."""
 
-    workspace = Path(base_dir).resolve()
+    workspace = Path(os.path.abspath(os.fspath(base_dir)))
     forward_policy.cohort_manifest_path(base_dir, cohort_id)
     filename = f"{cohort_id}-record-manifest.json"
-    canonical = forward_policy.cohort_directory(base_dir) / filename
-    export_directory = _forward_record_manifest_export_directory(base_dir)
+    canonical_directory = workspace / ".codex" / "soccer-predict" / "forward-cohorts"
+    export_directory = (
+        workspace / ".codex" / "soccer-predict" / "forward-record-manifest-exports"
+    )
+    canonical = canonical_directory / filename
+    _reject_symlink_components(canonical_directory, boundary=workspace)
+    _reject_symlink_components(export_directory, boundary=workspace)
     lexical = Path(os.path.abspath(os.fspath(output)))
-    safe_export = lexical.parent == export_directory and lexical.name == filename
-    if not ((allow_canonical and lexical == canonical) or safe_export):
+    is_junction = getattr(lexical, "is_junction", None)
+    if lexical.is_symlink() or (callable(is_junction) and bool(is_junction())):
+        raise ValueError(
+            "Forward record manifest output cannot traverse a symbolic link or junction"
+        )
+    resolved = lexical.resolve(strict=False)
+    resolved_canonical = canonical.resolve(strict=False)
+    resolved_export_directory = export_directory.resolve(strict=False)
+    safe_export = (
+        resolved.parent == resolved_export_directory and resolved.name == filename
+    )
+    if not ((allow_canonical and resolved == resolved_canonical) or safe_export):
         raise ValueError(
             "Forward record manifest output must be "
             + ("the canonical cohort manifest or " if allow_canonical else "")
             + "its exact cohort filename inside forward-record-manifest-exports"
         )
-    _reject_symlink_components(lexical, boundary=workspace)
-    return lexical
+    _reject_symlink_components(resolved, boundary=workspace.resolve())
+    return resolved
 
 
 def _write_manifest_json_atomically(
