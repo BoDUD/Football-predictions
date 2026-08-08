@@ -31,6 +31,7 @@ try:
         fundamental_evidence,
         htft_ranker,
         joint_scenario_model,
+        official_primary,
         source_evidence,
     )
 except ImportError:  # Direct execution from scripts/.
@@ -43,6 +44,7 @@ except ImportError:  # Direct execution from scripts/.
     import fundamental_evidence  # type: ignore[no-redef]
     import htft_ranker  # type: ignore[no-redef]
     import joint_scenario_model  # type: ignore[no-redef]
+    import official_primary  # type: ignore[no-redef]
     import source_evidence  # type: ignore[no-redef]
 
 try:
@@ -6305,6 +6307,53 @@ def apply_primary_role(
     record["primary_pick"] = snapshot
 
 
+def _validated_current_candidate_audit(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    audits = [
+        audit
+        for audit in record.get("candidate_audits", [])
+        if isinstance(audit, dict)
+        and audit.get("kind") == CANDIDATE_EVALUATION_KIND
+        and audit.get("schema_version") == CANDIDATE_EVALUATION_SCHEMA_VERSION
+    ]
+    if len(audits) != 1:
+        return None
+    return (
+        audits[0] if validated_candidate_evaluation_audit(audits[0], record) else None
+    )
+
+
+def build_official_primary(record: dict[str, Any]) -> dict[str, Any]:
+    """Build the mandatory, non-monetary evaluation primary for a new archive."""
+
+    audit = _validated_current_candidate_audit(record)
+    if audit is None and record.get("forward_policy_binding") is not None:
+        raise ValueError(
+            "Forward-bound records require one replay-valid candidate evaluation "
+            "before selecting the official evaluation primary"
+        )
+    return official_primary.select_official_primary(record, audit or {"candidates": []})
+
+
+def validated_official_primary(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate a frozen evaluation primary without backfilling legacy records."""
+
+    value = record.get("official_primary")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("official_primary must be an object")
+    audit = _validated_current_candidate_audit(record)
+    if audit is None and value.get("source") == "candidate_evaluation":
+        raise ValueError("candidate-bound official_primary has no replay-valid audit")
+    if not official_primary.validate_official_primary(
+        value, record, audit or {"candidates": []}
+    ):
+        raise ValueError("official_primary does not replay from frozen model inputs")
+    return value
+
+
 def active_primary_identity(record: dict[str, Any] | None) -> tuple[Any, ...] | None:
     if not record:
         return None
@@ -7665,6 +7714,29 @@ def _canonical_forward_record_prediction_payload(
     *,
     schema_version: str,
 ) -> dict[str, Any]:
+    model_outputs = {
+        "probabilities": deepcopy(record.get("probabilities")),
+        "predicted_score": record.get("predicted_score"),
+        "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
+        "asian_pick": deepcopy(record.get("asian_pick")),
+        "total_pick": deepcopy(record.get("total_pick")),
+        "half_time_pick": deepcopy(record.get("half_time_pick")),
+        "htft_picks": deepcopy(record.get("htft_picks", [])),
+        "goal_range_pick": deepcopy(record.get("goal_range_pick")),
+        "btts_pick": deepcopy(record.get("btts_pick")),
+        "corner_total_pick": deepcopy(record.get("corner_total_pick")),
+        "corner_handicap_pick": deepcopy(record.get("corner_handicap_pick")),
+        "primary_market": record.get("primary_market"),
+        "primary_pick": deepcopy(record.get("primary_pick")),
+        "candidate_audits": deepcopy(record.get("candidate_audits", [])),
+        "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
+        "score_model_provenance": deepcopy(record.get("score_model_provenance")),
+        "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
+        "evaluation_eligibility": deepcopy(record.get("evaluation_eligibility")),
+        "market_status": deepcopy(record.get("market_status")),
+    }
+    if "official_primary" in record:
+        model_outputs["official_primary"] = deepcopy(record.get("official_primary"))
     return {
         "schema_version": schema_version,
         "archived_at": str(record.get("updated_at") or record.get("created_at") or ""),
@@ -7676,27 +7748,7 @@ def _canonical_forward_record_prediction_payload(
             "home_team": record.get("home_team"),
             "away_team": record.get("away_team"),
         },
-        "model_outputs": {
-            "probabilities": deepcopy(record.get("probabilities")),
-            "predicted_score": record.get("predicted_score"),
-            "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
-            "asian_pick": deepcopy(record.get("asian_pick")),
-            "total_pick": deepcopy(record.get("total_pick")),
-            "half_time_pick": deepcopy(record.get("half_time_pick")),
-            "htft_picks": deepcopy(record.get("htft_picks", [])),
-            "goal_range_pick": deepcopy(record.get("goal_range_pick")),
-            "btts_pick": deepcopy(record.get("btts_pick")),
-            "corner_total_pick": deepcopy(record.get("corner_total_pick")),
-            "corner_handicap_pick": deepcopy(record.get("corner_handicap_pick")),
-            "primary_market": record.get("primary_market"),
-            "primary_pick": deepcopy(record.get("primary_pick")),
-            "candidate_audits": deepcopy(record.get("candidate_audits", [])),
-            "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
-            "score_model_provenance": deepcopy(record.get("score_model_provenance")),
-            "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
-            "evaluation_eligibility": deepcopy(record.get("evaluation_eligibility")),
-            "market_status": deepcopy(record.get("market_status")),
-        },
+        "model_outputs": model_outputs,
         "ledger": {
             "ledger_hash": ledger_archive["ledger_hash"],
             "archive_hash": ledger_archive["archive_hash"],
@@ -8947,7 +8999,7 @@ def cmd_export_forward_validation(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
-    return {
+    snapshot = {
         "status": "pending",
         "settlement_basis": None,
         "analysis_stage": record.get("analysis_stage", "initial"),
@@ -9008,6 +9060,9 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "primary_pick": record.get("primary_pick"),
         "primary_change": record.get("primary_change"),
     }
+    if "official_primary" in record:
+        snapshot["official_primary"] = deepcopy(record.get("official_primary"))
+    return snapshot
 
 
 def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -9019,7 +9074,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "Lineup recheck exists but the active record is not the lineup-check version"
         )
-    return {
+    basis = {
         "policy": "latest_active_prematch_version",
         "grading_scope": "primary_only",
         "analysis_stage": stage,
@@ -9035,6 +9090,7 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "competition_evidence": deepcopy(record.get("competition_evidence")),
         "lineup_rechecked_at": record.get("lineup_rechecked_at"),
         "data_quality": record.get("data_quality", "unknown"),
+        "probabilities": deepcopy(record.get("probabilities")),
         "guardrail_evidence": deepcopy(record.get("guardrail_evidence", {})),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
@@ -9076,6 +9132,10 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "zero_zero_audit": deepcopy(record.get("zero_zero_audit")),
         "revision_count": len(record.get("revisions", [])),
     }
+    if "official_primary" in record:
+        validated_official_primary(record)
+        basis["official_primary"] = deepcopy(record.get("official_primary"))
+    return basis
 
 
 def snapshot_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -9571,6 +9631,8 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
     annotate_confidence_ranking(record)
     apply_primary_role(record, args.primary_market, args.primary_htft_selection)
     validate_primary_is_rank_one(record)
+    record["official_primary"] = build_official_primary(record)
+    validated_official_primary(record)
     record["primary_change"] = build_primary_change(record, existing, args)
 
     ledger_archive = load_forward_validation_ledger_archive(
@@ -10442,13 +10504,32 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
         home_corners=home_corners,
         away_corners=away_corners,
     )
+    official_value = settlement_basis.get("official_primary")
+    official_settlement = None
+    if isinstance(official_value, dict):
+        validated_official_primary(record)
+        candidate_results = {
+            str(item.get("candidate_id") or ""): item.get("settlement_result")
+            for diagnostic in observation_diagnostics
+            if isinstance(diagnostic, dict)
+            and diagnostic.get("kind") == CANDIDATE_EVALUATION_KIND
+            for item in diagnostic.get("candidate_results", [])
+            if isinstance(item, dict)
+        }
+        official_settlement = official_primary.settle_official_primary(
+            official_value,
+            candidate_results,
+            full_time_code=result_code(home, away),
+        )
     settlement_basis["primary_result"] = primary_result
+    settlement_basis["official_primary_settlement"] = deepcopy(official_settlement)
     settlement_basis["counts_toward_primary_record"] = counts_toward_primary_record
     settlement_basis["observation_diagnostics"] = deepcopy(observation_diagnostics)
+    reviewed_at = now_iso()
     record.update(
         {
             "status": "reviewed",
-            "reviewed_at": now_iso(),
+            "reviewed_at": reviewed_at,
             "result_verification": {
                 "verified_finished": True,
                 "source": verification_source,
@@ -10486,6 +10567,7 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             "home_corners": home_corners,
             "away_corners": away_corners,
             "primary_result": primary_result,
+            "official_primary_settlement": official_settlement,
             "observation_diagnostics": observation_diagnostics,
             "key_learning": args.key_learning,
             "learning_scope": learning_scope,
@@ -10501,6 +10583,54 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             "settlement_basis": settlement_basis,
         }
     )
+    candidate_audit = _validated_current_candidate_audit(record)
+    training_sample: dict[str, Any] = {
+        "schema_version": "review-training-sample/1.0.0",
+        "fixture": {
+            "match_id": str(record.get("match_id") or ""),
+            "league_key": record.get("league_key"),
+            "kickoff": record.get("kickoff"),
+            "home_team": record.get("home_team"),
+            "away_team": record.get("away_team"),
+        },
+        "archive_version_hash": record.get("archive_version_hash"),
+        "cohort_id": (
+            record.get("forward_policy_binding", {}).get("cohort_id")
+            if isinstance(record.get("forward_policy_binding"), dict)
+            else None
+        ),
+        "reviewed_at": reviewed_at,
+        "result_evidence": deepcopy(record.get("result_verification")),
+        "actual": {
+            "full_time_score": record.get("final_score"),
+            "half_time_score": record.get("half_time_score"),
+            "home_corners": home_corners,
+            "away_corners": away_corners,
+            "full_time_1x2": result_code(home, away),
+        },
+        "official_primary": deepcopy(record.get("official_primary")),
+        "official_primary_settlement": deepcopy(official_settlement),
+        "betting_primary": {
+            "market": primary_market,
+            "pick": deepcopy(primary_pick),
+            "result": primary_result,
+        },
+        "candidate_evaluation": (
+            {
+                "audit_hash": candidate_audit.get("audit_hash"),
+                "observation_id": candidate_audit.get("observation_id"),
+                "market_manifest": deepcopy(candidate_audit.get("market_manifest", [])),
+                "candidates": deepcopy(candidate_audit.get("candidates", [])),
+                "settlement": deepcopy(observation_diagnostics),
+            }
+            if isinstance(candidate_audit, dict)
+            else None
+        ),
+        "training_scope": "next_closed_cohort_only",
+        "mutates_active_models": False,
+    }
+    training_sample["sample_hash"] = forward_policy._hash_json(training_sample)
+    record["review_training_sample"] = training_sample
     warnings = []
     save_history(path, history)
     stats = calculate_stats(history)
@@ -12483,6 +12613,101 @@ def _recent_candidate_gate_funnels(
     return gate_stats.recent_candidate_gate_funnels(history, windows=windows)
 
 
+def official_primary_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report mandatory evaluation accuracy separately from betting performance."""
+
+    settlements: list[dict[str, Any]] = []
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    by_tier: dict[str, list[str]] = {}
+    for record in records:
+        primary = record.get("official_primary")
+        settlement = record.get("official_primary_settlement")
+        sample = record.get("review_training_sample")
+        if not isinstance(primary, dict) or not isinstance(settlement, dict):
+            continue
+        if not isinstance(sample, dict) or sample.get(
+            "sample_hash"
+        ) != forward_policy._hash_json(
+            {
+                key: deepcopy(value)
+                for key, value in sample.items()
+                if key != "sample_hash"
+            }
+        ):
+            continue
+        result = settlement.get("result")
+        if result is None:
+            continue
+        normalized = "win" if result == "full_win" else str(result)
+        settlements.append(settlement)
+        by_tier.setdefault(str(primary.get("tier") or "unknown"), []).append(normalized)
+        pairs.append((normalized, primary))
+    results = [
+        "win" if item.get("result") == "full_win" else str(item.get("result"))
+        for item in settlements
+    ]
+    return {
+        "scope": "mandatory_evaluation_primary_non_monetary",
+        "available_samples": len(settlements),
+        "performance": rate_block(results),
+        "by_tier": {
+            tier: rate_block(values) for tier, values in sorted(by_tier.items())
+        },
+        "calibration": probability_calibration_block(pairs),
+        "roi": None,
+        "profit_units": None,
+        "legacy_records_backfilled": False,
+    }
+
+
+def all_candidate_training_calibration(records: list[dict[str, Any]]) -> dict[str, Any]:
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for record in records:
+        sample = record.get("review_training_sample")
+        if not isinstance(sample, dict):
+            continue
+        supplied_hash = sample.get("sample_hash")
+        payload = {
+            key: deepcopy(value)
+            for key, value in sample.items()
+            if key != "sample_hash"
+        }
+        if supplied_hash != forward_policy._hash_json(payload):
+            continue
+        candidate_evaluation = sample.get("candidate_evaluation")
+        if not isinstance(candidate_evaluation, dict):
+            continue
+        candidates = {
+            str(candidate.get("candidate_id") or ""): candidate
+            for candidate in candidate_evaluation.get("candidates", [])
+            if isinstance(candidate, dict)
+        }
+        for diagnostic in candidate_evaluation.get("settlement", []):
+            if not isinstance(diagnostic, dict):
+                continue
+            for result in diagnostic.get("candidate_results", []):
+                if (
+                    not isinstance(result, dict)
+                    or result.get("settlement_result") is None
+                ):
+                    continue
+                candidate = candidates.get(str(result.get("candidate_id") or ""))
+                if candidate is None:
+                    continue
+                normalized = (
+                    "win"
+                    if result.get("settlement_result") == "full_win"
+                    else str(result.get("settlement_result"))
+                )
+                pairs.append((normalized, candidate))
+    return {
+        "scope": "all_frozen_candidate_predictions",
+        "samples": len(pairs),
+        "calibration": probability_calibration_block(pairs),
+        "legacy_records_backfilled": False,
+    }
+
+
 def calculate_stats(
     history: list[dict[str, Any]], *, gate_windows: tuple[int, ...] = (50, 100)
 ) -> dict[str, Any]:
@@ -12520,6 +12745,8 @@ def calculate_stats(
     shadow = shadow_selection_by_market(reviewed)
     release_funnel = release_blocker_funnel(reviewed)
     recent_gate_funnels = _recent_candidate_gate_funnels(history, windows=gate_windows)
+    official_metrics = official_primary_metrics(strict_reviewed)
+    candidate_training_metrics = all_candidate_training_calibration(reviewed)
     return {
         "evaluation_scope": "strict_forward_oos",
         "reviewed_matches": len(reviewed),
@@ -12555,6 +12782,8 @@ def calculate_stats(
         "shadow_selection_by_market": shadow,
         "release_blocker_funnel": release_funnel,
         "recent_candidate_gate_funnels": recent_gate_funnels,
+        "official_primary": official_metrics,
+        "all_candidate_training_calibration": candidate_training_metrics,
         "primary": primary,
         "primary_by_market": primary_by_market,
         "all_formal": primary_by_market,

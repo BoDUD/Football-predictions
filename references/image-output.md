@@ -37,7 +37,7 @@ Initial and lineup-check results use the same compact eight-column table, in thi
 
 The eight columns never change. A separate `观察与发布状态` panel is rendered below the table
 and above the footer. It is not a ninth column and cannot change the row's formal primary. For
-each no-primary row it shows either one replay-validated v3 `◇ 观察首选` with EV/edge and
+each 3.13+ row first shows one replayable mandatory `评测主推` and its non-monetary tier. For a no-primary row it may additionally show one replay-validated v3 `◇ 观察首选` with EV/edge and
 `不下注、不计战绩`, or `— 无可用方向` when no candidate passed every non-release gate. It also
 shows compact data, value, policy, and mixed-safety blockers. Initial rows say that lineups and
 current prices remain due at T−30; lineup rows say whether the direction upgraded to formal,

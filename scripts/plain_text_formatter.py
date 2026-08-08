@@ -457,6 +457,25 @@ def publication_display(
             market, _candidate_pick_for_display(observation_value), version
         )
 
+    official = summary.get("official_primary")
+    official_value: dict[str, Any] | None = None
+    official_label: str | None = None
+    if isinstance(official, Mapping):
+        official_value = dict(official)
+        market = str(official_value.get("market") or "")
+        if market == "full_time_1x2":
+            official_label = {
+                "home": f"{version.get('home_team')}胜",
+                "draw": "全场平",
+                "away": f"{version.get('away_team')}胜",
+            }.get(str(official_value.get("side") or ""))
+        elif market:
+            official_label = format_pick(
+                market, _candidate_pick_for_display(official_value), version
+            )
+        if not official_label:
+            raise ValueError("official evaluation primary has no displayable direction")
+
     if state == "formal_primary" and formal_label is None:
         raise ValueError("formal publication state has no formal primary")
     if state != "formal_primary" and formal_label is not None:
@@ -474,19 +493,51 @@ def publication_display(
         "formal_pick": formal_pick,
         "observation_label": observation_label,
         "observation": observation_value,
+        "official_label": official_label,
+        "official_primary": official_value,
         "blocker_line": _blocker_line(summary),
         "stage_text": _publication_stage_text(version, summary, previous),
         "audit_status": summary.get("candidate_evaluation_status"),
     }
 
 
+def format_official_primary(
+    value: Mapping[str, Any], context: Mapping[str, Any]
+) -> str:
+    market = str(value.get("market") or "")
+    if market == "full_time_1x2":
+        label = {
+            "home": f"{context.get('home_team')}胜",
+            "draw": "全场平",
+            "away": f"{context.get('away_team')}胜",
+        }.get(str(value.get("side") or ""))
+        if label:
+            return label
+    if market:
+        return format_pick(market, _candidate_pick_for_display(value), dict(context))
+    raise ValueError("official evaluation primary is not displayable")
+
+
 def publication_text_lines(
     version: dict[str, Any], previous: dict[str, Any] | None = None
 ) -> list[str]:
     view = publication_display(version, previous)
+    official_lines: list[str] = []
+    if view.get("official_label"):
+        official = view.get("official_primary") or {}
+        tier_text = {
+            "strict_formal": "严格正式",
+            "counterfactual_shadow": "观察首选",
+            "forced_executable": "强制评测",
+            "model_only_1x2": "模型1X2回退",
+        }.get(str(official.get("tier") or ""), "评测")
+        official_lines = [
+            f"评测主推：{view['official_label']}｜层级：{tier_text}",
+            "评测口径：每场必选，计独立命中率；非严格正式方向不下注、不计ROI",
+        ]
     if view["state"] == "formal_primary":
         pick = view["formal_pick"] or {}
-        return [
+        return official_lines + [
             f"正式主推：{view['formal_label']}",
             "主推指标："
             f"概率 {percentage(pick.get('probability'))}｜"
@@ -496,7 +547,7 @@ def publication_text_lines(
         ]
     if view["state"] == "observation_primary":
         observation = view["observation"] or {}
-        return [
+        return official_lines + [
             "正式主推：无",
             f"◇ 观察首选：{view['observation_label']}｜"
             f"模型 EV {_signed_percentage(observation.get('ev'))}｜"
@@ -505,7 +556,7 @@ def publication_text_lines(
             str(view["blocker_line"]),
             f"发布状态：{view['stage_text']}",
         ]
-    return [
+    return official_lines + [
         "正式主推：无",
         "— 无可用方向",
         str(view["blocker_line"]),
@@ -519,14 +570,22 @@ def publication_panel_lines(
     previous: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
     view = publication_display(version, previous)
+    official_lines: tuple[str, ...] = ()
+    if view.get("official_label"):
+        official = view.get("official_primary") or {}
+        official_lines = (
+            f"[{identifier}] ★ 评测主推：{view['official_label']}",
+            "每场必选评测｜非严格正式方向不下注、不计ROI",
+            f"评测层级：{official.get('tier')}",
+        )
     if view["state"] == "formal_primary":
-        return (
+        return official_lines + (
             f"[{identifier}] 正式主推已发布：{view['formal_label']}",
             f"发布状态：{view['stage_text']}",
         )
     if view["state"] == "observation_primary":
         observation = view["observation"] or {}
-        return (
+        return official_lines + (
             f"[{identifier}] ◇ 观察首选：{view['observation_label']}",
             f"模型 EV {_signed_percentage(observation.get('ev'))}｜"
             f"相对无水边际 {_edge_percentage_points(observation.get('edge_pp'))}｜"
@@ -534,7 +593,7 @@ def publication_panel_lines(
             str(view["blocker_line"]),
             f"发布状态：{view['stage_text']}",
         )
-    return (
+    return official_lines + (
         f"[{identifier}] — 无可用方向",
         str(view["blocker_line"]),
         f"发布状态：{view['stage_text']}",
@@ -1059,6 +1118,15 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
         if primary
         else "主推：无正式推荐（不结算、不计战绩）"
     )
+    official = basis.get("official_primary")
+    official_settlement = record.get("official_primary_settlement")
+    official_result_line = (
+        f"评测主推：{format_official_primary(official, record)}＝"
+        f"{result_text(official_settlement.get('result'))}"
+        f"｜层级 {official.get('tier')}｜只计独立命中率、不计ROI"
+        if isinstance(official, Mapping) and isinstance(official_settlement, Mapping)
+        else "评测主推：旧归档未启用（不回填）"
+    )
     learning_scope_line = (
         "学习归档：主推复盘样本"
         if primary
@@ -1071,6 +1139,7 @@ def render_review(record: dict[str, Any], history: list[dict[str, Any]]) -> str:
             f"比赛：{record.get('home_team')} vs {record.get('away_team')}",
             f"半场：{record.get('half_time_score') or '未取得'}｜全场：{record.get('final_score') or '未取得'}",
             f"结算依据：{basis_label}最终有效推荐",
+            official_result_line,
             primary_result_line,
             learning_scope_line,
             f"次选参考：{review_secondary_picks(basis, record)}（不结算、不计战绩、不计金额）",

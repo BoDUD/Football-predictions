@@ -331,6 +331,7 @@ def publication_summary(version: Mapping[str, Any]) -> dict[str, Any]:
     if stage not in {"initial", "lineup-check"}:
         raise PublicationOutlookError("analysis_stage must be initial or lineup-check")
     formal = _formal_primary(context)
+    official = memory_store.validated_official_primary(context)
     audit, audit_status = _candidate_audit(context)
     observation, selected_candidate = _select_observation_primary(audit)
 
@@ -364,6 +365,7 @@ def publication_summary(version: Mapping[str, Any]) -> dict[str, Any]:
         "stage_status": f"{stage_name}_{state}",
         "state": state,
         "formal_primary": formal,
+        "official_primary": deepcopy(official),
         "observation_primary": observation,
         "formal_blockers": formal_blockers,
         "blockers": blocker_groups,

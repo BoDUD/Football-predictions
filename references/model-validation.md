@@ -244,6 +244,8 @@ positive and the current two-way market is complete.
 
 ## Forward candidate-evaluation cohort
 
+From 3.13.0 onward, every new normal archive derives one mandatory evaluation primary from the replay-valid v3 candidate audit, falling back to the frozen full-time 1X2 model only when no executable candidate survives. This is not a release-gate bypass: `primary_market` remains the sole strict betting primary and the only ROI/stake stream. Review writes a content-hashed `review-training-sample/1.0.0` containing all candidates and results. `scripts.review_training_export` requires the immutable cohort closure and produces a non-overwriting next-version bundle; training or registry replacement during the same active cohort is prohibited.
+
 New normal initial and lineup-check archives must not discard a market merely because its
 release policy is paused or because no formal primary is ultimately selected. Build one
 fixture-bound `soccer_candidate_evaluation` artifact with schema
