@@ -12,7 +12,7 @@ description: >
 
 # Soccer Predict for Codex
 
-Current package/Skill release: **3.6.1** (2026-08-08). Model, archive,
+Current package/Skill release: **3.6.2** (2026-08-08). Model, archive,
 candidate-evaluation, and scheduler artifact schema/policy versions are managed
 independently and never change merely because this release version changes.
 

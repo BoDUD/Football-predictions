@@ -583,6 +583,20 @@ def merged_version(record: dict[str, Any], version: dict[str, Any]) -> dict[str,
     return merged
 
 
+def publication_baseline_version(
+    record: dict[str, Any], stage: str
+) -> dict[str, Any] | None:
+    """Return the frozen initial version used for public lineup transitions."""
+
+    if stage != "lineup-check":
+        return None
+    try:
+        selected = select_version(record, "initial")
+    except ValueError:
+        return None
+    return merged_version(record, selected)
+
+
 def _top_probability(value: Any, order: tuple[str, ...]) -> tuple[str, float] | None:
     if not isinstance(value, dict) or not value:
         return None
@@ -935,12 +949,15 @@ def render_lineup(record: dict[str, Any]) -> str:
     version = merged_version(record, select_version(record, "lineup-check"))
     outlook = joint_outlook(version)
     primary = resolved_primary_pick(version)
-    previous_versions = [
+    change_previous_versions = [
         item for item in record.get("revisions", []) if isinstance(item, dict)
     ]
-    previous = (
-        merged_version(record, previous_versions[-1]) if previous_versions else {}
+    change_previous = (
+        merged_version(record, change_previous_versions[-1])
+        if change_previous_versions
+        else {}
     )
+    publication_previous = publication_baseline_version(record, "lineup-check")
     change = (
         version.get("primary_change")
         if isinstance(version.get("primary_change"), dict)
@@ -950,14 +967,18 @@ def render_lineup(record: dict[str, Any]) -> str:
     if status == "maintained":
         change_line = f"主推维持：{primary_line(version, version)}"
     else:
-        previous_text = primary_line(previous, previous) if previous else "原方向"
+        previous_text = (
+            primary_line(change_previous, change_previous)
+            if change_previous
+            else "原方向"
+        )
         if not primary:
             change_line = f"主推取消：{previous_text} → 不下注"
         else:
             change_line = (
                 f"主推变更：{previous_text} → {primary_line(version, version)}"
             )
-    publication_lines = publication_text_lines(version, previous or None)
+    publication_lines = publication_text_lines(version, publication_previous)
     publication_lines[-1] = f"{change_line}｜{publication_lines[-1]}"
     return validate_plain_text(
         [
