@@ -145,9 +145,29 @@ REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "clawhub.json",
     "references/plain-text-output.md",
 }
+PRE_3_6_PROVENANCE_PROTECTED_FILES = frozenset(
+    {
+        "scripts/forward_policy.py",
+        "scripts/forward_validation.py",
+        "scripts/memory_store.py",
+        "scripts/public_market_outlook.py",
+        "scripts/prediction_card_renderer.py",
+        "scripts/review_card_renderer.py",
+        "scripts/plain_text_formatter.py",
+        "soccer_predict/__init__.py",
+        "pyproject.toml",
+        "clawhub.json",
+    }
+)
 RENDERER_POLICY_PROTECTED_FILES = (
     "scripts/public_market_outlook.py",
     "scripts/publication_outlook.py",
+    "scripts/prediction_card_renderer.py",
+    "scripts/review_card_renderer.py",
+    "scripts/plain_text_formatter.py",
+)
+PRE_3_6_RENDERER_POLICY_PROTECTED_FILES = (
+    "scripts/public_market_outlook.py",
     "scripts/prediction_card_renderer.py",
     "scripts/review_card_renderer.py",
     "scripts/plain_text_formatter.py",
@@ -188,6 +208,28 @@ def _require_package_version(value: Any, label: str) -> str:
     ):
         raise ForwardPolicyError(f"{label} must be a semantic package version")
     return text
+
+
+def _policy_contract_for_package(
+    package_version: Any,
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """Return the immutable protected-file contract for a frozen package release."""
+
+    version = _require_package_version(
+        package_version, "forward policy package_version"
+    )
+    release = tuple(
+        int(part) for part in re.split(r"[-+]", version, maxsplit=1)[0].split(".")
+    )
+    if release < (3, 6, 0):
+        return (
+            PRE_3_6_PROVENANCE_PROTECTED_FILES,
+            PRE_3_6_RENDERER_POLICY_PROTECTED_FILES,
+        )
+    return (
+        frozenset(REQUIRED_PROVENANCE_PROTECTED_FILES),
+        RENDERER_POLICY_PROTECTED_FILES,
+    )
 
 
 def _require_cohort_kind(value: Any, label: str) -> str:
@@ -578,16 +620,21 @@ def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             or software.get("version_source") != "soccer_predict.__version__"
         ):
             raise ForwardPolicyError("forward policy software binding is invalid")
-        _require_package_version(
+        frozen_package_version = _require_package_version(
             software.get("package_version"), "forward policy package_version"
         )
+    else:
+        frozen_package_version = None
     protected = code.get("protected_files")
     if not isinstance(protected, Mapping) or not protected:
         raise ForwardPolicyError("forward policy protected_files are missing")
-    if provenance_policy and not REQUIRED_PROVENANCE_PROTECTED_FILES.issubset(
-        set(protected)
-    ):
-        missing = sorted(REQUIRED_PROVENANCE_PROTECTED_FILES - set(protected))
+    required_protected_files = (
+        _policy_contract_for_package(frozen_package_version)[0]
+        if provenance_policy
+        else frozenset()
+    )
+    if provenance_policy and not required_protected_files.issubset(set(protected)):
+        missing = sorted(required_protected_files - set(protected))
         raise ForwardPolicyError(
             f"forward policy omits required provenance-protected files: {missing}"
         )
@@ -751,6 +798,9 @@ def _reproduce_provenance_binding(
     clean_cohort_id = _require_cohort_id(cohort_id, "provenance binding cohort_id")
     runtime = policy["policy"]
     current_policy = policy["schema_version"] == POLICY_SCHEMA_VERSION
+    _, renderer_policy_files = _policy_contract_for_package(
+        policy["software"]["package_version"]
+    )
     binding: dict[str, Any] = {
         "schema_version": (
             PROVENANCE_SCHEMA_VERSION
@@ -778,7 +828,7 @@ def _reproduce_provenance_binding(
                 "display_policy": runtime["display_policy"],
                 "protected_renderer_files": {
                     path: policy["code"]["protected_files"][path]
-                    for path in RENDERER_POLICY_PROTECTED_FILES
+                    for path in renderer_policy_files
                 },
             }
         ),
