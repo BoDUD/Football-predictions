@@ -19,6 +19,7 @@ from scripts import (
     fundamental_evidence,
     htft_model,
     joint_scenario_model,
+    league_model_manager,
     prediction_card_renderer,
     review_card_renderer,
     score_model,
@@ -616,7 +617,6 @@ def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
         candidate_payload = json.loads(Path(candidate_file).read_text(encoding="utf-8"))
         support_requests = [
             {
-                "market": candidate["market"],
                 "selection": candidate["settlement_reference_outcome"],
                 "market_identity": candidate["market_identity"],
                 "market_identity_hash": candidate["market_identity_hash"],
@@ -655,8 +655,13 @@ def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
         json.dumps(
             {
                 "schema_version": fundamental_evidence.RAW_SCHEMA_VERSION,
-                "source_class": "official_confirmed",
-                "source_url": f"https://example.test/fundamentals/{args.match_id}",
+                "source_adapter_id": "titan007-match-analysis-v1",
+                "source_adapter_parser_version": (
+                    "titan007-visible-fundamental-adapter/1.0.0"
+                ),
+                "source_url": (
+                    f"https://zq.titan007.com/analysis/{args.match_id}cn.htm"
+                ),
                 "collected_at": "2026-07-21T09:00:00+00:00",
                 "fixture": {
                     "match_id": str(args.match_id),
@@ -3098,12 +3103,15 @@ class MemoryStoreTests(unittest.TestCase):
                     "england_league_cup",
                 )
 
-    def test_primeira_liga_aliases_normalize_to_chinese_label(self):
+    def test_primeira_liga_aliases_normalize_to_canonical_key(self):
         for label in ("葡超", "2025葡超第10轮", "葡萄牙超级联赛", "Liga Portugal"):
             with self.subTest(label=label):
-                self.assertEqual(memory_store.normalize_league_name(label), "葡超")
+                self.assertEqual(
+                    memory_store.normalize_league_name(label),
+                    "portugal_primeira_liga",
+                )
 
-    def test_eerste_divisie_aliases_normalize_to_chinese_label(self):
+    def test_eerste_divisie_aliases_normalize_to_canonical_key(self):
         for label in (
             "荷乙",
             "2025荷乙第10轮",
@@ -3112,7 +3120,30 @@ class MemoryStoreTests(unittest.TestCase):
             "Netherlands Eerste Divisie",
         ):
             with self.subTest(label=label):
-                self.assertEqual(memory_store.normalize_league_name(label), "荷乙")
+                self.assertEqual(
+                    memory_store.normalize_league_name(label),
+                    "netherlands_eerste_divisie",
+                )
+
+    def test_public_task_labels_bind_canonical_model_registry_keys(self):
+        expected = {
+            "荷乙": "netherlands_eerste_divisie",
+            "英联杯": "england_league_cup",
+            "葡超": "portugal_primeira_liga",
+            "日职": "japan_j1",
+            "欧冠": "uefa_champions_league",
+            "巴西联赛": "brazil_serie_a",
+            "芬超": "finland_veikkausliiga",
+        }
+        for label, key in expected.items():
+            with self.subTest(label=label):
+                self.assertEqual(memory_store.normalize_league_name(label), key)
+                self.assertIn(key, league_model_manager.LEAGUE_NAMES)
+        self.assertEqual(
+            memory_store.normalize_league_name("欧联"),
+            "uefa_europa_league",
+        )
+        self.assertNotIn("uefa_europa_league", league_model_manager.LEAGUE_NAMES)
 
     def test_competition_evidence_build_validate_and_tamper_fail_closed(self):
         match_id = "2991125"
@@ -3504,8 +3535,14 @@ class MemoryStoreTests(unittest.TestCase):
                         )
 
     def test_league_normalization_grouped_stats_migration_and_calibration(self):
-        self.assertEqual(memory_store.normalize_league_name("2026芬超第16轮"), "芬超")
-        self.assertEqual(memory_store.normalize_league_name("韩K联 第19轮"), "韩K联")
+        self.assertEqual(
+            memory_store.normalize_league_name("2026芬超第16轮"),
+            "finland_veikkausliiga",
+        )
+        self.assertEqual(
+            memory_store.normalize_league_name("韩K联 第19轮"),
+            "korea_k_league_1",
+        )
         self.assertEqual(memory_store.normalize_league_name("2026世界杯决赛"), "世界杯")
 
         total_win = {
@@ -3543,8 +3580,8 @@ class MemoryStoreTests(unittest.TestCase):
         history = [first, second]
 
         stats = memory_store.calculate_stats(history)
-        self.assertEqual(list(stats["leagues"]), ["芬超"])
-        league = stats["leagues"]["芬超"]
+        self.assertEqual(list(stats["leagues"]), ["finland_veikkausliiga"])
+        league = stats["leagues"]["finland_veikkausliiga"]
         self.assertEqual(league["source_labels"], ["2026芬超第16轮", "芬超"])
         self.assertEqual(league["reviewed_matches"], 2)
         self.assertEqual(league["primary"]["wins"], 0)
@@ -3573,7 +3610,9 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(migrated["changed_match_ids"], ["101", "102"])
             saved = memory_store.load_history(path)
-            self.assertTrue(all(item["league_key"] == "芬超" for item in saved))
+            self.assertTrue(
+                all(item["league_key"] == "finland_veikkausliiga" for item in saved)
+            )
             self.assertEqual(
                 {item["match_id"]: item["revisions"] for item in saved},
                 revisions_before,
@@ -3584,7 +3623,7 @@ class MemoryStoreTests(unittest.TestCase):
                     base_dir=base, guardrail=None, minimum_graded=20, write=True
                 )
             )["calibration"]
-            profile = calibration["league_profiles"]["芬超"]
+            profile = calibration["league_profiles"]["finland_veikkausliiga"]
             self.assertEqual(profile["sample_tier"], "anecdotal")
             self.assertEqual(
                 profile["decision"], "hold_insufficient_strict_league_sample"

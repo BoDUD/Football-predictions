@@ -1348,6 +1348,48 @@ class ForwardPolicyTests(unittest.TestCase):
                 forward_policy.validate_record_binding(binding)["policy_hash"],
                 policy["policy_hash"],
             )
+            future_transition = deepcopy(binding)
+            future_transition["cohort_request_binding"]["fixture_event_at"] = (
+                "2026-08-06T02:00:02+00:00"
+            )
+            future_transition.pop("binding_hash")
+            future_transition["binding_hash"] = forward_policy._hash_json(
+                future_transition
+            )
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "fixture transition was not strictly before archive",
+            ):
+                forward_policy.validate_record_binding(future_transition)
+            reversed_transition = deepcopy(binding)
+            reversed_transition["cohort_request_binding"]["requested_at"] = (
+                "2026-08-06T02:00:00.500000+00:00"
+            )
+            reversed_transition["cohort_request_binding"]["fixture_event_at"] = (
+                "2026-08-06T02:00:00.250000+00:00"
+            )
+            reversed_transition.pop("binding_hash")
+            reversed_transition["binding_hash"] = forward_policy._hash_json(
+                reversed_transition
+            )
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "fixture transition predates the original fixture request",
+            ):
+                forward_policy.validate_record_binding(reversed_transition)
+            predating_request = deepcopy(binding)
+            predating_request["cohort_request_binding"]["requested_at"] = (
+                "2026-08-06T01:59:59.999999+00:00"
+            )
+            predating_request.pop("binding_hash")
+            predating_request["binding_hash"] = forward_policy._hash_json(
+                predating_request
+            )
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "request predates its untouched cohort",
+            ):
+                forward_policy.validate_record_binding(predating_request)
             committed = forward_policy.bind_observation_commitment(
                 binding, "sha256:" + "9" * 64
             )
@@ -1408,6 +1450,12 @@ class ForwardPolicyTests(unittest.TestCase):
                 reason="source_unavailable",
             )
             close_manifest = empty_record_manifest(cohort)
+            event_binding = {
+                "cohort_hash": cohort["cohort_hash"],
+                "policy_id": cohort["policy_id"],
+                "policy_hash": cohort["policy_hash"],
+                "starts_at": cohort["starts_at"],
+            }
             denominator = forward_policy.cohort_scope.build_denominator(
                 scope=policy["cohort_scope"]["scope_snapshot"],
                 cohort_id=cohort["cohort_id"],
@@ -1415,9 +1463,12 @@ class ForwardPolicyTests(unittest.TestCase):
                     base,
                     cohort["cohort_id"],
                     scope=policy["cohort_scope"]["scope_snapshot"],
+                    cohort_binding=event_binding,
                 ),
                 record_manifest=close_manifest,
+                cohort_binding=event_binding,
             )
+
             close_manifest.pop("manifest_hash")
             close_manifest["denominator"] = denominator
             close_manifest["denominator_hash"] = denominator["denominator_hash"]
@@ -1454,6 +1505,37 @@ class ForwardPolicyTests(unittest.TestCase):
                     repo_root=self.repo_root,
                 )
             self.assertEqual(new_cohort["cohort_id"], "confirmation-2026-09")
+
+    def test_current_closure_rejects_legacy_record_manifest_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            policy_file = self._write_policy(base, policy)
+            with mock.patch.object(
+                forward_policy, "_git", side_effect=self._clean_final_head
+            ):
+                _path, cohort = forward_policy.start_cohort(
+                    base_dir=base,
+                    policy_file=policy_file,
+                    cohort_id="reject-legacy-close",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
+            manifest = empty_record_manifest(cohort)
+            manifest["schema_version"] = (
+                forward_policy.PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION
+            )
+            manifest.pop("manifest_hash")
+            manifest["manifest_hash"] = forward_policy._hash_json(manifest)
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError, "frozen release contract"
+            ):
+                forward_policy.close_cohort(
+                    base_dir=base,
+                    record_manifest=manifest,
+                    closed_at="2026-08-06T03:00:00Z",
+                )
 
     def test_provenance_field_rehash_attacks_do_not_escape_policy_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

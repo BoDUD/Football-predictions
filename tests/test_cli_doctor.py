@@ -65,7 +65,7 @@ class DoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             (workspace / "pyproject.toml").write_text(
-                '[project]\nversion = "3.8.0"\n',
+                '[project]\nversion = "3.9.0"\n',
                 encoding="utf-8",
             )
             with mock.patch.object(
@@ -75,9 +75,9 @@ class DoctorTests(unittest.TestCase):
             ):
                 result = doctor._check_package_version(workspace)
         self.assertEqual(result.status, "pass")
-        self.assertEqual(result.details["package_version"], "3.8.0")
-        self.assertEqual(result.details["distribution_version"], "3.8.0")
-        self.assertEqual(result.details["project_version"], "3.8.0")
+        self.assertEqual(result.details["package_version"], "3.9.0")
+        self.assertEqual(result.details["distribution_version"], "3.9.0")
+        self.assertEqual(result.details["project_version"], "3.9.0")
 
     def test_package_version_check_fails_on_distribution_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,7 +88,7 @@ class DoctorTests(unittest.TestCase):
             ):
                 result = doctor._check_package_version(Path(temporary))
         self.assertEqual(result.status, "fail")
-        self.assertEqual(result.details["package_version"], "3.8.0")
+        self.assertEqual(result.details["package_version"], "3.9.0")
         self.assertEqual(result.details["mismatches"], {"distribution": "0.0.0"})
 
     def test_registry_rejects_invalid_json(self) -> None:

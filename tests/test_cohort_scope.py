@@ -75,6 +75,20 @@ class CohortScopeTests(unittest.TestCase):
         if not active.exists():
             active.write_text(json.dumps(cohort), encoding="utf-8")
 
+    def _cohort_binding(self, base: Path) -> dict:
+        self._write_active_binding(base)
+        active = json.loads(
+            (
+                base / ".codex" / "soccer-predict" / "active-forward-cohort.json"
+            ).read_text(encoding="utf-8")
+        )
+        return {
+            "cohort_hash": active["cohort_hash"],
+            "policy_id": active["policy_id"],
+            "policy_hash": active["policy_hash"],
+            "starts_at": active["starts_at"],
+        }
+
     @staticmethod
     def _record_manifest(
         *fixture_ids: str, request_hashes: dict[str, str] | None = None
@@ -130,7 +144,13 @@ class CohortScopeTests(unittest.TestCase):
                 "2910002",
                 occurred_at="2026-08-08T01:01:00Z",
             )
-            events = cohort_scope.load_events(base, "cohort-a", scope=self.scope)
+            binding = self._cohort_binding(base)
+            events = cohort_scope.load_events(
+                base,
+                "cohort-a",
+                scope=self.scope,
+                cohort_binding=binding,
+            )
             request_hashes = {
                 event["fixture"]["fixture_id"]: event["event_hash"]
                 for event in events
@@ -147,6 +167,7 @@ class CohortScopeTests(unittest.TestCase):
                         "2910001",
                         request_hashes={"2910001": "sha256:" + "f" * 64},
                     ),
+                    cohort_binding=binding,
                 )
             with self.assertRaisesRegex(cohort_scope.CohortScopeError, "unresolved"):
                 cohort_scope.build_denominator(
@@ -156,6 +177,7 @@ class CohortScopeTests(unittest.TestCase):
                     record_manifest=self._record_manifest(
                         "2910001", request_hashes=request_hashes
                     ),
+                    cohort_binding=binding,
                 )
             unavailable = self._append(
                 base,
@@ -167,10 +189,16 @@ class CohortScopeTests(unittest.TestCase):
             denominator = cohort_scope.build_denominator(
                 scope=self.scope,
                 cohort_id="cohort-a",
-                events=cohort_scope.load_events(base, "cohort-a", scope=self.scope),
+                events=cohort_scope.load_events(
+                    base,
+                    "cohort-a",
+                    scope=self.scope,
+                    cohort_binding=binding,
+                ),
                 record_manifest=self._record_manifest(
                     "2910001", request_hashes=request_hashes
                 ),
+                cohort_binding=binding,
             )
             self.assertTrue(denominator["complete"])
             self.assertEqual(denominator["requested_fixture_count"], 2)
@@ -333,6 +361,103 @@ class CohortScopeTests(unittest.TestCase):
                     scope=self.scope,
                     fixture_id="2910002",
                 )
+
+    def test_current_events_cannot_self_bind_or_repackage_policy_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self._append(base, "requested", "2910001")
+            path = cohort_scope.denominator_event_path(base, "cohort-a")
+            raw = [json.loads(line) for line in path.read_text().splitlines()]
+            with self.assertRaisesRegex(
+                cohort_scope.CohortScopeError, "immutable cohort binding"
+            ):
+                cohort_scope.validate_events(
+                    raw, scope=self.scope, cohort_id="cohort-a"
+                )
+
+            attacked = deepcopy(raw)
+            attacked[0]["policy_hash"] = "sha256:" + "f" * 64
+            attacked[0].pop("event_hash")
+            attacked[0]["event_hash"] = cohort_scope._hash_json(attacked[0])
+            with self.assertRaisesRegex(
+                cohort_scope.CohortScopeError, "does not replay"
+            ):
+                cohort_scope.validate_events(
+                    attacked,
+                    scope=self.scope,
+                    cohort_id="cohort-a",
+                    cohort_binding=self._cohort_binding(base),
+                )
+
+    def test_fixture_event_times_are_monotonic_and_precede_new_kickoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self._append(
+                base,
+                "requested",
+                "2910001",
+                occurred_at="2026-08-08T01:00:00.123456Z",
+            )
+            binding = cohort_scope.request_binding(
+                base_dir=base,
+                cohort_id="cohort-a",
+                scope=self.scope,
+                fixture_id="2910001",
+            )
+            self.assertEqual(
+                binding["fixture_event_at"], "2026-08-08T01:00:00.123456+00:00"
+            )
+            with self.assertRaisesRegex(
+                cohort_scope.CohortScopeError, "cannot move backwards"
+            ):
+                self._append(
+                    base,
+                    "rescheduled",
+                    "2910001",
+                    occurred_at="2026-08-08T01:00:00.123455Z",
+                    kickoff="2026-08-08T13:00:00Z",
+                )
+            with self.assertRaisesRegex(
+                cohort_scope.CohortScopeError, "before the rescheduled kickoff"
+            ):
+                self._append(
+                    base,
+                    "rescheduled",
+                    "2910001",
+                    occurred_at="2026-08-08T13:00:00Z",
+                    kickoff="2026-08-08T13:00:00Z",
+                )
+
+    def test_current_closure_contract_rejects_legacy_event_schema(self) -> None:
+        historical = cohort_scope._event_without_hash(
+            schema_version=cohort_scope.PREVIOUS_EVENT_SCHEMA_VERSION,
+            event_type="requested",
+            cohort_id="cohort-a",
+            scope=self.scope,
+            fixture_id="2910001",
+            competition_key="korea-k1",
+            home_team="Home",
+            away_team="Away",
+            kickoff="2026-08-08T12:00:00Z",
+            occurred_at="2026-08-08T01:00:00Z",
+            previous_event_hash=None,
+        )
+        historical["event_hash"] = cohort_scope._hash_json(historical)
+        with self.assertRaisesRegex(
+            cohort_scope.CohortScopeError, "frozen release contract"
+        ):
+            cohort_scope.validate_events(
+                [historical],
+                scope=self.scope,
+                cohort_id="cohort-a",
+                cohort_binding={
+                    "cohort_hash": "sha256:" + "a" * 64,
+                    "policy_id": "untouched-live-forward-0123456789abcdef",
+                    "policy_hash": "sha256:" + "b" * 64,
+                    "starts_at": "2026-08-08T00:00:00Z",
+                },
+                required_schema_version=cohort_scope.EVENT_SCHEMA_VERSION,
+            )
 
 
 if __name__ == "__main__":

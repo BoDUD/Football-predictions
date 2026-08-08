@@ -263,6 +263,7 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
                 },
             )
             entry.setdefault("fixture_event_hash", "sha256:" + "9" * 64)
+            entry.setdefault("fixture_event_at", cohort["starts_at"])
             entry.setdefault("execution_receipt_hashes", [])
         denominator_entries = [
             {
@@ -271,6 +272,7 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
                 "fixture": deepcopy(entry["fixture"]),
                 "request_event_hash": str(entry["request_event_hash"]),
                 "fixture_event_hash": str(entry["fixture_event_hash"]),
+                "fixture_event_at": str(entry["fixture_event_at"]),
                 "requested_at": cohort["starts_at"],
                 "disposition": "recorded",
                 "unavailable_event_hash": None,
@@ -365,6 +367,7 @@ def base_policy_binding(
             },
             "request_event_hash": "sha256:" + "9" * 64,
             "fixture_event_hash": "sha256:" + "9" * 64,
+            "fixture_event_at": cohort["starts_at"],
             "requested_at": cohort["starts_at"],
         }
     value["binding_hash"] = forward_policy._hash_json(value)
@@ -819,6 +822,9 @@ def aggregate_from_micro_ledgers(payloads: list[dict]) -> dict:
                 "fixture_event_hash": receipt["archive_snapshot_payload"][
                     "forward_policy_binding"
                 ]["cohort_request_binding"]["fixture_event_hash"],
+                "fixture_event_at": receipt["archive_snapshot_payload"][
+                    "forward_policy_binding"
+                ]["cohort_request_binding"]["fixture_event_at"],
                 "execution_receipt_hashes": sorted(
                     str(binding["receipt_identity_hash"])
                     for row in forward_validation._validate_v3_input(
@@ -2056,6 +2062,7 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
                 "fixture": deepcopy(binding["fixture"]),
                 "request_event_hash": binding["request_event_hash"],
                 "fixture_event_hash": binding["fixture_event_hash"],
+                "fixture_event_at": binding["fixture_event_at"],
                 "requested_at": binding["requested_at"],
                 "disposition": "recorded",
                 "unavailable_event_hash": None,

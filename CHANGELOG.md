@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.9.0] - 2026-08-08
+
+- Bind current cohort closure to the immutable cohort/policy identity, enforce monotonic fixture-event causality through archive time, and version the request/denominator/record-manifest contract without rewriting historical artifacts.
+- Add registered fundamental source adapters, identity-derived candidate markets, and an explicit five-match minimum for directional shadow evidence; formal release gates remain unchanged.
+- Separate Chinese competition display labels from canonical model/registry keys for all 19 trained competitions.
+
 ## [3.8.0] - 2026-08-08
 
 - Hardened active forward cohorts with full fixture-bound request events, explicit reschedule/replacement transitions, strict archive ordering, verified model-unavailable dispositions, and cohort-wide firm receipt uniqueness.
