@@ -4,6 +4,12 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-08-08
+
+### Fixed
+- Restored historical replay of frozen pre-3.6 forward-policy manifests by validating their provenance and renderer hashes against the protected-file contract that existed when they were created.
+- Kept 3.6-and-later active policies fail-closed on the expanded protected-file set; historical compatibility cannot reactivate an older package policy or omit current provenance files.
+
 ## [3.6.0] - 2026-08-08
 
 ### Added

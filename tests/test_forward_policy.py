@@ -1440,6 +1440,147 @@ class ForwardPolicyTests(unittest.TestCase):
             ):
                 forward_policy.validate_record_binding(resealed)
 
+    def test_frozen_3_5_protected_file_contract_replays_under_3_6(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            dataset, registry = self._artifacts(base)
+            historical_protected_files = (
+                "SKILL.md",
+                "scripts/score_model.py",
+                "scripts/htft_model.py",
+                "scripts/htft_ranker.py",
+                "scripts/league_model_manager.py",
+                "scripts/joint_scenario_model.py",
+                "scripts/joint_path_kernel.py",
+                "scripts/corner_model.py",
+                "scripts/corner_model_manager.py",
+                "scripts/corner_ranker.py",
+                "scripts/memory_store.py",
+                "scripts/public_market_outlook.py",
+                "scripts/prediction_card_renderer.py",
+                "scripts/review_card_renderer.py",
+                "scripts/plain_text_formatter.py",
+                "scripts/lineup_scheduler.py",
+                "scripts/review_scheduler.py",
+                "scripts/forward_policy.py",
+                "scripts/forward_validation.py",
+                "scripts/source_evidence.py",
+                "soccer_predict/__init__.py",
+                "soccer_predict/domain/settlement.py",
+                "soccer_predict/domain/probabilities.py",
+                "pyproject.toml",
+                "clawhub.json",
+                "references/model-validation.md",
+                "references/prediction-framework.md",
+                "references/expanded-markets.md",
+                "references/half-time-full-time.md",
+                "references/image-output.md",
+            )
+            historical_renderer_files = (
+                "scripts/public_market_outlook.py",
+                "scripts/prediction_card_renderer.py",
+                "scripts/review_card_renderer.py",
+                "scripts/plain_text_formatter.py",
+            )
+            with mock.patch.object(forward_policy, "SOCCER_PREDICT_VERSION", "3.5.0"):
+                policy = forward_policy.build_policy_manifest(
+                    repo_root=self.repo_root,
+                    dataset_manifest=dataset,
+                    model_registry=registry,
+                    expected_final_merge_commit="a" * 40,
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    created_at="2026-08-07T16:19:59Z",
+                    code_commit="a" * 40,
+                    protected_files=historical_protected_files,
+                )
+
+            self.assertEqual(policy["software"]["package_version"], "3.5.0")
+            self.assertEqual(len(policy["code"]["protected_files"]), 30)
+            for later_file in (
+                "scripts/publication_outlook.py",
+                "scripts/gate_stats.py",
+                "references/plain-text-output.md",
+            ):
+                self.assertNotIn(later_file, policy["code"]["protected_files"])
+
+            cohort_id = "literal-3-5-policy"
+            runtime = policy["policy"]
+            provenance = {
+                "schema_version": forward_policy.PROVENANCE_SCHEMA_VERSION,
+                "package_version": "3.5.0",
+                "git_commit_sha": policy["code"]["commit"],
+                "policy_hash": policy["policy_hash"],
+                "validation_config_hash": forward_policy._hash_json(
+                    runtime["validation_protocol"]
+                ),
+                "dataset_manifest_hash": policy["data"]["declared_manifest_hash"],
+                "model_registry_hash": policy["models"]["declared_registry_hash"],
+                "renderer_policy_hash": forward_policy._hash_json(
+                    {
+                        "display_policy": runtime["display_policy"],
+                        "protected_renderer_files": {
+                            path: policy["code"]["protected_files"][path]
+                            for path in historical_renderer_files
+                        },
+                    }
+                ),
+                "cohort_id": cohort_id,
+                "cohort_kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                "assurance_scope": forward_policy.LOCAL_ASSURANCE_SCOPE,
+                "promotion_evidence_eligible": False,
+            }
+            provenance["provenance_hash"] = forward_policy._hash_json(provenance)
+            binding = {
+                "schema_version": (
+                    forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+                ),
+                "cohort_id": cohort_id,
+                "cohort_hash": "sha256:" + "5" * 64,
+                "cohort_starts_at": "2026-08-07T16:20:11+00:00",
+                "policy_id": policy["policy_id"],
+                "policy_hash": policy["policy_hash"],
+                "policy_snapshot": policy,
+                "recorded_code_commit": policy["code"]["commit"],
+                "archived_at": "2026-08-07T17:16:24+00:00",
+                "cohort_kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                "assurance_scope": forward_policy.LOCAL_ASSURANCE_SCOPE,
+                "promotion_evidence_eligible": False,
+                "provenance_binding": provenance,
+                "observation_commitment_hash": "sha256:" + "9" * 64,
+            }
+            binding["binding_hash"] = forward_policy._hash_json(binding)
+
+            validated_policy = forward_policy.validate_policy_manifest(policy)
+            validated_provenance = forward_policy.validate_provenance_binding(
+                provenance,
+                policy_manifest=policy,
+                cohort_id=cohort_id,
+            )
+            validated_binding = forward_policy.validate_record_binding(binding)
+            self.assertEqual(validated_policy["software"]["package_version"], "3.5.0")
+            self.assertEqual(validated_provenance, provenance)
+            self.assertEqual(validated_binding, binding)
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "does not match soccer_predict.__version__",
+            ):
+                forward_policy.validate_active_runtime_policy_manifest(
+                    policy, repo_root=self.repo_root
+                )
+
+            current_base = base / "current"
+            current_base.mkdir()
+            current_policy = self._policy(current_base)
+            current_policy["code"]["protected_files"].pop(
+                "scripts/publication_outlook.py"
+            )
+            current_policy = self._reseal_policy(current_policy)
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "scripts/publication_outlook.py",
+            ):
+                forward_policy.validate_policy_manifest(current_policy)
+
     def test_promotable_kind_fails_closed_without_required_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
