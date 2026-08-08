@@ -2,7 +2,7 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
-当前发布版本：**3.6.2**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+当前发布版本：**3.7.0**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
 
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
@@ -176,14 +176,21 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 新的正常初盘与临场归档还必须传入当前 `candidate-evaluation/3.0.0` 与 `--require-candidate-evaluations`，把亚盘、大小球、半场、半全场、总进球区间、BTTS 和两类角球市场逐一记为已评估或明确不可用。候选制品的生成时间不得早于其使用的盘口快照或联合/角球上游模型；系统从冻结 source payload、活动版本及模型/证据绑定重算完整盘口、五态 EV/edge、门槛、信心排序和 shadow 选择。四分盘的 edge 按半赢/半输各半注折算，push 不进入有效赢亏质量。只因市场发布政策暂停而失败的候选仍可进入每场每市场最多一个的 shadow 样本，但永远不占主推、不下注、不计战绩或 ROI。赛后复盘会按最终比分重新结算并核对冻结诊断；改派生字段后重算自哈希、或仅改变 JSON 格式/字节哈希复制同场样本，都不能污染 `stats`/`calibrate`。单市场达到 20 个已结算 shadow 只触发人工模型/政策复核，不会自动解禁、调参或回改旧档案。旧 `candidate-evaluation/2.0.0` 仅用于历史隔离读取，不能进入新的活动 cohort 写入。
 
-真正的“未触碰前向验证”由 `scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先在干净且已评审的 Git 提交上冻结代码文件、数据 manifest、模型 registry、候选选择器、阈值、市场状态和显示策略，再启动只接受启动时刻之后比赛的 cohort。当前运行时只允许 `local-integrity-shadow-v2`：它创建 `live-forward-cohort/2.0.0`，cohort 顶层 `kind` 必须与 policy 的 `confirmation_contract.cohort_kind` 一致，只能用于本地完整性与研究 shadow，不能作为 promotion 证据。`promotable-confirmation-v2` 在外部可信时间戳锚、baseline artifact 重放、入场价来源重放和收盘价来源重放适配器全部实现前，会在 policy freeze 和 cohort start 两处失败关闭；这四项不能由调用方布尔声明绕过。缺少 kind 的历史 policy/cohort 只读可验证，不能恢复为活动写入。cohort 激活后，每场归档必须传入当前 `source-evidence/2.0.0` 的 `--source-evidence-file`；系统保存内容寻址的原始 JSON、HTTP 元数据和解析器版本，并从完整公司赔率行重放候选价格，不能只保存二次加工结果。正式导出使用 `forward-observations/3.0.0`；旧 source v1 和 observations v1 仅可历史只读，存在缺陷的 observations v2 明确拒绝并隔离，三者都不能进入活动 cohort 或 promotion。验证报告覆盖预测、弃赛和不可用市场，比较历史频率、独立 HT/FT、简单 Poisson/DC 和同时间 bookmaker no-vig 基线，输出 log loss、Brier、校准、覆盖率、按联赛/市场/提前量切片、以开球周聚类的置信区间，以及可执行入场价下的 ROI/CLV。报告永远不会自动解禁市场或改参数；代码、数据、模型、选择器、阈值或显示策略发生预测相关变化时必须结束旧口径并启动新 cohort。
+真正的“未触碰前向验证”由 `scripts/cohort_scope.py`、`scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先冻结用户请求赛事范围，再在任何分析前把每个用户请求写入 append-only、hash-chained 事件日志；结项时每个请求必须对应一条冻结预测记录或一条明确的 terminal-unavailable 处置，且预测记录中的 request-event hash 必须逐条重放一致。policy 同时冻结足球历史数据、角球历史数据、HT/FT 模型 registry、角球模型 registry，以及每个联赛实际注册的模型 hash，不能再用一个模糊的单 registry 代表全部模型。当前运行时只允许 `local-integrity-shadow-v2`，不能作为 promotion 证据；正式主推 gate、市场 observation-only 状态和阈值没有放宽。
+
+活动 cohort 的每场归档必须同时提供 `source-evidence/2.0.0` 与 `fundamental-evidence/1.0.0`。后者从内容寻址的可见赛前快照重放首发、伤停、机会质量、进攻配置、对手尾部风险和角球画像，并由系统派生 gate，调用方布尔参数不能自行解锁。盘口共识价格仍只用于市场基线；如果 forward ledger 声称真实成交，必须另附 `execution-offer-evidence/1.0.0`，绑定具体 firm、地区、报价时间、接受时间、可下上限、实际 stake 和接受价格，且成交价不得优于已保存报价。当前 source/fundamental adapter 保存的是可见页面导出的原始 JSON 与 HTTP 元数据，并非通用 raw-HTTP body 抓取器；因此系统仍只声明本地可重放 shadow，不宣称已经解决外部可信时间戳、原始 HTTP、独立 closing snapshot 或 promotion。
 
 当前活动 policy 是 `forward-policy/3.0.0`；kind-less 的 policy v2 与 v1 都只能做结构化历史重放。当前 record binding 为 `forward-policy-binding/3.0.0`/`3.1.0`，内含 `forward-provenance-binding/2.0.0`，显式写入 `cohort_kind`、`assurance_scope=local_integrity_only` 和 `promotion_evidence_eligible=false`。旧 binding 2.x/provenance 1.0 仍可验证既有不可变记录，但其旧 `untouched_confirmation_eligible=true` 只表示旧版赛前完整性，不表示可 promotion；这些记录在汇总中进入 defect quarantine，不能正式导出或续写承诺。observations v1 可以计算描述性统计，但完整性与 promotion 永远失败。当前本地 memory-store 也没有独立的赛前收盘快照重放适配器，因此真实 local shadow 的 execution/CLV/总体统计门槛保留 blocker；只有五态模型空间 proper-score 子门槛可以在冻结基线上如实评估。
+
+内部历史字段 `confidence_score` 仅表示启发式的“综合稳定性排序分”，不是命中概率或经过校准的置信度；用户界面不得把它解释为概率。
 
 ```bash
 python scripts/source_evidence.py build --source-file visible-page-export.json --output-dir .codex/soccer-predict/source-evidence
 python scripts/source_evidence.py verify --evidence .codex/soccer-predict/source-evidence/MATCH-source-evidence.json
-python -m scripts.forward_policy --base-dir . --repo-root . freeze --dataset-manifest DATASET_MANIFEST --model-registry MODEL_REGISTRY --expected-final-merge-commit FINAL_MERGE_GIT_SHA --cohort-kind local-integrity-shadow-v2
+python scripts/fundamental_evidence.py build --source-file visible-fundamentals.json --output-dir .codex/soccer-predict/fundamental-evidence
+python scripts/execution_evidence.py build --source-file accepted-firm-offer.json --output-dir .codex/soccer-predict/execution-evidence
+python scripts/cohort_scope.py build --scope-id SCOPE_ID --competition-key LEAGUE_KEY --starts-at TIMEZONE_AWARE_ISO --output cohort-scope.json
+python -m scripts.forward_policy --base-dir . --repo-root . freeze --dataset-manifest FOOTBALL_DATASET_MANIFEST --model-registry FOOTBALL_MODEL_REGISTRY --corner-dataset-manifest CORNER_DATASET_MANIFEST --corner-model-registry CORNER_MODEL_REGISTRY --cohort-scope-file cohort-scope.json --expected-final-merge-commit FINAL_MERGE_GIT_SHA --cohort-kind local-integrity-shadow-v2
 python -m scripts.forward_policy --base-dir . --repo-root . start --policy-file POLICY_JSON --cohort-id COHORT_ID --cohort-kind local-integrity-shadow-v2
 python scripts/memory_store.py --base-dir . close-forward-cohort --cohort-id COHORT_ID --closed-at TIMEZONE_AWARE_ISO
 python scripts/memory_store.py --base-dir . export-forward-validation --cohort-id COHORT_ID --cohort-closure-file .codex/soccer-predict/forward-cohorts/COHORT_ID-closure.json --output forward-observations.json

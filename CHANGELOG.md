@@ -4,6 +4,16 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-08-08
+
+- Freeze a complete, role-aware football/HTFT and corner data/model lineage instead of a single registry pair.
+- Add an immutable user-request denominator with pre-analysis requests, terminal unavailable dispositions, and closure reconciliation.
+- Bind replayable fundamental claims and real firm-specific execution offers separately from market consensus prices.
+- Require every recorded denominator fixture to replay the exact pre-analysis request event and every candidate model to match the exact per-league hash frozen in its role-specific registry.
+- Keep raw-HTTP capture, external timestamping, independent closing snapshots, evaluation-identity redesign, and broader calibration upgrades explicitly out of scope; `local-integrity-shadow-v2` remains non-promotable.
+- Clarify that the historical `confidence_score` is a heuristic stability-ranking score, not a calibrated probability.
+- Add focused Python 3.13 and 3.14 provenance/evidence compatibility smoke jobs while retaining the full 3.11/3.12 suites.
+
 ## [3.6.2] - 2026-08-08
 
 ### Fixed

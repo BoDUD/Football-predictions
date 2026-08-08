@@ -21,6 +21,12 @@ from typing import Any, Mapping, Sequence
 
 from soccer_predict import __version__ as SOCCER_PREDICT_VERSION
 
+try:
+    from scripts import artifact_lineage, cohort_scope
+except ImportError:  # Direct execution from scripts/.
+    import artifact_lineage  # type: ignore[no-redef]
+    import cohort_scope  # type: ignore[no-redef]
+
 LEGACY_POLICY_SCHEMA_VERSION = "forward-policy/1.0.0"
 PREVIOUS_POLICY_SCHEMA_VERSION = "forward-policy/2.0.0"
 POLICY_SCHEMA_VERSION = "forward-policy/3.0.0"
@@ -118,6 +124,10 @@ DEFAULT_PROTECTED_FILES = (
     "scripts/forward_policy.py",
     "scripts/forward_validation.py",
     "scripts/source_evidence.py",
+    "scripts/fundamental_evidence.py",
+    "scripts/execution_evidence.py",
+    "scripts/artifact_lineage.py",
+    "scripts/cohort_scope.py",
     "soccer_predict/__init__.py",
     "soccer_predict/domain/settlement.py",
     "soccer_predict/domain/probabilities.py",
@@ -133,6 +143,10 @@ DEFAULT_PROTECTED_FILES = (
 REQUIRED_PROVENANCE_PROTECTED_FILES = {
     "scripts/forward_policy.py",
     "scripts/forward_validation.py",
+    "scripts/artifact_lineage.py",
+    "scripts/cohort_scope.py",
+    "scripts/fundamental_evidence.py",
+    "scripts/execution_evidence.py",
     "scripts/memory_store.py",
     "scripts/public_market_outlook.py",
     "scripts/publication_outlook.py",
@@ -229,6 +243,23 @@ def _policy_contract_for_package(
     return (
         frozenset(REQUIRED_PROVENANCE_PROTECTED_FILES),
         RENDERER_POLICY_PROTECTED_FILES,
+    )
+
+
+def _release_at_least(package_version: Any, minimum: tuple[int, int, int]) -> bool:
+    version = _require_package_version(package_version, "package_version")
+    release = tuple(
+        int(part) for part in re.split(r"[-+]", version, maxsplit=1)[0].split(".")
+    )
+    return release >= minimum
+
+
+def _policy_uses_role_aware_lineage(policy: Mapping[str, Any]) -> bool:
+    software = policy.get("software")
+    return bool(
+        policy.get("schema_version") == POLICY_SCHEMA_VERSION
+        and isinstance(software, Mapping)
+        and _release_at_least(software.get("package_version"), (3, 7, 0))
     )
 
 
@@ -478,6 +509,9 @@ def build_policy_manifest(
     repo_root: str | Path,
     dataset_manifest: str | Path,
     model_registry: str | Path,
+    corner_dataset_manifest: str | Path,
+    corner_model_registry: str | Path,
+    cohort_scope_file: str | Path,
     expected_final_merge_commit: str,
     cohort_kind: str,
     created_at: str | datetime | None = None,
@@ -488,8 +522,38 @@ def build_policy_manifest(
     frozen_cohort_kind = _require_cohort_kind(cohort_kind, "policy cohort_kind")
     dataset_path = Path(dataset_manifest).resolve()
     registry_path = Path(model_registry).resolve()
+    corner_dataset_path = Path(corner_dataset_manifest).resolve()
+    corner_registry_path = Path(corner_model_registry).resolve()
+    scope_path = Path(cohort_scope_file).resolve()
     dataset = _read_json(dataset_path, "dataset manifest")
     registry = _read_json(registry_path, "model registry")
+    role_aware_release = _release_at_least(SOCCER_PREDICT_VERSION, (3, 7, 0))
+    try:
+        frozen_lineage = (
+            artifact_lineage.build_lineage(
+                repo_root=root,
+                data_manifests={
+                    "football_history": dataset_path,
+                    "corner_history": corner_dataset_path,
+                },
+                model_registries={
+                    "football_htft": registry_path,
+                    "corner": corner_registry_path,
+                },
+            )
+            if role_aware_release
+            else None
+        )
+        frozen_scope = (
+            cohort_scope.load_scope(scope_path) if role_aware_release else None
+        )
+    except (
+        artifact_lineage.ArtifactLineageError,
+        cohort_scope.CohortScopeError,
+    ) as exc:
+        raise ForwardPolicyError(
+            "role-aware data/model lineage or cohort scope is invalid"
+        ) from exc
     dataset_declared_hash = _declared_artifact_hash(dataset)
     registry_declared_hash = _declared_artifact_hash(registry)
     if dataset_declared_hash is None:
@@ -554,6 +618,16 @@ def build_policy_manifest(
         "policy": _runtime_policy(),
         "confirmation_contract": _confirmation_contract(frozen_cohort_kind),
     }
+    if role_aware_release:
+        assert frozen_lineage is not None and frozen_scope is not None
+        manifest["artifact_lineage"] = frozen_lineage
+        manifest["cohort_scope"] = {
+            "scope_path": _relative_path(scope_path, root),
+            "file_sha256": _hash_file(scope_path),
+            "scope_id": frozen_scope["scope_id"],
+            "scope_hash": frozen_scope["scope_hash"],
+            "scope_snapshot": frozen_scope,
+        }
     manifest["policy_hash"] = _hash_json(manifest)
     manifest["policy_id"] = (
         f"{POLICY_ID_PREFIX}-{manifest['policy_hash'].split(':', 1)[1][:16]}"
@@ -625,6 +699,11 @@ def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         )
     else:
         frozen_package_version = None
+    role_aware_release = bool(
+        current_policy
+        and frozen_package_version
+        and _release_at_least(frozen_package_version, (3, 7, 0))
+    )
     protected = code.get("protected_files")
     if not isinstance(protected, Mapping) or not protected:
         raise ForwardPolicyError("forward policy protected_files are missing")
@@ -671,6 +750,50 @@ def validate_policy_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     ].get("declared_manifest_hash"):
         raise ForwardPolicyError(
             "forward policy model registry is not linked to the frozen dataset manifest"
+        )
+    if role_aware_release:
+        try:
+            value["artifact_lineage"] = artifact_lineage.validate_lineage(
+                value.get("artifact_lineage")
+            )
+        except artifact_lineage.ArtifactLineageError as exc:
+            raise ForwardPolicyError(
+                "forward policy role-aware artifact lineage is invalid"
+            ) from exc
+        football_data = value["artifact_lineage"]["data_manifests"]["football_history"]
+        football_models = value["artifact_lineage"]["model_registries"]["football_htft"]
+        if football_data.get("declared_manifest_hash") != value["data"].get(
+            "declared_manifest_hash"
+        ) or football_models.get("declared_registry_hash") != value["models"].get(
+            "declared_registry_hash"
+        ):
+            raise ForwardPolicyError(
+                "legacy football aliases do not match the role-aware artifact lineage"
+            )
+        scope_block = value.get("cohort_scope")
+        if not isinstance(scope_block, Mapping) or set(scope_block) != {
+            "scope_path",
+            "file_sha256",
+            "scope_id",
+            "scope_hash",
+            "scope_snapshot",
+        }:
+            raise ForwardPolicyError("forward policy cohort_scope binding is missing")
+        _require_sha256(scope_block.get("file_sha256"), "cohort scope file hash")
+        try:
+            frozen_scope = cohort_scope.validate_scope(scope_block["scope_snapshot"])
+        except cohort_scope.CohortScopeError as exc:
+            raise ForwardPolicyError("forward policy cohort scope is invalid") from exc
+        if (
+            scope_block.get("scope_id") != frozen_scope["scope_id"]
+            or scope_block.get("scope_hash") != frozen_scope["scope_hash"]
+        ):
+            raise ForwardPolicyError(
+                "forward policy cohort scope aliases do not match its snapshot"
+            )
+    elif "artifact_lineage" in value or "cohort_scope" in value:
+        raise ForwardPolicyError(
+            "pre-3.7 forward policies cannot carry role-aware lineage or cohort scope"
         )
     runtime = value.get("policy")
     if not isinstance(runtime, Mapping):
@@ -784,6 +907,31 @@ def validate_active_runtime_policy_manifest(
             raise ForwardPolicyError(
                 f"frozen {section} artifact is missing or changed: {artifact_path}"
             )
+    if _policy_uses_role_aware_lineage(value):
+        try:
+            artifact_lineage.verify_files(value["artifact_lineage"], repo_root=root)
+        except artifact_lineage.ArtifactLineageError as exc:
+            raise ForwardPolicyError(
+                "frozen role-aware artifact lineage is missing or changed"
+            ) from exc
+        scope_block = value["cohort_scope"]
+        scope_path = Path(str(scope_block.get("scope_path") or ""))
+        if not scope_path.is_absolute():
+            scope_path = root / scope_path
+        if not scope_path.is_file() or _hash_file(scope_path) != scope_block.get(
+            "file_sha256"
+        ):
+            raise ForwardPolicyError(
+                "frozen cohort scope artifact is missing or changed"
+            )
+        try:
+            disk_scope = cohort_scope.load_scope(scope_path)
+        except cohort_scope.CohortScopeError as exc:
+            raise ForwardPolicyError("frozen cohort scope artifact is invalid") from exc
+        if disk_scope != scope_block.get("scope_snapshot"):
+            raise ForwardPolicyError(
+                "frozen cohort scope file does not reproduce its policy snapshot"
+            )
     return value
 
 
@@ -850,6 +998,19 @@ def _reproduce_provenance_binding(
                 "promotion_evidence_eligible": False,
             }
         )
+    if _policy_uses_role_aware_lineage(policy):
+        binding.update(
+            {
+                "artifact_lineage_hash": _require_sha256(
+                    policy["artifact_lineage"]["lineage_hash"],
+                    "provenance artifact_lineage_hash",
+                ),
+                "cohort_scope_hash": _require_sha256(
+                    policy["cohort_scope"]["scope_hash"],
+                    "provenance cohort_scope_hash",
+                ),
+            }
+        )
     binding["provenance_hash"] = _hash_json(binding)
     return binding
 
@@ -893,6 +1054,8 @@ def validate_provenance_binding(
         required.update(
             {"cohort_kind", "assurance_scope", "promotion_evidence_eligible"}
         )
+    if _policy_uses_role_aware_lineage(policy):
+        required.update({"artifact_lineage_hash", "cohort_scope_hash"})
     if set(value) != required:
         raise ForwardPolicyError("forward provenance binding fields are incomplete")
     expected_schema = (
@@ -911,6 +1074,11 @@ def validate_provenance_binding(
         "model_registry_hash",
         "renderer_policy_hash",
         "provenance_hash",
+        *(
+            ("artifact_lineage_hash", "cohort_scope_hash")
+            if _policy_uses_role_aware_lineage(policy)
+            else ()
+        ),
     ):
         _require_sha256(value.get(field), f"provenance {field}")
     _require_cohort_id(value.get("cohort_id"), "provenance cohort_id")
@@ -1003,6 +1171,9 @@ def freeze_policy(
     repo_root: str | Path,
     dataset_manifest: str | Path,
     model_registry: str | Path,
+    corner_dataset_manifest: str | Path,
+    corner_model_registry: str | Path,
+    cohort_scope_file: str | Path,
     expected_final_merge_commit: str,
     cohort_kind: str,
 ) -> tuple[Path, dict[str, Any]]:
@@ -1030,6 +1201,9 @@ def freeze_policy(
             repo_root=root,
             dataset_manifest=dataset_manifest,
             model_registry=model_registry,
+            corner_dataset_manifest=corner_dataset_manifest,
+            corner_model_registry=corner_model_registry,
+            cohort_scope_file=cohort_scope_file,
             expected_final_merge_commit=expected_commit,
             cohort_kind=frozen_cohort_kind,
             code_commit=head_commit,
@@ -1126,6 +1300,9 @@ def start_cohort(
         "retrospective_records_allowed": False,
         "closed_at": None,
     }
+    if _policy_uses_role_aware_lineage(policy):
+        cohort["scope_id"] = policy["cohort_scope"]["scope_id"]
+        cohort["scope_hash"] = policy["cohort_scope"]["scope_hash"]
     cohort["cohort_hash"] = _hash_json(cohort)
     immutable_path = cohort_manifest_path(base_dir, clean_id)
     if immutable_path.exists():
@@ -1154,6 +1331,9 @@ def validate_record_manifest(
         "records",
         "manifest_hash",
     }
+    has_denominator = "denominator" in value or "denominator_hash" in value
+    if has_denominator:
+        required.update({"denominator", "denominator_hash"})
     if set(value) != required:
         raise ForwardPolicyError("live-forward record manifest fields are incomplete")
     if value.get("schema_version") != RECORD_MANIFEST_SCHEMA_VERSION:
@@ -1188,6 +1368,8 @@ def validate_record_manifest(
         "record_binding_hash",
         "prematch_ledger_hash",
     }
+    if has_denominator:
+        entry_fields.add("request_event_hash")
     for index, raw_entry in enumerate(raw_records):
         if not isinstance(raw_entry, Mapping) or set(raw_entry) != entry_fields:
             raise ForwardPolicyError(
@@ -1218,6 +1400,54 @@ def validate_record_manifest(
     ):
         raise ForwardPolicyError("live-forward record manifest record_count is invalid")
     value["records"] = normalized_records
+    if has_denominator:
+        denominator = value.get("denominator")
+        if not isinstance(denominator, Mapping):
+            raise ForwardPolicyError(
+                "live-forward record manifest denominator is invalid"
+            )
+        denominator_hash = _require_sha256(
+            value.get("denominator_hash"),
+            "live-forward record manifest denominator_hash",
+        )
+        if denominator.get("denominator_hash") != denominator_hash:
+            raise ForwardPolicyError(
+                "live-forward record manifest denominator hash is invalid"
+            )
+        if denominator.get("complete") is not True:
+            raise ForwardPolicyError(
+                "live-forward record manifest denominator is incomplete"
+            )
+        denominator_entries = denominator.get("entries")
+        if not isinstance(denominator_entries, list):
+            raise ForwardPolicyError(
+                "live-forward record manifest denominator entries are missing"
+            )
+        recorded_ids = sorted(
+            str(item.get("fixture_id") or "")
+            for item in denominator_entries
+            if isinstance(item, Mapping) and item.get("disposition") == "recorded"
+        )
+        if recorded_ids != fixture_ids:
+            raise ForwardPolicyError(
+                "record manifest does not exactly match its recorded denominator entries"
+            )
+        recorded_request_hashes = {
+            str(item.get("fixture_id") or ""): _require_sha256(
+                item.get("request_event_hash"),
+                "live-forward denominator recorded request_event_hash",
+            )
+            for item in denominator_entries
+            if isinstance(item, Mapping) and item.get("disposition") == "recorded"
+        }
+        if any(
+            entry.get("request_event_hash")
+            != recorded_request_hashes.get(entry["fixture_id"])
+            for entry in normalized_records
+        ):
+            raise ForwardPolicyError(
+                "record manifest request bindings do not match the denominator event log"
+            )
 
     if cohort is not None:
         frozen = validate_cohort(cohort)
@@ -1228,6 +1458,19 @@ def validate_record_manifest(
             raise ForwardPolicyError(
                 "live-forward record manifest does not bind the immutable cohort"
             )
+        if "scope_hash" in frozen:
+            if not has_denominator:
+                raise ForwardPolicyError(
+                    "scoped live-forward cohort requires a complete denominator"
+                )
+            if (
+                denominator.get("scope_id") != frozen.get("scope_id")
+                or denominator.get("scope_hash") != frozen.get("scope_hash")
+                or denominator.get("cohort_id") != frozen.get("cohort_id")
+            ):
+                raise ForwardPolicyError(
+                    "record manifest denominator does not bind the cohort scope"
+                )
     value["manifest_hash"] = supplied_hash
     return value
 
@@ -1258,6 +1501,33 @@ def close_cohort(
     else:
         cohort = pointer
     manifest = validate_record_manifest(record_manifest, cohort=cohort)
+    if "scope_hash" in cohort:
+        policy_path = _require_canonical_policy_file(
+            base_dir,
+            str(cohort.get("policy_file") or ""),
+            policy_id=str(cohort.get("policy_id") or ""),
+        )
+        policy = validate_policy_manifest(_read_json(policy_path, "cohort policy"))
+        try:
+            events = cohort_scope.load_events(
+                base_dir,
+                str(cohort["cohort_id"]),
+                scope=policy["cohort_scope"]["scope_snapshot"],
+            )
+            reproduced_denominator = cohort_scope.build_denominator(
+                scope=policy["cohort_scope"]["scope_snapshot"],
+                cohort_id=str(cohort["cohort_id"]),
+                events=events,
+                record_manifest=manifest,
+            )
+        except cohort_scope.CohortScopeError as exc:
+            raise ForwardPolicyError(
+                "live-forward cohort denominator cannot be reproduced at closure"
+            ) from exc
+        if manifest.get("denominator") != reproduced_denominator:
+            raise ForwardPolicyError(
+                "live-forward cohort denominator does not reproduce from its event log"
+            )
     closure_path = cohort_closure_path(base_dir, str(cohort["cohort_id"]))
     existing: dict[str, Any] | None = None
     if closure_path.exists():
@@ -1331,6 +1601,11 @@ def validate_cohort(cohort: Mapping[str, Any]) -> dict[str, Any]:
     _require_cohort_id(value.get("cohort_id"), "live-forward cohort_id")
     if schema_version == COHORT_SCHEMA_VERSION:
         _require_cohort_kind(value.get("kind"), "live-forward cohort kind")
+        if ("scope_id" in value) != ("scope_hash" in value):
+            raise ForwardPolicyError("live-forward cohort scope identity is incomplete")
+        if "scope_id" in value:
+            _require_cohort_id(value.get("scope_id"), "live-forward scope_id")
+            _require_sha256(value.get("scope_hash"), "live-forward scope_hash")
     elif "kind" in value:
         raise ForwardPolicyError(
             "legacy live-forward cohorts cannot carry a cohort kind"
@@ -1451,6 +1726,7 @@ def load_active_binding(
     base_dir: str | Path,
     repo_root: str | Path,
     archived_at: str | datetime,
+    fixture_id: str | None = None,
     observation_commitment_hash: str | None = None,
 ) -> dict[str, Any] | None:
     path = active_cohort_path(base_dir)
@@ -1484,6 +1760,13 @@ def load_active_binding(
         raise ForwardPolicyError("active cohort does not bind its policy exactly")
     if policy["confirmation_contract"].get("cohort_kind") != active_cohort_kind:
         raise ForwardPolicyError("active cohort kind does not match its frozen policy")
+    if _policy_uses_role_aware_lineage(policy) and (
+        cohort.get("scope_id") != policy["cohort_scope"]["scope_id"]
+        or cohort.get("scope_hash") != policy["cohort_scope"]["scope_hash"]
+    ):
+        raise ForwardPolicyError(
+            "active cohort does not bind its frozen denominator scope"
+        )
     archived = _aware_datetime(archived_at, "archived_at")
     start = _aware_datetime(str(cohort["starts_at"]), "cohort.starts_at")
     if archived < start:
@@ -1522,6 +1805,23 @@ def load_active_binding(
             policy, cohort_id=str(cohort["cohort_id"])
         ),
     }
+    if _policy_uses_role_aware_lineage(policy):
+        if observation_commitment_hash is not None and fixture_id is None:
+            raise ForwardPolicyError(
+                "committed role-aware binding requires a denominator fixture_id"
+            )
+        if fixture_id is not None:
+            try:
+                binding["cohort_request_binding"] = cohort_scope.request_binding(
+                    base_dir=base_dir,
+                    cohort_id=str(cohort["cohort_id"]),
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                    fixture_id=str(fixture_id),
+                )
+            except cohort_scope.CohortScopeError as exc:
+                raise ForwardPolicyError(
+                    "fixture is not registered in the frozen cohort denominator"
+                ) from exc
     if observation_commitment_hash is not None:
         binding["observation_commitment_hash"] = _require_sha256(
             observation_commitment_hash,
@@ -1677,6 +1977,50 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
             raise ForwardPolicyError(
                 "record binding assurance fields do not match provenance"
             )
+        role_aware_release = _policy_uses_role_aware_lineage(policy)
+        request = value.get("cohort_request_binding")
+        committed_current = (
+            schema_version == PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
+        )
+        if role_aware_release and (committed_current or request is not None):
+            if not isinstance(request, Mapping) or set(request) != {
+                "schema_version",
+                "scope_id",
+                "scope_hash",
+                "fixture_id",
+                "request_event_hash",
+                "requested_at",
+            }:
+                raise ForwardPolicyError(
+                    "record binding cohort request identity is incomplete"
+                )
+            if request.get("schema_version") != "forward-cohort-request-binding/1.0.0":
+                raise ForwardPolicyError(
+                    "record binding cohort request schema is invalid"
+                )
+            if (
+                request.get("scope_id") != policy["cohort_scope"]["scope_id"]
+                or request.get("scope_hash") != policy["cohort_scope"]["scope_hash"]
+            ):
+                raise ForwardPolicyError(
+                    "record binding cohort request does not bind the frozen scope"
+                )
+            _require_sha256(
+                request.get("request_event_hash"),
+                "record binding cohort request_event_hash",
+            )
+            requested_at = _aware_datetime(
+                str(request.get("requested_at") or ""),
+                "record binding requested_at",
+            )
+            if requested_at > archived:
+                raise ForwardPolicyError(
+                    "record binding cohort request was recorded after archive"
+                )
+        elif request is not None:
+            raise ForwardPolicyError(
+                "pre-3.7 record bindings cannot carry cohort request evidence"
+            )
     else:
         if any(field in value for field in current_assurance_fields):
             raise ForwardPolicyError(
@@ -1713,6 +2057,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     freeze.add_argument("--dataset-manifest", required=True)
     freeze.add_argument("--model-registry", required=True)
+    freeze.add_argument("--corner-dataset-manifest", required=True)
+    freeze.add_argument("--corner-model-registry", required=True)
+    freeze.add_argument("--cohort-scope-file", required=True)
     freeze.add_argument("--cohort-kind", required=True, choices=COHORT_KINDS)
     freeze.add_argument(
         "--expected-final-merge-commit",
@@ -1751,6 +2098,9 @@ def main() -> int:
                 repo_root=arguments.repo_root,
                 dataset_manifest=arguments.dataset_manifest,
                 model_registry=arguments.model_registry,
+                corner_dataset_manifest=arguments.corner_dataset_manifest,
+                corner_model_registry=arguments.corner_model_registry,
+                cohort_scope_file=arguments.cohort_scope_file,
                 expected_final_merge_commit=arguments.expected_final_merge_commit,
                 cohort_kind=arguments.cohort_kind,
             )

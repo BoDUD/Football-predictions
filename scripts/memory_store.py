@@ -23,8 +23,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from scripts import (
+        cohort_scope,
         corner_ranker,
         forward_policy,
+        fundamental_evidence,
         htft_ranker,
         joint_scenario_model,
         source_evidence,
@@ -33,8 +35,10 @@ except ImportError:  # Direct execution from scripts/.
     script_directory = str(Path(__file__).resolve().parent)
     if script_directory not in sys.path:
         sys.path.insert(0, script_directory)
+    import cohort_scope  # type: ignore[no-redef]
     import corner_ranker  # type: ignore[no-redef]
     import forward_policy  # type: ignore[no-redef]
+    import fundamental_evidence  # type: ignore[no-redef]
     import htft_ranker  # type: ignore[no-redef]
     import joint_scenario_model  # type: ignore[no-redef]
     import source_evidence  # type: ignore[no-redef]
@@ -1364,6 +1368,35 @@ def calculate_joint_scenario_audit_hash(audit: dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def frozen_registry_model_for_record(
+    record: dict[str, Any], *, role: str, league_key: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    raw_binding = record.get("forward_policy_binding")
+    if raw_binding is None:
+        return None
+    try:
+        binding = forward_policy.validate_record_binding(raw_binding)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("active forward policy binding is invalid") from exc
+    if binding is None:
+        raise ValueError("active forward policy binding is missing")
+    policy = binding.get("policy_snapshot")
+    lineage = policy.get("artifact_lineage") if isinstance(policy, dict) else None
+    registries = lineage.get("model_registries") if isinstance(lineage, dict) else None
+    role_binding = registries.get(role) if isinstance(registries, dict) else None
+    registered = (
+        role_binding.get("registered_models")
+        if isinstance(role_binding, dict)
+        else None
+    )
+    model = registered.get(league_key) if isinstance(registered, dict) else None
+    if not isinstance(role_binding, dict) or not isinstance(model, dict):
+        raise ValueError(
+            f"active forward policy has no frozen {role} model for {league_key}"
+        )
+    return deepcopy(role_binding), deepcopy(model)
+
+
 def _joint_scenario_lineage(snapshot: dict[str, Any]) -> dict[str, Any]:
     inputs = snapshot.get("inputs")
     if not isinstance(inputs, dict):
@@ -2121,6 +2154,18 @@ def load_htft_observation_audit(
         training.get("dataset_manifest_hash"),
         "HT/FT observation training dataset_manifest_hash",
     )
+    frozen_htft = frozen_registry_model_for_record(
+        record, role="football_htft", league_key=training_competition
+    )
+    if frozen_htft is not None:
+        registry_binding, registered_model = frozen_htft
+        if (
+            registry_binding.get("dataset_manifest_hash") != dataset_manifest_hash
+            or registered_model.get("model_hash") != model_hash
+        ):
+            raise ValueError(
+                "HT/FT observation does not match the cohort-frozen football registry"
+            )
     if str(training.get("end_date") or "") != cutoff_text:
         raise ValueError(
             "HT/FT observation training end_date must equal training_cutoff_date"
@@ -2442,6 +2487,14 @@ def load_htft_observation_audit(
             "model_hash": model_hash,
             "prediction_hash": prediction_hash,
             "dataset_manifest_hash": dataset_manifest_hash,
+            **(
+                {
+                    "registry_role": "football_htft",
+                    "registry_hash": frozen_htft[0]["declared_registry_hash"],
+                }
+                if frozen_htft is not None
+                else {}
+            ),
             "artifact_sha256": model_artifact_sha256,
             "artifact_filename": model_path.name,
             "matrix_hash": matrix_hash,
@@ -2720,6 +2773,20 @@ def load_corner_observation_audit(
         "lineage_hash",
     ):
         require_sha256(binding.get(field), f"Corner observation {field}")
+    frozen_corner = frozen_registry_model_for_record(
+        record, role="corner", league_key=league_key
+    )
+    if frozen_corner is not None:
+        registry_binding, registered_model = frozen_corner
+        if (
+            binding.get("registry_hash")
+            != registry_binding.get("declared_registry_hash")
+            or binding.get("dataset_hash") != registered_model.get("dataset_hash")
+            or binding.get("model_hash") != registered_model.get("model_hash")
+        ):
+            raise ValueError(
+                "Corner observation does not match the cohort-frozen corner registry"
+            )
 
     prediction_fixture = prediction.get("fixture")
     ranking_fixture = ranking.get("fixture")
@@ -2795,6 +2862,8 @@ def load_corner_observation_audit(
             "training_cutoff",
         )
     }
+    if frozen_corner is not None:
+        lineage["registry_role"] = "corner"
     candidates: list[dict[str, Any]] = []
     for index, candidate in enumerate(raw_candidates, start=1):
         if not isinstance(candidate, dict):
@@ -3830,6 +3899,163 @@ def calculate_source_evidence_audit_hash(audit: dict[str, Any]) -> str:
     payload = deepcopy(audit)
     payload.pop("audit_hash", None)
     return canonical_prediction_hash(payload)
+
+
+def calculate_fundamental_evidence_audit_hash(audit: dict[str, Any]) -> str:
+    payload = deepcopy(audit)
+    payload.pop("audit_hash", None)
+    return canonical_prediction_hash(payload)
+
+
+def load_fundamental_evidence_audit(
+    args: argparse.Namespace, record: dict[str, Any]
+) -> dict[str, Any] | None:
+    supplied = str(getattr(args, "fundamental_evidence_file", "") or "").strip()
+    required = record.get("forward_policy_binding") is not None
+    if not supplied:
+        if required:
+            raise ValueError(
+                "active untouched live-forward cohort requires "
+                "--fundamental-evidence-file"
+            )
+        return None
+    evidence_path = Path(supplied).resolve()
+    try:
+        evidence = fundamental_evidence.validate_evidence_file(evidence_path)
+    except fundamental_evidence.FundamentalEvidenceError as exc:
+        raise ValueError("fundamental evidence replay failed") from exc
+    fixture = evidence.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("fundamental evidence fixture is missing")
+    for field in ("match_id", "home_team", "away_team"):
+        if str(fixture.get(field) or "") != str(record.get(field) or ""):
+            raise ValueError(
+                f"fundamental evidence fixture {field} does not match the record"
+            )
+    evidence_kickoff = parse_aware_datetime(
+        str(fixture.get("kickoff") or ""), "fundamental evidence kickoff"
+    )
+    record_kickoff = parse_aware_datetime(
+        str(record.get("kickoff") or ""), "record kickoff"
+    )
+    generated_at = parse_aware_datetime(
+        str(evidence.get("generated_at") or ""),
+        "fundamental evidence generated_at",
+    )
+    archived_at = parse_aware_datetime(
+        str(record.get("updated_at") or ""), "fundamental evidence archive time"
+    )
+    if evidence_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        raise ValueError("fundamental evidence kickoff does not match the record")
+    if generated_at >= record_kickoff:
+        raise ValueError(
+            "fundamental evidence must be generated strictly before kickoff"
+        )
+    if generated_at > archived_at:
+        raise ValueError("fundamental evidence cannot be generated after archive time")
+    claims = evidence.get("derived_claims")
+    if not isinstance(claims, dict) or set(claims) != set(
+        fundamental_evidence.CLAIM_FIELDS
+    ):
+        raise ValueError("fundamental evidence claims are incomplete")
+    audit = {
+        "schema_version": evidence["schema_version"],
+        "kind": "replayable_fundamental_evidence",
+        "evidence_file": str(evidence_path),
+        "evidence_hash": evidence["evidence_hash"],
+        "fixture": deepcopy(fixture),
+        "generated_at": generated_at.isoformat(),
+        "derived_claims": deepcopy(claims),
+        "bundle": deepcopy(evidence),
+        "raw_sources_replayed": len(evidence.get("sources", [])),
+        "counts_toward_primary_record": False,
+    }
+    audit["audit_hash"] = calculate_fundamental_evidence_audit_hash(audit)
+    return audit
+
+
+def validated_fundamental_evidence_audit(
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+    basis = record.get("settlement_basis")
+    context = basis if isinstance(basis, dict) else record
+    audit = context.get("fundamental_evidence_audit")
+    if audit is None:
+        return None
+    if (
+        not isinstance(audit, dict)
+        or audit.get("schema_version") != fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+        or audit.get("kind") != "replayable_fundamental_evidence"
+        or audit.get("counts_toward_primary_record") is not False
+        or not isinstance(audit.get("bundle"), dict)
+        or audit.get("audit_hash") != calculate_fundamental_evidence_audit_hash(audit)
+    ):
+        return None
+    try:
+        replayed = fundamental_evidence.validate_evidence_file(
+            str(audit.get("evidence_file") or "")
+        )
+    except (fundamental_evidence.FundamentalEvidenceError, OSError):
+        return None
+    if replayed != audit.get("bundle") or replayed.get("evidence_hash") != audit.get(
+        "evidence_hash"
+    ):
+        return None
+    fixture = replayed.get("fixture")
+    if not isinstance(fixture, dict):
+        return None
+    for field in ("match_id", "home_team", "away_team"):
+        if str(fixture.get(field) or "") != str(context.get(field) or ""):
+            return None
+    claims = replayed.get("derived_claims")
+    if not isinstance(claims, dict) or claims != audit.get("derived_claims"):
+        return None
+    try:
+        evidence_kickoff = parse_aware_datetime(
+            str(fixture.get("kickoff") or ""), "fundamental evidence kickoff"
+        )
+        record_kickoff = parse_aware_datetime(
+            str(context.get("kickoff") or ""), "record kickoff"
+        )
+        generated_at = parse_aware_datetime(
+            str(replayed.get("generated_at") or ""),
+            "fundamental evidence generated_at",
+        )
+        archived_value = (
+            context.get("version_archived_at")
+            or context.get("archived_at")
+            or context.get("updated_at")
+            or context.get("created_at")
+        )
+        archived_at = parse_aware_datetime(
+            str(archived_value or ""), "fundamental evidence archive time"
+        )
+    except ValueError:
+        return None
+    if evidence_kickoff.astimezone(timezone.utc) != record_kickoff.astimezone(
+        timezone.utc
+    ):
+        return None
+    if generated_at >= record_kickoff or generated_at > archived_at:
+        return None
+    if audit.get("raw_sources_replayed") != len(replayed.get("sources", [])):
+        return None
+    if context.get("guardrail_evidence", {}) != {
+        **deepcopy(claims),
+        "injury_evidence_status": context.get("guardrail_evidence", {}).get(
+            "injury_evidence_status", "not_used"
+        ),
+        "primary_htft_edge_pp": context.get("guardrail_evidence", {}).get(
+            "primary_htft_edge_pp"
+        ),
+        "primary_htft_firm_count": context.get("guardrail_evidence", {}).get(
+            "primary_htft_firm_count"
+        ),
+    }:
+        return None
+    return audit
 
 
 def load_source_evidence_audit(
@@ -7807,7 +8033,7 @@ def _forward_history_record_receipt(
 
 
 def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, str]:
-    return {
+    entry = {
         "fixture_id": str(receipt.get("fixture_id") or ""),
         "archive_version_hash": require_sha256(
             receipt.get("archive_version_hash"), "forward archive version hash"
@@ -7822,10 +8048,26 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, st
             receipt.get("prematch_ledger_hash"), "forward pre-match ledger hash"
         ),
     }
+    snapshot = receipt.get("archive_snapshot_payload")
+    binding = (
+        snapshot.get("forward_policy_binding") if isinstance(snapshot, dict) else None
+    )
+    request = (
+        binding.get("cohort_request_binding") if isinstance(binding, dict) else None
+    )
+    if request is not None:
+        entry["request_event_hash"] = require_sha256(
+            request.get("request_event_hash"),
+            "forward cohort request event hash",
+        )
+    return entry
 
 
 def forward_record_manifest_for_records(
-    records: list[dict[str, Any]], *, cohort_manifest: dict[str, Any]
+    records: list[dict[str, Any]],
+    *,
+    cohort_manifest: dict[str, Any],
+    denominator: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the complete canonical record index used to close one cohort."""
 
@@ -7867,6 +8109,12 @@ def forward_record_manifest_for_records(
         "record_count": len(entries),
         "records": entries,
     }
+    if denominator is not None:
+        manifest["denominator"] = deepcopy(denominator)
+        manifest["denominator_hash"] = require_sha256(
+            denominator.get("denominator_hash"),
+            "forward cohort denominator hash",
+        )
     manifest["manifest_hash"] = forward_policy._hash_json(manifest)
     try:
         return forward_policy.validate_record_manifest(manifest, cohort=cohort)
@@ -8035,6 +8283,62 @@ def _all_forward_records_for_cohort(
     return selected
 
 
+def _scope_snapshot_for_cohort(cohort: dict[str, Any]) -> dict[str, Any] | None:
+    if "scope_hash" not in cohort:
+        return None
+    policy_file = Path(str(cohort.get("policy_file") or "")).resolve()
+    try:
+        raw = json.loads(policy_file.read_text(encoding="utf-8"))
+        policy = forward_policy.validate_policy_manifest(raw)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        forward_policy.ForwardPolicyError,
+    ) as exc:
+        raise ValueError("Scoped cohort policy is unavailable or invalid") from exc
+    scope = policy.get("cohort_scope", {}).get("scope_snapshot")
+    try:
+        frozen = cohort_scope.validate_scope(scope)
+    except cohort_scope.CohortScopeError as exc:
+        raise ValueError("Scoped cohort denominator definition is invalid") from exc
+    if frozen["scope_id"] != cohort.get("scope_id") or frozen[
+        "scope_hash"
+    ] != cohort.get("scope_hash"):
+        raise ValueError("Scoped cohort does not match its policy scope")
+    return frozen
+
+
+def _denominator_for_records(
+    *,
+    base_dir: str | Path,
+    cohort: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    scope = _scope_snapshot_for_cohort(cohort)
+    if scope is None:
+        return None
+    receipts = [_forward_history_record_receipt(record) for record in records]
+    receipt_entries = sorted(
+        (_record_manifest_entry_from_receipt(receipt) for receipt in receipts),
+        key=lambda item: item["fixture_id"],
+    )
+    try:
+        events = cohort_scope.load_events(
+            base_dir, str(cohort["cohort_id"]), scope=scope
+        )
+        return cohort_scope.build_denominator(
+            scope=scope,
+            cohort_id=str(cohort["cohort_id"]),
+            events=events,
+            record_manifest={"records": receipt_entries},
+        )
+    except cohort_scope.CohortScopeError as exc:
+        raise ValueError(
+            "Forward cohort denominator is incomplete or irreproducible"
+        ) from exc
+
+
 def _write_json_atomically(output: str | Path, payload: dict[str, Any]) -> Path:
     path = Path(output).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -8087,7 +8391,12 @@ def cmd_export_forward_record_manifest(args: argparse.Namespace) -> dict[str, An
     history = load_history(data_path(args.base_dir))
     cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
     selected = _all_forward_records_for_cohort(history, cohort_id)
-    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    denominator = _denominator_for_records(
+        base_dir=args.base_dir, cohort=cohort, records=selected
+    )
+    manifest = forward_record_manifest_for_records(
+        selected, cohort_manifest=cohort, denominator=denominator
+    )
     output = _write_json_atomically(args.output, manifest)
     return {
         "ok": True,
@@ -8109,7 +8418,12 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
     history = load_history(data_path(args.base_dir))
     cohort = _load_immutable_forward_cohort(args.base_dir, cohort_id)
     selected = _all_forward_records_for_cohort(history, cohort_id)
-    manifest = forward_record_manifest_for_records(selected, cohort_manifest=cohort)
+    denominator = _denominator_for_records(
+        base_dir=args.base_dir, cohort=cohort, records=selected
+    )
+    manifest = forward_record_manifest_for_records(
+        selected, cohort_manifest=cohort, denominator=denominator
+    )
     requested_output = str(getattr(args, "record_manifest_output", "") or "").strip()
     manifest_output = (
         Path(requested_output).resolve()
@@ -8242,6 +8556,9 @@ def revision_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
         "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
+        "fundamental_evidence_audit": deepcopy(
+            record.get("fundamental_evidence_audit")
+        ),
         "confidence_ranking_version": record.get("confidence_ranking_version"),
         "confidence_policy_version": record.get("confidence_policy_version"),
         "primary_selection_basis": record.get("primary_selection_basis"),
@@ -8314,6 +8631,9 @@ def settlement_basis_for_record(record: dict[str, Any]) -> dict[str, Any]:
         "candidate_audits": deepcopy(record.get("candidate_audits", [])),
         "joint_scenario_audit": deepcopy(record.get("joint_scenario_audit")),
         "source_evidence_audit": deepcopy(record.get("source_evidence_audit")),
+        "fundamental_evidence_audit": deepcopy(
+            record.get("fundamental_evidence_audit")
+        ),
         "predicted_score": record.get("predicted_score"),
         "exact_score_picks": deepcopy(record.get("exact_score_picks", [])),
         "display_predicted_score": record.get("display_predicted_score"),
@@ -8362,6 +8682,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         base_dir=args.base_dir or Path.cwd(),
         repo_root=Path(__file__).resolve().parents[1],
         archived_at=timestamp,
+        fixture_id=str(args.match_id),
     )
     revisions = list(existing.get("revisions", [])) if existing else []
     exact_score_picks = [
@@ -8426,20 +8747,12 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "notes": args.notes,
         "data_quality": args.data_quality,
         "guardrail_evidence": {
-            "lineup_confirmed": bool(getattr(args, "lineup_confirmed", False)),
-            "fundamental_supported": bool(getattr(args, "fundamental_evidence", False)),
-            "chance_quality_supported": bool(
-                getattr(args, "chance_quality_evidence", False)
-            ),
-            "attack_configuration_supported": bool(
-                getattr(args, "attack_configuration_evidence", False)
-            ),
-            "opponent_tail_risk_checked": bool(
-                getattr(args, "opponent_tail_risk_checked", False)
-            ),
-            "corner_profile_supported": bool(
-                getattr(args, "corner_profile_evidence", False)
-            ),
+            "lineup_confirmed": False,
+            "fundamental_supported": False,
+            "chance_quality_supported": False,
+            "attack_configuration_supported": False,
+            "opponent_tail_risk_checked": False,
+            "corner_profile_supported": False,
             "injury_evidence_status": getattr(
                 args, "injury_evidence_status", "not_used"
             ),
@@ -8468,6 +8781,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_audits": [],
         "joint_scenario_audit": None,
         "source_evidence_audit": None,
+        "fundamental_evidence_audit": None,
         "strict_oos_policy_version": STRICT_OOS_POLICY_VERSION,
         "market_status": deepcopy(STRICT_OOS_MARKET_STATUS),
         "forward_policy_binding": base_forward_binding,
@@ -8527,6 +8841,32 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
             "competition evidence is invalid for the incoming archived version"
         )
     record["source_evidence_audit"] = load_source_evidence_audit(args, record)
+    record["fundamental_evidence_audit"] = load_fundamental_evidence_audit(args, record)
+    if record["fundamental_evidence_audit"] is not None:
+        record["guardrail_evidence"].update(
+            deepcopy(record["fundamental_evidence_audit"]["derived_claims"])
+        )
+    elif base_forward_binding is None:
+        record["guardrail_evidence"].update(
+            {
+                "lineup_confirmed": bool(getattr(args, "lineup_confirmed", False)),
+                "fundamental_supported": bool(
+                    getattr(args, "fundamental_evidence", False)
+                ),
+                "chance_quality_supported": bool(
+                    getattr(args, "chance_quality_evidence", False)
+                ),
+                "attack_configuration_supported": bool(
+                    getattr(args, "attack_configuration_evidence", False)
+                ),
+                "opponent_tail_risk_checked": bool(
+                    getattr(args, "opponent_tail_risk_checked", False)
+                ),
+                "corner_profile_supported": bool(
+                    getattr(args, "corner_profile_evidence", False)
+                ),
+            }
+        )
     htft_observation = load_htft_observation_audit(args, record)
     if htft_observation is not None:
         record["candidate_audits"].append(htft_observation)
@@ -8750,6 +9090,19 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
 
     provenance = load_score_model_provenance(args)
     record["score_model_provenance"] = provenance
+    frozen_score = frozen_registry_model_for_record(
+        record,
+        role="football_htft",
+        league_key=str(record.get("league_key") or "").strip().casefold(),
+    )
+    if frozen_score is not None and (
+        not isinstance(provenance, dict)
+        or provenance.get("model_hash")
+        != frozen_score[1].get("full_time_component_model_hash")
+    ):
+        raise ValueError(
+            "Canonical score model does not match the cohort-frozen football registry"
+        )
     record["joint_scenario_audit"] = load_joint_scenario_audit(args, record)
     if (
         bool(getattr(args, "require_complete_analysis", True))
@@ -9507,10 +9860,30 @@ def cmd_review(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Review refused: forward-bound records require replayable archived source evidence"
             )
+        review_policy = (
+            validated_review_binding.get("policy_snapshot")
+            if isinstance(validated_review_binding, dict)
+            else None
+        )
+        if (
+            isinstance(review_policy, dict)
+            and forward_policy._policy_uses_role_aware_lineage(review_policy)
+            and validated_fundamental_evidence_audit(settlement_basis) is None
+        ):
+            raise ValueError(
+                "Review refused: current forward-bound records require replayable "
+                "fundamental evidence"
+            )
     elif settlement_basis.get("source_evidence_audit") is not None and (
         validated_source_evidence_audit(settlement_basis) is None
     ):
         raise ValueError("Review refused: archived source evidence cannot be replayed")
+    elif settlement_basis.get("fundamental_evidence_audit") is not None and (
+        validated_fundamental_evidence_audit(settlement_basis) is None
+    ):
+        raise ValueError(
+            "Review refused: archived fundamental evidence cannot be replayed"
+        )
     primary_market = settlement_basis.get("primary_market")
     home_corners_arg = getattr(args, "home_corners", None)
     away_corners_arg = getattr(args, "away_corners", None)
@@ -10954,7 +11327,11 @@ def validated_observation_audit(
             "lineage_hash",
             "training_cutoff",
         }
+        if lineage.get("registry_role") is not None:
+            lineage_fields.add("registry_role")
         if set(lineage) != lineage_fields:
+            return False
+        if lineage.get("registry_role") not in {None, "corner"}:
             return False
         for key in (
             "prediction_hash",
@@ -10974,6 +11351,24 @@ def validated_observation_audit(
             or model.get("training_cutoff_date") != lineage.get("training_cutoff")
         ):
             return False
+        if record is not None and record.get("forward_policy_binding") is not None:
+            try:
+                frozen_corner = frozen_registry_model_for_record(
+                    record,
+                    role="corner",
+                    league_key=str(lineage.get("league_key") or "").casefold(),
+                )
+            except ValueError:
+                return False
+            if (
+                frozen_corner is None
+                or lineage.get("registry_role") != "corner"
+                or lineage.get("registry_hash")
+                != frozen_corner[0].get("declared_registry_hash")
+                or lineage.get("dataset_hash") != frozen_corner[1].get("dataset_hash")
+                or lineage.get("model_hash") != frozen_corner[1].get("model_hash")
+            ):
+                return False
         try:
             kickoff = parse_aware_datetime(
                 str(fixture.get("kickoff") or ""),
@@ -11085,6 +11480,25 @@ def validated_observation_audit(
     ).encode("ascii")
     if model.get("matrix_hash") != f"sha256:{hashlib.sha256(matrix_bytes).hexdigest()}":
         return False
+    if record is not None and record.get("forward_policy_binding") is not None:
+        try:
+            frozen_htft = frozen_registry_model_for_record(
+                record,
+                role="football_htft",
+                league_key=league_key_for_record(record),
+            )
+        except ValueError:
+            return False
+        if (
+            frozen_htft is None
+            or model.get("registry_role") != "football_htft"
+            or model.get("registry_hash")
+            != frozen_htft[0].get("declared_registry_hash")
+            or model.get("dataset_manifest_hash")
+            != frozen_htft[0].get("dataset_manifest_hash")
+            or model.get("model_hash") != frozen_htft[1].get("model_hash")
+        ):
+            return False
     top_two = audit.get("top_two")
     if (
         not isinstance(top_two, list)
@@ -12097,6 +12511,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "source-evidence/2.0.0 bundle rebuilt from content-addressed visible-page "
             "snapshots; mandatory while an untouched forward cohort is active"
+        ),
+    )
+    record.add_argument(
+        "--fundamental-evidence-file",
+        help=(
+            "fundamental-evidence/1.0.0 bundle replayed from content-addressed "
+            "fixture sources; mandatory while an untouched forward cohort is active"
         ),
     )
     record.add_argument(

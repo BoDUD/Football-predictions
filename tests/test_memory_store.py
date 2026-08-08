@@ -16,6 +16,7 @@ from unittest import mock
 from _corner_source_fixture import build_source_bound_dataset
 
 from scripts import (
+    fundamental_evidence,
     htft_model,
     joint_scenario_model,
     prediction_card_renderer,
@@ -321,6 +322,7 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
         "joint_scenario_file": None,
         "require_complete_analysis": False,
         "candidate_evaluation_file": None,
+        "fundamental_evidence_file": None,
         "require_candidate_evaluations": False,
         "htft_observation_model_file": None,
         "htft_observation_ranker_file": None,
@@ -605,6 +607,85 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
     return SimpleNamespace(**values)
 
 
+def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
+    source = Path(base_dir) / f"fundamental-source-{args.match_id}.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": fundamental_evidence.RAW_SCHEMA_VERSION,
+                "source_url": f"https://example.test/fundamentals/{args.match_id}",
+                "collected_at": "2026-07-21T09:00:00+00:00",
+                "fixture": {
+                    "match_id": str(args.match_id),
+                    "home_team": args.home_team,
+                    "away_team": args.away_team,
+                    "kickoff": args.kickoff,
+                },
+                "confirmed_lineups": {
+                    "home": [f"H{index}" for index in range(1, 12)],
+                    "away": [f"A{index}" for index in range(1, 12)],
+                },
+                "fundamentals": {
+                    "home": {
+                        "sample_matches": 8,
+                        "goals_for_per_match": 1.6,
+                        "goals_against_per_match": 0.9,
+                    },
+                    "away": {
+                        "sample_matches": 8,
+                        "goals_for_per_match": 1.1,
+                        "goals_against_per_match": 1.4,
+                    },
+                },
+                "chance_quality": {
+                    "home": {
+                        "sample_matches": 8,
+                        "xg_per_match": 1.7,
+                        "xga_per_match": 0.8,
+                    },
+                    "away": {
+                        "sample_matches": 8,
+                        "xg_per_match": 1.0,
+                        "xga_per_match": 1.5,
+                    },
+                },
+                "attack_configuration": {
+                    "home": {
+                        "formation": "4-3-3",
+                        "recognized_attackers": ["H9"],
+                    },
+                    "away": {
+                        "formation": "4-2-3-1",
+                        "recognized_attackers": ["A9"],
+                    },
+                },
+                "opponent_tail_risk": {
+                    "checked": True,
+                    "notes": "source checked",
+                },
+                "corner_profile": {
+                    "home": {
+                        "sample_matches": 8,
+                        "corners_for_per_match": 5.5,
+                        "corners_against_per_match": 3.7,
+                    },
+                    "away": {
+                        "sample_matches": 8,
+                        "corners_for_per_match": 4.1,
+                        "corners_against_per_match": 5.2,
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    evidence_file, _artifact = fundamental_evidence.build_evidence(
+        [source], output_dir=Path(base_dir) / f"fundamental-{args.match_id}"
+    )
+    return str(evidence_file)
+
+
 def competition_evidence_values(match_id: str = "2991125") -> dict[str, str]:
     source_url = f"https://zq.titan007.com/analysis/{match_id}cn.htm"
     return {
@@ -741,6 +822,48 @@ def strict_metric_record(
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_fundamental_evidence_derives_guardrails_and_replays(self):
+        with tempfile.TemporaryDirectory() as base:
+            args = record_args(
+                base,
+                match_id="fundamental-1",
+                lineup_confirmed=False,
+                fundamental_evidence=False,
+                chance_quality_evidence=False,
+                attack_configuration_evidence=False,
+                corner_profile_evidence=False,
+                opponent_tail_risk_checked=False,
+            )
+            args.fundamental_evidence_file = write_fundamental_evidence(base, args)
+            recorded = memory_store.cmd_record(args)["record"]
+
+            self.assertEqual(
+                {field: True for field in fundamental_evidence.CLAIM_FIELDS},
+                {
+                    field: recorded["guardrail_evidence"][field]
+                    for field in fundamental_evidence.CLAIM_FIELDS
+                },
+            )
+            self.assertIsNotNone(
+                memory_store.validated_fundamental_evidence_audit(recorded)
+            )
+            tampered = copy.deepcopy(recorded)
+            tampered["fundamental_evidence_audit"]["derived_claims"][
+                "lineup_confirmed"
+            ] = False
+            self.assertIsNone(
+                memory_store.validated_fundamental_evidence_audit(tampered)
+            )
+
+    def test_active_record_requires_replayable_fundamental_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = record_args(temporary)
+            record = {
+                "forward_policy_binding": {"schema_version": "active"},
+            }
+            with self.assertRaisesRegex(ValueError, "fundamental-evidence-file"):
+                memory_store.load_fundamental_evidence_audit(args, record)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.corner_temporary = tempfile.TemporaryDirectory()
