@@ -2190,10 +2190,30 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
             "formal v3 evaluation requires a closed cohort with a complete record manifest"
         )
     try:
+        policy = forward_policy.validate_policy_manifest(
+            value.get("policy_manifest") or {}
+        )
+        cohort = forward_policy.validate_cohort(value.get("cohort_manifest") or {})
+        if (
+            value.get("policy_id") != policy.get("policy_id")
+            or value.get("policy_hash") != policy.get("policy_hash")
+            or cohort.get("policy_id") != policy.get("policy_id")
+            or cohort.get("policy_hash") != policy.get("policy_hash")
+            or value.get("cohort_id") != cohort.get("cohort_id")
+        ):
+            raise forward_policy.ForwardPolicyError(
+                "forward cohort aggregate policy/cohort binding is invalid"
+            )
+        schema_contract = forward_policy.closure_schema_contract(
+            policy["software"]["package_version"]
+        )
         closure = forward_policy.validate_closure(
             raw_closure,
-            cohort=value.get("cohort_manifest") or {},
+            cohort=cohort,
             require_record_manifest=True,
+            required_closure_schema=schema_contract["closure"],
+            required_record_manifest_schema=schema_contract["record_manifest"],
+            required_denominator_schema=schema_contract["denominator"],
         )
     except forward_policy.ForwardPolicyError as exc:
         raise ForwardValidationError(
@@ -2243,16 +2263,17 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         )
         if request is not None:
             receipt_entry["request_event_hash"] = request.get("request_event_hash")
-            if (
-                closure["record_manifest"].get("schema_version")
-                == forward_policy.RECORD_MANIFEST_SCHEMA_VERSION
-            ):
+            manifest_schema = closure["record_manifest"].get("schema_version")
+            if manifest_schema in {
+                forward_policy.PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+                forward_policy.PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+                forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+            }:
                 receipt_entry.update(
                     {
                         "request_fixture_id": request.get("request_fixture_id"),
                         "fixture": deepcopy(request.get("fixture")),
                         "fixture_event_hash": request.get("fixture_event_hash"),
-                        "fixture_event_at": request.get("fixture_event_at"),
                         "execution_receipt_hashes": sorted(
                             str(binding_item["receipt_identity_hash"])
                             for row in normalized_receipt["records"]
@@ -2266,6 +2287,15 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
                         ),
                     }
                 )
+                if manifest_schema in {
+                    forward_policy.PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+                    forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+                }:
+                    receipt_entry["fixture_event_at"] = request.get("fixture_event_at")
+                if manifest_schema == forward_policy.RECORD_MANIFEST_SCHEMA_VERSION:
+                    receipt_entry["record_archived_at"] = receipt.get(
+                        "record_archived_at"
+                    )
         receipt_entries.append(receipt_entry)
     if receipt_entries != manifest_entries:
         raise ForwardValidationError(

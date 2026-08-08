@@ -398,9 +398,12 @@ before cohort activation, and binds the active cohort/policy hashes. A request m
 frozen archive record or an explicit terminal `unavailable` event. `rescheduled` and `replaced`
 events are the only ways to change the requested fixture snapshot; they preserve the original
 request identity while hash-binding the current competition, teams, and kickoff. Every archive
-must satisfy `requested_at < archived_at < kickoff`. At closure, the record manifest reproduces
+must satisfy `requested_at <= fixture_event_at < archived_at < kickoff`. At closure, the record manifest reproduces
 the original request fixture ID, current full fixture, request event hash, and latest fixture
-event hash. This defines the estimand as distinct user-requested fixtures instead of the subset
+event hash/time. Current closure also binds the maximum record archive time and the actual
+closure observation time; `closed_at` cannot precede either the last event or last archive and
+cannot exceed the observation time. Microseconds are preserved so same-second event, archive,
+and closure order cannot collapse. This defines the estimand as distinct user-requested fixtures instead of the subset
 that happened to produce usable odds.
 
 The policy's `forward-artifact-lineage/1.3.0` has separate roles for football history, corner
@@ -499,18 +502,21 @@ explicit settled-or-pending settlement per key; caller-chosen duplicate observat
 retrospective generation, late market snapshots and post-result edits to model probabilities fail
 closed. Close the cohort only through `memory_store.py close-forward-cohort`. It holds the history
 lock while selecting every bound record in the named cohort, writes a canonical
-`live-forward-record-manifest/2.1.0`, embeds that manifest in the
-`live-forward-cohort-closure/2.0.0`, and closes the active pointer before releasing the lock. Each
+`forward-cohort-denominator/2.2.0` with `last_event_at`, writes a canonical
+`live-forward-record-manifest/2.2.0` with `max_record_archived_at`, embeds that manifest in the
+`live-forward-cohort-closure/2.1.0`, and closes the active pointer before releasing the lock. Each
 canonically sorted manifest entry binds the fixture ID, original request fixture ID, current full
 fixture, request and fixture event hashes, latest fixture event time, execution receipt identities, archive-version hash,
-record-commitment hash, committed-binding hash, and pre-match-ledger hash. The lower-level
+record archive time, record-commitment hash, committed-binding hash, and pre-match-ledger hash.
+The denominator seals `last_event_at`, the manifest seals `max_record_archived_at`, and the
+closure seals `observed_at`. The lower-level
 `forward_policy.py close`
 requires this manifest explicitly; a preview manifest followed by a later close is not the formal
 workflow because another record could enter between those operations.
 
 Current v3 evaluation also requires a canonical memory-store cohort export carrying
 `memory-forward-history-ledger-binding/3.0.0`. Formal export requires the
-`live-forward-cohort-closure/2.0.0` file and has no fixture filter: it always selects every history
+`live-forward-cohort-closure/2.1.0` file and has no fixture filter: it always selects every history
 record bound to the named cohort. Its canonically ordered receipt list contains one
 `memory-forward-record-receipt/2.0.0` per manifest entry. Every
 receipt embeds the replayed micro-ledger and immutable archive snapshot, and reproduces the
@@ -519,7 +525,11 @@ time, and exact market commitments. The evaluator first requires a closed cohort
 those four receipt anchors with the independently closure-bound manifest before aggregating rows. A
 naked v2 payload, open cohort, caller-supplied SHA wrapper, or selected fixture subset cannot enter
 formal evaluation. Deleting, copying, reordering, replacing, truncating, or retrofitting a receipt
-fails closed even if the attacker recomputes the aggregate binding hash and fixture list. Legacy
+fails closed even if the attacker recomputes the aggregate binding hash and fixture list. The
+aggregate validator derives the one permitted closure, record-manifest, and denominator schema
+from the frozen package version before accepting the closure; recomputing hashes around an older
+schema is therefore a downgrade attack, not compatibility. Historical 3.9 closures/manifests
+remain read-only under their original frozen schema contract. Legacy
 v1 closures and binding schemas 1.x, plus the previous policy-v2 binding schemas 2.x, remain
 readable for historical inspection only, appear solely in explicit defect-quarantine summary
 metadata, and cannot enter the current formal export, confirmation metrics, or promotion gate. Local

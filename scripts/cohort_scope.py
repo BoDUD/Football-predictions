@@ -28,7 +28,8 @@ PREVIOUS_FULL_REQUEST_BINDING_SCHEMA_VERSION = "forward-cohort-request-binding/2
 REQUEST_BINDING_SCHEMA_VERSION = "forward-cohort-request-binding/2.1.0"
 PREVIOUS_REQUEST_BINDING_SCHEMA_VERSION = "forward-cohort-request-binding/1.0.0"
 PREVIOUS_DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/2.0.0"
-DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/2.1.0"
+PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/2.1.0"
+DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/2.2.0"
 ESTIMAND = "distinct_user_requested_fixtures"
 TERMINAL_UNAVAILABLE_REASONS = frozenset(
     {
@@ -800,6 +801,7 @@ def build_denominator(
     frozen = validate_scope(scope)
     if schema_version not in {
         PREVIOUS_DENOMINATOR_SCHEMA_VERSION,
+        PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION,
         DENOMINATOR_SCHEMA_VERSION,
     }:
         raise CohortScopeError("cohort denominator schema_version is unsupported")
@@ -878,7 +880,11 @@ def build_denominator(
                 "fixture_event_hash": state["fixture_event_hash"],
                 **(
                     {"fixture_event_at": state["fixture_event_at"]}
-                    if schema_version == DENOMINATOR_SCHEMA_VERSION
+                    if schema_version
+                    in {
+                        PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION,
+                        DENOMINATOR_SCHEMA_VERSION,
+                    }
                     else {}
                 ),
                 "requested_at": request["occurred_at"],
@@ -899,6 +905,11 @@ def build_denominator(
         "scope_hash": frozen["scope_hash"],
         "event_count": len(normalized),
         "last_event_hash": normalized[-1]["event_hash"] if normalized else None,
+        **(
+            {"last_event_at": (normalized[-1]["occurred_at"] if normalized else None)}
+            if schema_version == DENOMINATOR_SCHEMA_VERSION
+            else {}
+        ),
         "requested_fixture_count": len(entries),
         "recorded_fixture_count": len(record_ids),
         "unavailable_fixture_count": sum(
@@ -946,7 +957,10 @@ def validate_denominator(
         "unavailable_event_hash",
         "unavailable_reason",
     }
-    if value.get("schema_version") == DENOMINATOR_SCHEMA_VERSION:
+    if value.get("schema_version") in {
+        PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION,
+        DENOMINATOR_SCHEMA_VERSION,
+    }:
         entry_fields.add("fixture_event_at")
     if (
         not isinstance(entries, list)
@@ -964,7 +978,10 @@ def validate_denominator(
         _require_hash(item.get("request_event_hash"), "request_event_hash")
         _require_hash(item.get("fixture_event_hash"), "fixture_event_hash")
         requested_at = _aware(item.get("requested_at"), "requested_at")
-        if value.get("schema_version") == DENOMINATOR_SCHEMA_VERSION:
+        if value.get("schema_version") in {
+            PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION,
+            DENOMINATOR_SCHEMA_VERSION,
+        }:
             fixture_event_at = _aware(item.get("fixture_event_at"), "fixture_event_at")
             if fixture_event_at < requested_at:
                 raise CohortScopeError("fixture_event_at predates its request")
@@ -994,6 +1011,23 @@ def validate_denominator(
         or value.get("unavailable_fixture_count") != unavailable_count
     ):
         raise CohortScopeError("cohort denominator counts do not reproduce")
+    if value.get("schema_version") == DENOMINATOR_SCHEMA_VERSION:
+        last_event_at = value.get("last_event_at")
+        if value.get("event_count") == 0:
+            if last_event_at is not None:
+                raise CohortScopeError("empty cohort denominator invents last_event_at")
+        else:
+            parsed_last_event = _aware(last_event_at, "last_event_at")
+            lower_bounds = [
+                _aware(entry["requested_at"], "requested_at") for entry in entries
+            ]
+            lower_bounds.extend(
+                _aware(entry["fixture_event_at"], "fixture_event_at")
+                for entry in entries
+            )
+            if lower_bounds and parsed_last_event < max(lower_bounds):
+                raise CohortScopeError("denominator last_event_at is incomplete")
+            value["last_event_at"] = parsed_last_event.isoformat()
     value["denominator_hash"] = _require_hash(supplied, "denominator_hash")
     return value
 
