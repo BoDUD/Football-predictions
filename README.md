@@ -2,7 +2,9 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
-当前发布版本：**3.10.0**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+当前发布版本：**3.11.0**（2026-08-09）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+
+3.11.0 将 cohort 关闭与 request/rescheduled/replaced/unavailable 事件追加放入同一把跨进程事件日志锁；关闭方持锁直到 immutable closure 和 closed pointer 均已落盘。外部 record manifest 只在 closure 成功后从其内嵌的已验证副本原子发布，竞争失败不会遗留阻塞重试的正式清单。正式主推 gate、模型、市场发布政策和结算口径均未调整。
 
 3.10.0 将 cohort 关闭时间绑定到最后事件、最后归档与关闭时实际观测时间，完整保留微秒精度；正式聚合验证按冻结 package version 强制唯一 closure、record-manifest 与 denominator schema，拒绝重新封装的旧 schema 降级。正式主推 gate、市场发布政策和胜率口径均未调整。
 

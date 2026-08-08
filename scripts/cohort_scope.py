@@ -143,6 +143,15 @@ def _event_log_lock(path: Path):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def event_log_transaction(base_dir: str | Path, cohort_id: str):
+    """Lock one cohort's complete event-log transaction across processes."""
+
+    path = denominator_event_path(base_dir, cohort_id)
+    with _event_log_lock(path):
+        yield path
+
+
 def build_scope(
     *,
     scope_id: str,
@@ -687,8 +696,7 @@ def append_event(
     reason: str | None = None,
     replacement_fixture: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    path = denominator_event_path(base_dir, cohort_id)
-    with _event_log_lock(path):
+    with event_log_transaction(base_dir, cohort_id) as path:
         active_binding = _load_active_event_binding(
             base_dir, cohort_id=cohort_id, scope=scope
         )
