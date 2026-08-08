@@ -2252,6 +2252,7 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
                         "request_fixture_id": request.get("request_fixture_id"),
                         "fixture": deepcopy(request.get("fixture")),
                         "fixture_event_hash": request.get("fixture_event_hash"),
+                        "fixture_event_at": request.get("fixture_event_at"),
                         "execution_receipt_hashes": sorted(
                             str(binding_item["receipt_identity_hash"])
                             for row in normalized_receipt["records"]

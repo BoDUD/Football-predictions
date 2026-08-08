@@ -2,9 +2,9 @@
 
 面向 Codex 的足球赛前分析、T−30 临场复查和赛后复盘 Skill。项目包含可训练、可复现的时间衰减 Poisson/Dixon-Coles 比分基线，以及按联赛训练的半场/全场九分类联合模型。面向用户的 1X2、大小球、亚盘、总进球区间、双方进球、半全场和比分情景必须统一从同一个版本化比赛路径后验派生；角球继续使用独立模型，不与进球路径强行绑定。
 
-当前发布版本：**3.8.0**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
+当前发布版本：**3.9.0**（2026-08-08）。包/Skill 版本只描述本仓库发行；模型、归档、候选审计和调度策略的 artifact schema/policy 版本独立管理，不随发行版本自动改写。
 
-3.8.0 的前向证据边界进一步收紧：活动请求绑定 cohort/policy 与完整比赛快照，改期或替换必须留下显式事件，并严格满足 `requested_at < archived_at < kickoff`；当前运行时只接受带语义 manager 回执的 `forward-artifact-lineage/1.3.0`，旧 1.1/1.2 只能重放历史档案。`fundamental-evidence/2.0.0` 将“字段存在”与“支持具体盘口方向”分开，冲突首发和非首发攻击手失败关闭，新方向规则仍仅用于 shadow。真实成交回执在 cohort 内按 `firm_id + account_region + receipt_id` 唯一，firm 接受价与决策时共识 no-vig 分开报告；这些变化没有放宽正式主推 gate，也没有解决外部可信时间戳、原始 HTTP、独立 closing snapshot 或 promotion。
+3.9.0 关闭 cohort 事件自绑定与时间因果缺口：当前事件、请求、分母和记录清单必须绑定真实冻结 cohort/policy，最新改期或替换事件严格早于归档且事件时间不可倒退。`fundamental-evidence/3.0.0` 从注册来源适配器推导来源类别，从 canonical market identity 推导候选市场，并对方向证据执行至少 5 场样本门槛；这些证据仍仅用于 shadow，正式主推 gate 未放宽。中文赛事标签与 19 个模型 registry key 现明确分离；旧 schema 只读重放，不得启动或关闭当前 cohort。
 
 > 概率与 EV 都是估计值，不保证盈利。请遵守所在地法律并理性使用。
 
@@ -180,7 +180,7 @@ football/HTFT import、evaluation 与 registry。company 8 不能满足三公司
 
 真正的“未触碰前向验证”由 `scripts/cohort_scope.py`、`scripts/forward_policy.py`、`scripts/source_evidence.py` 和 `scripts/forward_validation.py` 组成。先冻结用户请求赛事范围，再在任何分析前把每个用户请求写入 append-only、hash-chained 事件日志；结项时每个请求必须对应一条冻结预测记录或一条明确的 terminal-unavailable 处置，且预测记录中的 request-event hash 必须逐条重放一致。policy 同时冻结足球历史数据、角球历史数据、HT/FT 模型 registry、角球模型 registry，以及每个联赛实际注册的模型 hash，不能再用一个模糊的单 registry 代表全部模型。当前运行时只允许 `local-integrity-shadow-v2`，不能作为 promotion 证据；正式主推 gate、市场 observation-only 状态和阈值没有放宽。
 
-活动 cohort 的每场归档必须同时提供 `source-evidence/2.0.0` 与 `fundamental-evidence/2.0.0`。后者从内容寻址的可见赛前快照区分资料“存在”与对精确盘口方向的支持，分类来源并拒绝冲突首发、非首发攻击手和与所选方向矛盾的证据；新规则仍为 shadow-only，调用方布尔参数不能自行解锁正式 gate。盘口共识价格仍只用于市场基线；如果 forward ledger 声称真实成交，必须另附 `execution-offer-evidence/1.0.0`，绑定具体 firm、地区、receipt、报价/接受时间、可下上限、实际 stake 和接受价格，且成交价不得优于已保存报价。同一 firm/account/receipt 在 cohort 内只能计一次，firm 接受价与决策时共识 no-vig 分开报告。当前 source/fundamental adapter 保存的是可见页面导出的原始 JSON 与 HTTP 元数据，并非通用 raw-HTTP body 抓取器；因此系统仍只声明本地可重放 shadow，不宣称已经解决外部可信时间戳、原始 HTTP、独立 closing snapshot 或 promotion。
+活动 cohort 的每场归档必须同时提供 `source-evidence/2.0.0` 与 `fundamental-evidence/3.0.0`。后者从注册的 `adapter_id + host/domain + adapter parser version` 推导来源类别，并将内容寻址原始导出响应的 SHA-256 纳入 evidence；候选市场只能从 canonical market identity 推导，调用方不能另报不一致的 `market`。方向证据至少需要主客双方各 5 场同类样本，低于门槛会明确记为 `insufficient_sample_matches`。冲突首发、非首发攻击手和与所选方向矛盾的证据仍失败关闭；新规则仍为 shadow-only，调用方布尔参数不能自行解锁正式 gate。盘口共识价格仍只用于市场基线；如果 forward ledger 声称真实成交，必须另附 `execution-offer-evidence/1.0.0`，绑定具体 firm、地区、receipt、报价/接受时间、可下上限、实际 stake 和接受价格，且成交价不得优于已保存报价。同一 firm/account/receipt 在 cohort 内只能计一次，firm 接受价与决策时共识 no-vig 分开报告。当前 source/fundamental adapter 保存的是可见页面导出的原始 JSON 与 HTTP 元数据，并非通用 raw-HTTP body 抓取器；因此系统仍只声明本地可重放 shadow，不宣称已经解决外部可信时间戳、原始 HTTP、独立 closing snapshot 或 promotion。
 
 当前活动 policy 是 `forward-policy/3.0.0`；kind-less 的 policy v2 与 v1 都只能做结构化历史重放。当前 record binding 为 `forward-policy-binding/3.0.0`/`3.1.0`，内含 `forward-provenance-binding/2.0.0`，显式写入 `cohort_kind`、`assurance_scope=local_integrity_only` 和 `promotion_evidence_eligible=false`。旧 binding 2.x/provenance 1.0 仍可验证既有不可变记录，但其旧 `untouched_confirmation_eligible=true` 只表示旧版赛前完整性，不表示可 promotion；这些记录在汇总中进入 defect quarantine，不能正式导出或续写承诺。observations v1 可以计算描述性统计，但完整性与 promotion 永远失败。当前本地 memory-store 也没有独立的赛前收盘快照重放适配器，因此真实 local shadow 的 execution/CLV/总体统计门槛保留 blocker；只有五态模型空间 proper-score 子门槛可以在冻结基线上如实评估。
 

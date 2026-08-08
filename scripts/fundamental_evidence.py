@@ -19,12 +19,17 @@ except ImportError:  # Direct execution from scripts/.
     import source_evidence  # type: ignore[no-redef]
 
 PREVIOUS_RAW_SCHEMA_VERSION = "visible-fundamental-snapshot/1.0.0"
-RAW_SCHEMA_VERSION = "visible-fundamental-snapshot/2.0.0"
+PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION = "visible-fundamental-snapshot/2.0.0"
+RAW_SCHEMA_VERSION = "visible-fundamental-snapshot/3.0.0"
 PREVIOUS_EVIDENCE_SCHEMA_VERSION = "fundamental-evidence/1.0.0"
-EVIDENCE_SCHEMA_VERSION = "fundamental-evidence/2.0.0"
-PARSER_VERSION = "visible-fundamental-parser/2.0.0"
+PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION = "fundamental-evidence/2.0.0"
+EVIDENCE_SCHEMA_VERSION = "fundamental-evidence/3.0.0"
+PARSER_VERSION = "visible-fundamental-parser/3.0.0"
+PREVIOUS_DIRECTIONAL_PARSER_VERSION = "visible-fundamental-parser/2.0.0"
 PREVIOUS_PARSER_VERSION = "visible-fundamental-parser/1.0.0"
-SUPPORT_RULE_VERSION = "candidate-fundamental-support/1.0.0-shadow"
+PREVIOUS_SUPPORT_RULE_VERSION = "candidate-fundamental-support/1.0.0-shadow"
+SUPPORT_RULE_VERSION = "candidate-fundamental-support/1.1.0-shadow"
+MINIMUM_DIRECTIONAL_SAMPLE_MATCHES = 5
 CLAIM_FIELDS = (
     "lineup_confirmed",
     "fundamental_supported",
@@ -49,6 +54,28 @@ SOURCE_CLASSES = frozenset(
         "statistical_provider",
     }
 )
+SOURCE_ADAPTER_REGISTRY: dict[str, dict[str, Any]] = {
+    "titan007-match-analysis-v1": {
+        "source_class": "verified_provider",
+        "host_suffixes": ("titan007.com",),
+        "parser_version": "titan007-visible-fundamental-adapter/1.0.0",
+    },
+    "uefa-match-centre-v1": {
+        "source_class": "official_confirmed",
+        "host_suffixes": ("uefa.com",),
+        "parser_version": "uefa-visible-fundamental-adapter/1.0.0",
+    },
+    "fifa-match-centre-v1": {
+        "source_class": "official_confirmed",
+        "host_suffixes": ("fifa.com",),
+        "parser_version": "fifa-visible-fundamental-adapter/1.0.0",
+    },
+    "sofascore-statistics-v1": {
+        "source_class": "statistical_provider",
+        "host_suffixes": ("sofascore.com",),
+        "parser_version": "sofascore-visible-fundamental-adapter/1.0.0",
+    },
+}
 
 
 class FundamentalEvidenceError(ValueError):
@@ -99,6 +126,47 @@ def _url(value: Any) -> str:
     return url
 
 
+def _registered_source_adapter(
+    payload: Mapping[str, Any], source_url: str
+) -> dict[str, Any]:
+    adapter_id = _text(payload.get("source_adapter_id"), "source_adapter_id")
+    adapter = SOURCE_ADAPTER_REGISTRY.get(adapter_id)
+    if not isinstance(adapter, Mapping):
+        raise FundamentalEvidenceError("source_adapter_id is not registered")
+    parser_version = _text(
+        payload.get("source_adapter_parser_version"),
+        "source_adapter_parser_version",
+    )
+    if parser_version != adapter["parser_version"]:
+        raise FundamentalEvidenceError(
+            "source adapter parser version does not match the registry"
+        )
+    hostname = str(urlparse(source_url).hostname or "").lower()
+    suffixes = tuple(str(item).lower() for item in adapter["host_suffixes"])
+    if not any(
+        hostname == suffix or hostname.endswith(f".{suffix}") for suffix in suffixes
+    ):
+        raise FundamentalEvidenceError(
+            "source URL host does not match the registered source adapter"
+        )
+    if "source_class" in payload:
+        raise FundamentalEvidenceError(
+            "current snapshots derive source_class from the registered adapter"
+        )
+    return {
+        "adapter_id": adapter_id,
+        "parser_version": parser_version,
+        "registered_host_suffixes": list(suffixes),
+        "source_class": str(adapter["source_class"]),
+    }
+
+
+def _market_from_identity(identity: Mapping[str, Any]) -> tuple[str, str | None]:
+    family = str(identity.get("family") or "")
+    period = str(identity.get("period") or "")
+    return ("half_time", family) if period == "first_half" else (family, None)
+
+
 def _finite(value: Any, label: str) -> float:
     if isinstance(value, bool):
         raise FundamentalEvidenceError(f"{label} must be numeric")
@@ -123,12 +191,21 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
             "fundamental snapshot schema_version is unsupported"
         )
     schema_version = payload.get("schema_version")
-    if schema_version not in {PREVIOUS_RAW_SCHEMA_VERSION, RAW_SCHEMA_VERSION}:
+    if schema_version not in {
+        PREVIOUS_RAW_SCHEMA_VERSION,
+        PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION,
+        RAW_SCHEMA_VERSION,
+    }:
         raise FundamentalEvidenceError(
             "fundamental snapshot schema_version is unsupported"
         )
+    source_url = _url(payload.get("source_url"))
+    source_adapter = None
     source_class = None
     if schema_version == RAW_SCHEMA_VERSION:
+        source_adapter = _registered_source_adapter(payload, source_url)
+        source_class = source_adapter["source_class"]
+    elif schema_version == PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION:
         source_class = _text(payload.get("source_class"), "source_class")
         if source_class not in SOURCE_CLASSES:
             raise FundamentalEvidenceError("source_class is unsupported")
@@ -169,7 +246,10 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
             normalized_lineups[side] = [
                 _text(player, f"confirmed_lineups.{side}") for player in players
             ]
-        if schema_version == RAW_SCHEMA_VERSION and source_class not in {
+        if schema_version in {
+            PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION,
+            RAW_SCHEMA_VERSION,
+        } and source_class not in {
             "official_confirmed",
             "verified_provider",
         }:
@@ -246,7 +326,14 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
             }
             for side in ("home", "away")
         }
-        if schema_version == RAW_SCHEMA_VERSION and normalized_lineups is not None:
+        if (
+            schema_version
+            in {
+                PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION,
+                RAW_SCHEMA_VERSION,
+            }
+            and normalized_lineups is not None
+        ):
             for side in ("home", "away"):
                 if not set(attack_configuration[side]["recognized_attackers"]).issubset(
                     set(normalized_lineups[side])
@@ -321,7 +408,10 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
         "corner_profile_available": corner_profile is not None,
     }
     support_requests: list[dict[str, Any]] = []
-    if schema_version == RAW_SCHEMA_VERSION:
+    if schema_version in {
+        PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION,
+        RAW_SCHEMA_VERSION,
+    }:
         raw_requests = payload.get("candidate_support_requests", [])
         if not isinstance(raw_requests, list):
             raise FundamentalEvidenceError("candidate_support_requests must be a list")
@@ -345,9 +435,22 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
                 raise FundamentalEvidenceError(
                     f"candidate_support_requests[{index}] market identity hash is invalid"
                 )
-            market = _text(
-                request.get("market"), f"candidate_support_requests[{index}].market"
-            ).lower()
+            derived_market, derived_submarket = _market_from_identity(identity)
+            if schema_version == RAW_SCHEMA_VERSION:
+                if "market" in request:
+                    raise FundamentalEvidenceError(
+                        f"candidate_support_requests[{index}] market must be derived from identity"
+                    )
+                market = derived_market
+            else:
+                market = _text(
+                    request.get("market"),
+                    f"candidate_support_requests[{index}].market",
+                ).lower()
+                if market != derived_market:
+                    raise FundamentalEvidenceError(
+                        f"candidate_support_requests[{index}] market conflicts with market identity"
+                    )
             selection = _text(
                 request.get("selection"),
                 f"candidate_support_requests[{index}].selection",
@@ -365,6 +468,12 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
             support_requests.append(
                 {
                     "market": market,
+                    **(
+                        {"submarket": derived_submarket}
+                        if schema_version == RAW_SCHEMA_VERSION
+                        and derived_submarket is not None
+                        else {}
+                    ),
                     "selection": selection,
                     "market_identity": identity,
                     "market_identity_hash": identity_hash,
@@ -377,10 +486,15 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
         "parser_version": (
             PARSER_VERSION
             if schema_version == RAW_SCHEMA_VERSION
-            else PREVIOUS_PARSER_VERSION
+            else (
+                PREVIOUS_DIRECTIONAL_PARSER_VERSION
+                if schema_version == PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION
+                else PREVIOUS_PARSER_VERSION
+            )
         ),
         "source_class": source_class,
-        "source_url": _url(payload.get("source_url")),
+        "source_adapter": source_adapter,
+        "source_url": source_url,
         "collected_at": collected.isoformat(),
         "fixture": normalized_fixture,
         "confirmed_lineups": normalized_lineups,
@@ -395,8 +509,11 @@ def parse_snapshot(raw: bytes) -> dict[str, Any]:
     }
     if schema_version == PREVIOUS_RAW_SCHEMA_VERSION:
         result.pop("source_class", None)
+        result.pop("source_adapter", None)
         result.pop("availability_claims", None)
         result.pop("candidate_support_requests", None)
+    elif schema_version == PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION:
+        result.pop("source_adapter", None)
     return result
 
 
@@ -430,7 +547,10 @@ def _goal_range_probability(rate: float, label: str) -> float | None:
 
 
 def _directional_support(
-    parsed: Mapping[str, Any], request: Mapping[str, Any]
+    parsed: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    enforce_minimum_samples: bool = False,
 ) -> tuple[bool, bool, dict[str, Any]]:
     market = str(request["market"])
     selection = str(request["selection"])
@@ -441,6 +561,24 @@ def _directional_support(
     if market in {"asian", "total", "goal_range", "btts"} and isinstance(
         chance, Mapping
     ):
+        if enforce_minimum_samples:
+            observed = {
+                side: int(chance[side]["sample_matches"]) for side in ("home", "away")
+            }
+            if any(
+                value < MINIMUM_DIRECTIONAL_SAMPLE_MATCHES
+                for value in observed.values()
+            ):
+                return (
+                    False,
+                    False,
+                    {
+                        "reason": "insufficient_sample_matches",
+                        "evidence_family": "chance_quality",
+                        "minimum_sample_matches": MINIMUM_DIRECTIONAL_SAMPLE_MATCHES,
+                        "observed_sample_matches": observed,
+                    },
+                )
         home_rate = (
             float(chance["home"]["xg_per_match"])
             + float(chance["away"]["xga_per_match"])
@@ -503,6 +641,24 @@ def _directional_support(
         and isinstance(corner, Mapping)
         and isinstance(line, (int, float))
     ):
+        if enforce_minimum_samples:
+            observed = {
+                side: int(corner[side]["sample_matches"]) for side in ("home", "away")
+            }
+            if any(
+                value < MINIMUM_DIRECTIONAL_SAMPLE_MATCHES
+                for value in observed.values()
+            ):
+                return (
+                    False,
+                    False,
+                    {
+                        "reason": "insufficient_sample_matches",
+                        "evidence_family": "corner_profile",
+                        "minimum_sample_matches": MINIMUM_DIRECTIONAL_SAMPLE_MATCHES,
+                        "observed_sample_matches": observed,
+                    },
+                )
         home_rate = (
             float(corner["home"]["corners_for_per_match"])
             + float(corner["away"]["corners_against_per_match"])
@@ -524,7 +680,7 @@ def _directional_support(
     return False, False, {"reason": "no_versioned_direction_rule_for_market"}
 
 
-def _rebuild_current(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _rebuild_directional_v2(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
     fixture = entries[0]["parsed"]["fixture"]
     ordered = sorted(
         entries,
@@ -589,7 +745,7 @@ def _rebuild_current(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
         )
         candidate_support[key] = {
             **deepcopy(request),
-            "rule_version": SUPPORT_RULE_VERSION,
+            "rule_version": PREVIOUS_SUPPORT_RULE_VERSION,
             "directionally_supported": directionally_supported,
             "formal_gate_eligible": False,
             "release_status": "shadow_only_pending_forward_validation",
@@ -606,6 +762,122 @@ def _rebuild_current(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
     availability["confirmed_lineups_available"] = merged_lineup is not None
     value: dict[str, Any] = {
+        "schema_version": PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
+        "artifact_type": "soccer_replayable_fundamental_evidence",
+        "parser_version": PREVIOUS_DIRECTIONAL_PARSER_VERSION,
+        "fixture": fixture,
+        "generated_at": max(item["parsed"]["collected_at"] for item in ordered),
+        "sources": ordered,
+        "availability_claims": availability,
+        "confirmed_lineup_consensus": merged_lineup,
+        "candidate_support_rule_version": PREVIOUS_SUPPORT_RULE_VERSION,
+        "candidate_support": candidate_support,
+        "replay_policy": (
+            "reparse_sources_fail_closed_on_lineup_conflict_and_recompute_directional_support"
+        ),
+    }
+    value["evidence_hash"] = _hash_json(value)
+    return value
+
+
+def _rebuild_current(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Build v3 shadow evidence with adapter and minimum-sample enforcement."""
+
+    fixture = entries[0]["parsed"]["fixture"]
+    ordered = sorted(
+        entries,
+        key=lambda item: (
+            item["parsed"]["collected_at"],
+            item["parsed"]["source_url"],
+            item["raw_response_sha256"],
+        ),
+    )
+    confirmed = [
+        item["parsed"]["confirmed_lineups"]
+        for item in ordered
+        if item["parsed"]["confirmed_lineups"] is not None
+    ]
+    canonical_lineups = [
+        {side: sorted(lineup[side]) for side in ("home", "away")}
+        for lineup in confirmed
+    ]
+    if canonical_lineups and any(
+        item != canonical_lineups[0] for item in canonical_lineups[1:]
+    ):
+        raise FundamentalEvidenceError("confirmed lineup sources conflict")
+    merged_lineup = canonical_lineups[0] if canonical_lineups else None
+    if merged_lineup is not None:
+        for item in ordered:
+            attack = item["parsed"].get("attack_configuration")
+            if not isinstance(attack, Mapping):
+                continue
+            for side in ("home", "away"):
+                if not set(attack[side]["recognized_attackers"]).issubset(
+                    set(merged_lineup[side])
+                ):
+                    raise FundamentalEvidenceError(
+                        "recognized attackers conflict with the confirmed lineup"
+                    )
+    requests: dict[str, dict[str, Any]] = {}
+    for item in ordered:
+        for request in item["parsed"]["candidate_support_requests"]:
+            key = request["support_key"]
+            if key in requests and requests[key] != request:
+                raise FundamentalEvidenceError(
+                    "candidate support request identity conflicts"
+                )
+            requests[key] = request
+    candidate_support: dict[str, dict[str, Any]] = {}
+    for key, request in sorted(requests.items()):
+        evaluations = []
+        for item in ordered:
+            available, supported, metrics = _directional_support(
+                item["parsed"], request, enforce_minimum_samples=True
+            )
+            evaluations.append(
+                {
+                    "source_sha256": item["raw_response_sha256"],
+                    "available": available,
+                    "supported": supported,
+                    "metrics": metrics,
+                }
+            )
+        usable = [item for item in evaluations if item["available"]]
+        directionally_supported = bool(usable) and all(
+            item["supported"] for item in usable
+        )
+        unavailable_reasons = sorted(
+            {
+                str(item["metrics"].get("reason") or "evidence_unavailable")
+                for item in evaluations
+                if not item["available"]
+            }
+        )
+        reason = (
+            "direction_supported_in_shadow"
+            if directionally_supported
+            else (
+                "insufficient_sample_matches"
+                if "insufficient_sample_matches" in unavailable_reasons and not usable
+                else "direction_not_supported_or_evidence_unavailable"
+            )
+        )
+        candidate_support[key] = {
+            **deepcopy(request),
+            "rule_version": SUPPORT_RULE_VERSION,
+            "minimum_sample_matches": MINIMUM_DIRECTIONAL_SAMPLE_MATCHES,
+            "directionally_supported": directionally_supported,
+            "formal_gate_eligible": False,
+            "release_status": "shadow_only_pending_forward_validation",
+            "source_evaluations": evaluations,
+            "reason": reason,
+        }
+    availability = {
+        field: any(item["parsed"]["availability_claims"][field] for item in ordered)
+        for field in AVAILABILITY_CLAIM_FIELDS
+    }
+    availability["confirmed_lineups_available"] = merged_lineup is not None
+    value: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "artifact_type": "soccer_replayable_fundamental_evidence",
         "parser_version": PARSER_VERSION,
@@ -615,9 +887,11 @@ def _rebuild_current(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "availability_claims": availability,
         "confirmed_lineup_consensus": merged_lineup,
         "candidate_support_rule_version": SUPPORT_RULE_VERSION,
+        "candidate_support_minimum_sample_matches": MINIMUM_DIRECTIONAL_SAMPLE_MATCHES,
         "candidate_support": candidate_support,
         "replay_policy": (
-            "reparse_sources_fail_closed_on_lineup_conflict_and_recompute_directional_support"
+            "reparse_registered_adapter_sources_fail_closed_on_lineup_conflict_"
+            "minimum_samples_and_recompute_directional_support"
         ),
     }
     value["evidence_hash"] = _hash_json(value)
@@ -635,6 +909,8 @@ def _rebuild(entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
         raise FundamentalEvidenceError("fundamental evidence cannot mix source schemas")
     if schemas == {RAW_SCHEMA_VERSION}:
         return _rebuild_current(entries)
+    if schemas == {PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION}:
+        return _rebuild_directional_v2(entries)
     if schemas != {PREVIOUS_RAW_SCHEMA_VERSION}:
         raise FundamentalEvidenceError("fundamental source schema is unsupported")
     ordered = sorted(
@@ -708,6 +984,7 @@ def validate_evidence_file(path: str | Path) -> dict[str, Any]:
         ) from exc
     if not isinstance(value, Mapping) or value.get("schema_version") not in {
         PREVIOUS_EVIDENCE_SCHEMA_VERSION,
+        PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
         EVIDENCE_SCHEMA_VERSION,
     }:
         raise FundamentalEvidenceError(

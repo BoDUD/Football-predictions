@@ -14,7 +14,10 @@ class FundamentalEvidenceTests(unittest.TestCase):
         players = [f"Player {index}" for index in range(1, 12)]
         return {
             "schema_version": fundamental_evidence.RAW_SCHEMA_VERSION,
-            "source_class": "official_confirmed",
+            "source_adapter_id": "titan007-match-analysis-v1",
+            "source_adapter_parser_version": (
+                "titan007-visible-fundamental-adapter/1.0.0"
+            ),
             "source_url": "https://zq.titan007.com/analysis/2910001cn.htm",
             "collected_at": "2026-08-08T10:00:00Z",
             "fixture": {
@@ -116,7 +119,11 @@ class FundamentalEvidenceTests(unittest.TestCase):
         self,
     ) -> None:
         predicted = self._snapshot()
-        predicted["source_class"] = "predicted_lineup"
+        predicted["source_adapter_id"] = "sofascore-statistics-v1"
+        predicted["source_adapter_parser_version"] = (
+            "sofascore-visible-fundamental-adapter/1.0.0"
+        )
+        predicted["source_url"] = "https://www.sofascore.com/match/2910001"
         with self.assertRaisesRegex(
             fundamental_evidence.FundamentalEvidenceError,
             "can confirm lineups",
@@ -138,7 +145,7 @@ class FundamentalEvidenceTests(unittest.TestCase):
             base = Path(temporary)
             first = self._snapshot()
             second = self._snapshot()
-            second["source_url"] = "https://provider.example/fixture/2910001"
+            second["source_url"] = "https://www.titan007.com/fixture/2910001"
             second["collected_at"] = "2026-08-08T10:01:00Z"
             second["confirmed_lineups"]["home"][-1] = "Different Starter"
             first_path = base / "first.json"
@@ -166,7 +173,6 @@ class FundamentalEvidenceTests(unittest.TestCase):
         snapshot = self._snapshot()
         snapshot["candidate_support_requests"] = [
             {
-                "market": "total",
                 "selection": selection,
                 "market_identity": identity,
                 "market_identity_hash": identity_hash,
@@ -202,7 +208,6 @@ class FundamentalEvidenceTests(unittest.TestCase):
         snapshot["chance_quality"]["away"].update(xg_per_match=0.6, xga_per_match=1.8)
         snapshot["candidate_support_requests"] = [
             {
-                "market": "asian",
                 "selection": "home",
                 "market_identity": identity,
                 "market_identity_hash": identity_hash,
@@ -235,7 +240,117 @@ class FundamentalEvidenceTests(unittest.TestCase):
             )
         item = evidence["candidate_support"][f"{identity_hash}:home"]
         self.assertFalse(item["directionally_supported"])
-        self.assertEqual(item["source_evaluations"], [])
+        self.assertFalse(item["source_evaluations"][0]["available"])
+        self.assertEqual(
+            item["source_evaluations"][0]["metrics"]["reason"],
+            "opponent_tail_risk_check_unavailable",
+        )
+
+    def test_current_market_is_derived_and_low_sample_is_distinctly_unavailable(
+        self,
+    ) -> None:
+        identity = {
+            "family": "total",
+            "period": "full_time",
+            "line": 2.5,
+            "price_outcomes": ["over", "under"],
+        }
+        identity_hash = source_evidence.market_identity_hash(identity)
+        snapshot = self._snapshot()
+        snapshot["chance_quality"]["away"]["sample_matches"] = 4
+        snapshot["candidate_support_requests"] = [
+            {
+                "selection": "over",
+                "market_identity": identity,
+                "market_identity_hash": identity_hash,
+            }
+        ]
+        parsed = fundamental_evidence.parse_snapshot(json.dumps(snapshot).encode())
+        self.assertEqual(parsed["candidate_support_requests"][0]["market"], "total")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source.json"
+            source.write_text(json.dumps(snapshot), encoding="utf-8")
+            _path, evidence = fundamental_evidence.build_evidence(
+                [source], output_dir=base / "evidence"
+            )
+        item = evidence["candidate_support"][f"{identity_hash}:over"]
+        self.assertEqual(
+            item["rule_version"], fundamental_evidence.SUPPORT_RULE_VERSION
+        )
+        self.assertEqual(item["minimum_sample_matches"], 5)
+        self.assertEqual(item["reason"], "insufficient_sample_matches")
+        self.assertFalse(item["source_evaluations"][0]["available"])
+
+        mismatched = self._snapshot()
+        mismatched["candidate_support_requests"] = [
+            {
+                "market": "asian",
+                "selection": "over",
+                "market_identity": identity,
+                "market_identity_hash": identity_hash,
+            }
+        ]
+        with self.assertRaisesRegex(
+            fundamental_evidence.FundamentalEvidenceError, "must be derived"
+        ):
+            fundamental_evidence.parse_snapshot(json.dumps(mismatched).encode())
+
+    def test_current_source_class_is_derived_from_registered_adapter(self) -> None:
+        snapshot = self._snapshot()
+        snapshot["source_class"] = "official_confirmed"
+        with self.assertRaisesRegex(
+            fundamental_evidence.FundamentalEvidenceError, "derive source_class"
+        ):
+            fundamental_evidence.parse_snapshot(json.dumps(snapshot).encode())
+
+        wrong_host = self._snapshot()
+        wrong_host["source_url"] = "https://example.test/2910001"
+        with self.assertRaisesRegex(
+            fundamental_evidence.FundamentalEvidenceError, "registered source adapter"
+        ):
+            fundamental_evidence.parse_snapshot(json.dumps(wrong_host).encode())
+
+    def test_v2_directional_evidence_remains_read_only_replayable(self) -> None:
+        identity = {
+            "family": "total",
+            "period": "full_time",
+            "line": 2.5,
+            "price_outcomes": ["over", "under"],
+        }
+        snapshot = self._snapshot()
+        snapshot["schema_version"] = (
+            fundamental_evidence.PREVIOUS_DIRECTIONAL_RAW_SCHEMA_VERSION
+        )
+        snapshot.pop("source_adapter_id")
+        snapshot.pop("source_adapter_parser_version")
+        snapshot["source_class"] = "verified_provider"
+        snapshot["candidate_support_requests"] = [
+            {
+                "market": "total",
+                "selection": "over",
+                "market_identity": identity,
+                "market_identity_hash": source_evidence.market_identity_hash(identity),
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source.json"
+            source.write_text(json.dumps(snapshot), encoding="utf-8")
+            path, evidence = fundamental_evidence.build_evidence(
+                [source], output_dir=base / "evidence"
+            )
+            self.assertEqual(
+                evidence["schema_version"],
+                fundamental_evidence.PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                evidence["candidate_support_rule_version"],
+                fundamental_evidence.PREVIOUS_SUPPORT_RULE_VERSION,
+            )
+            self.assertEqual(
+                fundamental_evidence.validate_evidence_file(path), evidence
+            )
 
 
 if __name__ == "__main__":

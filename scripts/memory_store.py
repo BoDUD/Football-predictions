@@ -258,22 +258,40 @@ DEFAULT_GUARDRAILS = [
     "深盘、大小球、伤停冲突与精确比分继续执行专项保护；没有安全候选时允许无主推，不强行下注。",
 ]
 LEAGUE_ALIASES = {
-    "韩国K联": "韩K联",
-    "韩国K联赛": "韩K联",
-    "K联赛": "韩K联",
+    "巴甲": "brazil_serie_a",
+    "巴西联赛": "brazil_serie_a",
+    "日职": "japan_j1",
+    "挪超": "norway_eliteserien",
+    "美职联": "usa_mls",
+    "芬超": "finland_veikkausliiga",
+    "韩K联": "korea_k_league_1",
+    "韩国K联": "korea_k_league_1",
+    "韩国K联赛": "korea_k_league_1",
+    "K联赛": "korea_k_league_1",
+    "瑞典超": "sweden_allsvenskan",
+    "英超": "england_premier_league",
     "巴西杯": "brazil_cup",
     "英联杯": "england_league_cup",
     "英格兰联赛杯": "england_league_cup",
     "EFLCup": "england_league_cup",
     "LeagueCup": "england_league_cup",
     "CarabaoCup": "england_league_cup",
-    "荷乙": "荷乙",
-    "EersteDivisie": "荷乙",
-    "KeukenKampioenDivisie": "荷乙",
-    "NetherlandsEersteDivisie": "荷乙",
-    "葡萄牙超级联赛": "葡超",
-    "PrimeiraLiga": "葡超",
-    "LigaPortugal": "葡超",
+    "荷乙": "netherlands_eerste_divisie",
+    "EersteDivisie": "netherlands_eerste_divisie",
+    "KeukenKampioenDivisie": "netherlands_eerste_divisie",
+    "NetherlandsEersteDivisie": "netherlands_eerste_divisie",
+    "法甲": "france_ligue_1",
+    "西甲": "spain_la_liga",
+    "德甲": "germany_bundesliga",
+    "意甲": "italy_serie_a",
+    "葡超": "portugal_primeira_liga",
+    "葡萄牙超级联赛": "portugal_primeira_liga",
+    "PrimeiraLiga": "portugal_primeira_liga",
+    "LigaPortugal": "portugal_primeira_liga",
+    "欧冠": "uefa_champions_league",
+    "欧联": "uefa_europa_league",
+    "亚冠": "afc_champions_league",
+    "欧国联": "uefa_nations_league",
 }
 LEAGUE_STAGE_SUFFIX = re.compile(
     r"(?:"
@@ -3099,7 +3117,11 @@ def candidate_directional_fundamental_support(
         or item.get("market_identity_hash") != identity_hash
         or item.get("selection") != selection
         or item.get("market_identity") != candidate.get("market_identity")
+        or item.get("market") != str(candidate.get("market") or "").lower()
+        or item.get("submarket") != candidate.get("submarket")
         or item.get("rule_version") != fundamental_evidence.SUPPORT_RULE_VERSION
+        or item.get("minimum_sample_matches")
+        != fundamental_evidence.MINIMUM_DIRECTIONAL_SAMPLE_MATCHES
     ):
         return None
     return deepcopy(item)
@@ -3117,10 +3139,10 @@ def formal_candidate_directional_support(
             and support.get("formal_gate_eligible") is True
         )
     audit = validated_fundamental_evidence_audit(record)
-    if (
-        isinstance(audit, dict)
-        and audit.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION
-    ):
+    if isinstance(audit, dict) and audit.get("schema_version") in {
+        fundamental_evidence.PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
+        fundamental_evidence.EVIDENCE_SCHEMA_VERSION,
+    }:
         return False
     evidence = record.get("guardrail_evidence", {})
     candidate_market = str(market or candidate.get("market") or "")
@@ -3998,7 +4020,7 @@ def load_fundamental_evidence_audit(
         != fundamental_evidence.EVIDENCE_SCHEMA_VERSION
     ):
         raise ValueError(
-            "active untouched live-forward cohort requires candidate-directional fundamental-evidence/2"
+            "active untouched live-forward cohort requires adapter-bound candidate-directional fundamental-evidence/3"
         )
     fixture = evidence.get("fixture")
     if not isinstance(fixture, dict):
@@ -4031,10 +4053,11 @@ def load_fundamental_evidence_audit(
         )
     if generated_at > archived_at:
         raise ValueError("fundamental evidence cannot be generated after archive time")
-    current_evidence = (
-        evidence.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION
-    )
-    if current_evidence:
+    directional_evidence = evidence.get("schema_version") in {
+        fundamental_evidence.PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
+        fundamental_evidence.EVIDENCE_SCHEMA_VERSION,
+    }
+    if directional_evidence:
         availability = evidence.get("availability_claims")
         candidate_support = evidence.get("candidate_support")
         if not isinstance(availability, dict) or set(availability) != set(
@@ -4083,6 +4106,7 @@ def validated_fundamental_evidence_audit(
         or audit.get("schema_version")
         not in {
             fundamental_evidence.PREVIOUS_EVIDENCE_SCHEMA_VERSION,
+            fundamental_evidence.PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
             fundamental_evidence.EVIDENCE_SCHEMA_VERSION,
         }
         or audit.get("kind") != "replayable_fundamental_evidence"
@@ -4107,7 +4131,10 @@ def validated_fundamental_evidence_audit(
     for field in ("match_id", "home_team", "away_team"):
         if str(fixture.get(field) or "") != str(context.get(field) or ""):
             return None
-    if replayed.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION:
+    if replayed.get("schema_version") in {
+        fundamental_evidence.PREVIOUS_DIRECTIONAL_EVIDENCE_SCHEMA_VERSION,
+        fundamental_evidence.EVIDENCE_SCHEMA_VERSION,
+    }:
         claims = {field: False for field in fundamental_evidence.CLAIM_FIELDS}
         if (
             replayed.get("availability_claims") != audit.get("availability_claims")
@@ -8188,7 +8215,10 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, An
             request.get("request_event_hash"),
             "forward cohort request event hash",
         )
-        if request.get("schema_version") == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION:
+        if request.get("schema_version") in {
+            cohort_scope.PREVIOUS_FULL_REQUEST_BINDING_SCHEMA_VERSION,
+            cohort_scope.REQUEST_BINDING_SCHEMA_VERSION,
+        }:
             fixture = request.get("fixture")
             if not isinstance(fixture, dict):
                 raise ValueError("Forward cohort request fixture is missing")
@@ -8205,6 +8235,11 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, An
                     ),
                 }
             )
+            if (
+                request.get("schema_version")
+                == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION
+            ):
+                entry["fixture_event_at"] = str(request.get("fixture_event_at") or "")
     return entry
 
 
@@ -8478,14 +8513,24 @@ def _denominator_for_records(
         key=lambda item: item["fixture_id"],
     )
     try:
+        event_binding = {
+            "cohort_hash": cohort["cohort_hash"],
+            "policy_id": cohort["policy_id"],
+            "policy_hash": cohort["policy_hash"],
+            "starts_at": cohort["starts_at"],
+        }
         events = cohort_scope.load_events(
-            base_dir, str(cohort["cohort_id"]), scope=scope
+            base_dir,
+            str(cohort["cohort_id"]),
+            scope=scope,
+            cohort_binding=event_binding,
         )
         return cohort_scope.build_denominator(
             scope=scope,
             cohort_id=str(cohort["cohort_id"]),
             events=events,
             record_manifest={"records": receipt_entries},
+            cohort_binding=event_binding,
         )
     except cohort_scope.CohortScopeError as exc:
         raise ValueError(
@@ -8831,13 +8876,14 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
 
     current = utc_now()
     time_metadata = validate_record_time_metadata(args, current)
-    timestamp = current.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    timestamp = current.astimezone(timezone.utc).isoformat()
+    league_key = normalize_league_name(getattr(args, "league_key", None) or args.league)
     base_forward_binding = forward_policy.load_active_binding(
         base_dir=args.base_dir or Path.cwd(),
         repo_root=Path(__file__).resolve().parents[1],
         archived_at=timestamp,
         fixture_id=str(args.match_id),
-        competition_key=normalize_league_name(args.league),
+        competition_key=league_key,
         home_team=args.home_team,
         away_team=args.away_team,
         kickoff=time_metadata["kickoff"],
@@ -8879,7 +8925,7 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         "status": "pending",
         "analysis_stage": args.analysis_stage,
         "league": args.league,
-        "league_key": normalize_league_name(args.league),
+        "league_key": league_key,
         "kickoff": time_metadata["kickoff"],
         "page_status": time_metadata["page_status"],
         "source_kickoff": time_metadata["source_kickoff"],
@@ -12537,6 +12583,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--analysis-stage", choices=("initial", "lineup-check"), default="initial"
     )
     record.add_argument("--league", required=True)
+    record.add_argument(
+        "--league-key",
+        help="canonical model/registry key; defaults to normalized --league",
+    )
     record.add_argument(
         "--kickoff",
         required=True,

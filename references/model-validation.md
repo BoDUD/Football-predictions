@@ -441,15 +441,20 @@ until an external service is actually configured, and it remains a mandatory pre
 `promotable-confirmation-v2` rather than an optional promotion enhancement. Legacy
 `source-evidence/1.0.0` is historical read-only and cannot satisfy an active cohort.
 
-Current active records additionally require `fundamental-evidence/2.0.0`. Build it from one or
+Current active records additionally require `fundamental-evidence/3.0.0`. Build it from one or
 more saved visible pre-kickoff exports and pass it with `--fundamental-evidence-file`. Replay
 separates mere field availability from exact candidate-direction support keyed by
-`market_identity_hash + selection`. Sources declare an `official_confirmed`,
-`verified_provider`, `predicted_lineup`, or `statistical_provider` class; only the first two may
-confirm a lineup, recognized attackers must be confirmed starters, and conflicting confirmed
-lineups fail closed. Versioned rules evaluate totals/BTTS/goal ranges, corner totals, and deep
-Asian goal-margin/tail-risk evidence in the candidate's actual direction. Availability claims
-and command-line booleans cannot unlock a gate. These new directional rules remain
+`market_identity_hash + selection`. A current source supplies a registered adapter ID and adapter
+parser version; the adapter registry verifies the source host/domain and derives the source class.
+The caller cannot self-report `source_class`, and each evidence source remains bound to the
+content-addressed raw-export SHA-256. Candidate market is derived from canonical `{family,
+period, line, price_outcomes}` identity and must also equal the archived candidate market.
+Recognized attackers must be confirmed starters, and conflicting confirmed lineups fail closed.
+Versioned rules evaluate totals/BTTS/goal ranges, corner totals, and deep Asian
+goal-margin/tail-risk evidence in the candidate's actual direction, with at least five source
+matches for both sides. Smaller samples are recorded as `insufficient_sample_matches`, not as
+directional evidence. Availability claims and command-line booleans cannot unlock a gate. These
+new directional rules remain
 `shadow_only_pending_forward_validation` and cannot create a formal primary in this release.
 The adapter preserves raw exported JSON plus metadata, but it is not a generic raw-HTTP-body
 collector. That limitation, external timestamping, and the missing independent closing snapshot
@@ -494,10 +499,10 @@ explicit settled-or-pending settlement per key; caller-chosen duplicate observat
 retrospective generation, late market snapshots and post-result edits to model probabilities fail
 closed. Close the cohort only through `memory_store.py close-forward-cohort`. It holds the history
 lock while selecting every bound record in the named cohort, writes a canonical
-`live-forward-record-manifest/2.0.0`, embeds that manifest in the
+`live-forward-record-manifest/2.1.0`, embeds that manifest in the
 `live-forward-cohort-closure/2.0.0`, and closes the active pointer before releasing the lock. Each
 canonically sorted manifest entry binds the fixture ID, original request fixture ID, current full
-fixture, request and fixture event hashes, execution receipt identities, archive-version hash,
+fixture, request and fixture event hashes, latest fixture event time, execution receipt identities, archive-version hash,
 record-commitment hash, committed-binding hash, and pre-match-ledger hash. The lower-level
 `forward_policy.py close`
 requires this manifest explicitly; a preview manifest followed by a later close is not the formal
