@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.8.0] - 2026-08-08
+
+- Hardened active forward cohorts with full fixture-bound request events, explicit reschedule/replacement transitions, strict archive ordering, verified model-unavailable dispositions, and cohort-wide firm receipt uniqueness.
+- Added candidate-directional, source-classed fundamental evidence as a versioned shadow contract; conflicting confirmed lineups and unrecognized starters now fail closed without promoting the new rule to formal release.
+- Added semantic model-manager verification receipts to artifact lineage and separated accepted firm execution prices from decision-time consensus no-vig probabilities.
+
 Released-version entries below describe historical behavior and are superseded by newer entries when policies change.
 
 ## [Unreleased]

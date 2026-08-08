@@ -34,7 +34,8 @@ LEGACY_COHORT_SCHEMA_VERSION = "live-forward-cohort/1.0.0"
 COHORT_SCHEMA_VERSION = "live-forward-cohort/2.0.0"
 LEGACY_CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/1.0.0"
 CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.0.0"
-RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/1.0.0"
+PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/1.0.0"
+RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/2.0.0"
 POLICY_ID_PREFIX = "untouched-live-forward"
 ACTIVE_COHORT_NAME = "active-forward-cohort.json"
 RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/1.0.0"
@@ -908,6 +909,13 @@ def validate_active_runtime_policy_manifest(
                 f"frozen {section} artifact is missing or changed: {artifact_path}"
             )
     if _policy_uses_role_aware_lineage(value):
+        if (
+            value["artifact_lineage"].get("schema_version")
+            != artifact_lineage.SCHEMA_VERSION
+        ):
+            raise ForwardPolicyError(
+                "historical artifact lineage is read-only and cannot start or serve an active cohort"
+            )
         try:
             artifact_lineage.verify_files(value["artifact_lineage"], repo_root=root)
         except artifact_lineage.ArtifactLineageError as exc:
@@ -1248,6 +1256,10 @@ def start_cohort(
                 "an active live-forward cohort already exists; close it before starting another"
             )
     clean_id = _require_cohort_id(cohort_id)
+    if cohort_scope.denominator_event_path(base_dir, clean_id).exists():
+        raise ForwardPolicyError(
+            "cohort denominator log already exists before cohort start"
+        )
     policy_path = _require_canonical_policy_file(base_dir, policy_file)
     raw_policy = _read_json(policy_path, "policy file")
     historical_policy = validate_policy_manifest(raw_policy)
@@ -1336,7 +1348,11 @@ def validate_record_manifest(
         required.update({"denominator", "denominator_hash"})
     if set(value) != required:
         raise ForwardPolicyError("live-forward record manifest fields are incomplete")
-    if value.get("schema_version") != RECORD_MANIFEST_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {
+        PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION,
+        RECORD_MANIFEST_SCHEMA_VERSION,
+    }:
         raise ForwardPolicyError(
             "unsupported live-forward record manifest schema_version"
         )
@@ -1359,7 +1375,7 @@ def validate_record_manifest(
     raw_records = value.get("records")
     if not isinstance(raw_records, list):
         raise ForwardPolicyError("live-forward record manifest records must be a list")
-    normalized_records: list[dict[str, str]] = []
+    normalized_records: list[dict[str, Any]] = []
     fixture_ids: list[str] = []
     entry_fields = {
         "fixture_id",
@@ -1370,21 +1386,100 @@ def validate_record_manifest(
     }
     if has_denominator:
         entry_fields.add("request_event_hash")
+    if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+        entry_fields.update(
+            {
+                "request_fixture_id",
+                "fixture",
+                "fixture_event_hash",
+                "execution_receipt_hashes",
+            }
+        )
     for index, raw_entry in enumerate(raw_records):
         if not isinstance(raw_entry, Mapping) or set(raw_entry) != entry_fields:
             raise ForwardPolicyError(
                 f"live-forward record manifest records[{index}] fields are incomplete"
             )
-        entry = {field: str(raw_entry.get(field) or "") for field in entry_fields}
+        entry = deepcopy(dict(raw_entry))
         fixture_id = entry["fixture_id"]
         if not fixture_id:
             raise ForwardPolicyError(
                 f"live-forward record manifest records[{index}].fixture_id is missing"
             )
-        for field in entry_fields - {"fixture_id"}:
+        hash_fields = {
+            "archive_version_hash",
+            "record_commitment_hash",
+            "record_binding_hash",
+            "prematch_ledger_hash",
+        }
+        if has_denominator:
+            hash_fields.add("request_event_hash")
+        if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+            hash_fields.add("fixture_event_hash")
+        for field in hash_fields:
             _require_sha256(
                 entry[field], f"live-forward record manifest records[{index}].{field}"
             )
+        if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+            if not str(entry.get("request_fixture_id") or ""):
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].request_fixture_id is missing"
+                )
+            fixture = entry.get("fixture")
+            if not isinstance(fixture, Mapping) or set(fixture) != {
+                "fixture_id",
+                "competition_key",
+                "home_team",
+                "away_team",
+                "kickoff",
+            }:
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].fixture is invalid"
+                )
+            if str(fixture.get("fixture_id") or "") != fixture_id:
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].fixture_id does not bind fixture"
+                )
+            kickoff = _aware_datetime(
+                fixture.get("kickoff"),
+                f"live-forward record manifest records[{index}].fixture.kickoff",
+            )
+            competition_key = str(fixture.get("competition_key") or "")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", competition_key):
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].fixture.competition_key is invalid"
+                )
+            home_team = " ".join(str(fixture.get("home_team") or "").split())
+            away_team = " ".join(str(fixture.get("away_team") or "").split())
+            if not home_team or not away_team:
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].fixture teams are missing"
+                )
+            entry["fixture"] = {
+                "fixture_id": fixture_id,
+                "competition_key": competition_key,
+                "home_team": home_team,
+                "away_team": away_team,
+                "kickoff": kickoff.isoformat(),
+            }
+            raw_receipts = entry.get("execution_receipt_hashes")
+            if not isinstance(raw_receipts, list):
+                raise ForwardPolicyError(
+                    f"live-forward record manifest records[{index}].execution_receipt_hashes is invalid"
+                )
+            receipt_hashes = [
+                _require_sha256(
+                    item,
+                    f"live-forward record manifest records[{index}].execution_receipt_hashes",
+                )
+                for item in raw_receipts
+            ]
+            if receipt_hashes != sorted(set(receipt_hashes)):
+                raise ForwardPolicyError(
+                    "live-forward execution receipt identities must be unique and sorted"
+                )
+            entry["request_fixture_id"] = str(entry["request_fixture_id"])
+            entry["execution_receipt_hashes"] = receipt_hashes
         fixture_ids.append(fixture_id)
         normalized_records.append(entry)
     if fixture_ids != sorted(fixture_ids) or len(set(fixture_ids)) != len(fixture_ids):
@@ -1448,6 +1543,33 @@ def validate_record_manifest(
             raise ForwardPolicyError(
                 "record manifest request bindings do not match the denominator event log"
             )
+        if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+            recorded_entries = {
+                str(item.get("fixture_id") or ""): item
+                for item in denominator_entries
+                if isinstance(item, Mapping) and item.get("disposition") == "recorded"
+            }
+            for entry in normalized_records:
+                denominator_entry = recorded_entries[entry["fixture_id"]]
+                if (
+                    entry["request_fixture_id"]
+                    != str(denominator_entry.get("request_fixture_id") or "")
+                    or entry["fixture"] != denominator_entry.get("fixture")
+                    or entry["fixture_event_hash"]
+                    != denominator_entry.get("fixture_event_hash")
+                ):
+                    raise ForwardPolicyError(
+                        "record manifest fixture binding does not match the denominator event log"
+                    )
+            receipt_hashes = [
+                receipt_hash
+                for entry in normalized_records
+                for receipt_hash in entry["execution_receipt_hashes"]
+            ]
+            if len(receipt_hashes) != len(set(receipt_hashes)):
+                raise ForwardPolicyError(
+                    "cohort record manifest reuses one firm/account/receipt identity"
+                )
 
     if cohort is not None:
         frozen = validate_cohort(cohort)
@@ -1727,6 +1849,10 @@ def load_active_binding(
     repo_root: str | Path,
     archived_at: str | datetime,
     fixture_id: str | None = None,
+    competition_key: str | None = None,
+    home_team: str | None = None,
+    away_team: str | None = None,
+    kickoff: str | datetime | None = None,
     observation_commitment_hash: str | None = None,
 ) -> dict[str, Any] | None:
     path = active_cohort_path(base_dir)
@@ -1773,6 +1899,24 @@ def load_active_binding(
         raise ForwardPolicyError(
             "record predates the active untouched live-forward cohort"
         )
+    expected_fixture = None
+    if fixture_id is not None:
+        if None in {competition_key, home_team, away_team, kickoff}:
+            raise ForwardPolicyError(
+                "denominator fixture binding requires competition, teams, and kickoff"
+            )
+        kickoff_time = _aware_datetime(kickoff, "fixture.kickoff")
+        if archived >= kickoff_time:
+            raise ForwardPolicyError(
+                "record archive must be strictly earlier than fixture kickoff"
+            )
+        expected_fixture = {
+            "fixture_id": str(fixture_id),
+            "competition_key": str(competition_key),
+            "home_team": " ".join(str(home_team or "").split()),
+            "away_team": " ".join(str(away_team or "").split()),
+            "kickoff": kickoff_time.replace(microsecond=0).isoformat(),
+        }
     root = Path(repo_root).resolve()
     current_commit = _require_git_commit(
         _git(root, "rev-parse", "HEAD"), "recorded code commit"
@@ -1817,6 +1961,13 @@ def load_active_binding(
                     cohort_id=str(cohort["cohort_id"]),
                     scope=policy["cohort_scope"]["scope_snapshot"],
                     fixture_id=str(fixture_id),
+                    expected_fixture=expected_fixture,
+                    cohort_binding={
+                        "cohort_hash": cohort["cohort_hash"],
+                        "policy_id": policy["policy_id"],
+                        "policy_hash": policy["policy_hash"],
+                        "starts_at": cohort["starts_at"],
+                    },
                 )
             except cohort_scope.CohortScopeError as exc:
                 raise ForwardPolicyError(
@@ -1983,20 +2134,50 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
             schema_version == PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION
         )
         if role_aware_release and (committed_current or request is not None):
-            if not isinstance(request, Mapping) or set(request) != {
-                "schema_version",
-                "scope_id",
-                "scope_hash",
-                "fixture_id",
-                "request_event_hash",
-                "requested_at",
-            }:
+            if not isinstance(request, Mapping):
                 raise ForwardPolicyError(
                     "record binding cohort request identity is incomplete"
                 )
-            if request.get("schema_version") != "forward-cohort-request-binding/1.0.0":
+            request_schema = request.get("schema_version")
+            expected_request_fields = (
+                {
+                    "schema_version",
+                    "scope_id",
+                    "scope_hash",
+                    "fixture_id",
+                    "request_event_hash",
+                    "requested_at",
+                }
+                if request_schema
+                == cohort_scope.PREVIOUS_REQUEST_BINDING_SCHEMA_VERSION
+                else {
+                    "schema_version",
+                    "scope_id",
+                    "scope_hash",
+                    "request_fixture_id",
+                    "fixture",
+                    "request_event_hash",
+                    "fixture_event_hash",
+                    "requested_at",
+                }
+            )
+            if set(request) != expected_request_fields:
+                raise ForwardPolicyError(
+                    "record binding cohort request identity is incomplete"
+                )
+            if request_schema not in {
+                cohort_scope.PREVIOUS_REQUEST_BINDING_SCHEMA_VERSION,
+                cohort_scope.REQUEST_BINDING_SCHEMA_VERSION,
+            }:
                 raise ForwardPolicyError(
                     "record binding cohort request schema is invalid"
+                )
+            if (
+                _release_at_least(policy["software"]["package_version"], (3, 8, 0))
+                and request_schema != cohort_scope.REQUEST_BINDING_SCHEMA_VERSION
+            ):
+                raise ForwardPolicyError(
+                    "current runtime record binding requires full fixture request identity"
                 )
             if (
                 request.get("scope_id") != policy["cohort_scope"]["scope_id"]
@@ -2009,13 +2190,55 @@ def validate_record_binding(binding: Any) -> dict[str, Any] | None:
                 request.get("request_event_hash"),
                 "record binding cohort request_event_hash",
             )
+            if request_schema == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION:
+                _require_cohort_id(
+                    request.get("request_fixture_id"),
+                    "record binding cohort request_fixture_id",
+                )
+                _require_sha256(
+                    request.get("fixture_event_hash"),
+                    "record binding cohort fixture_event_hash",
+                )
+                fixture = request.get("fixture")
+                if not isinstance(fixture, Mapping) or set(fixture) != {
+                    "fixture_id",
+                    "competition_key",
+                    "home_team",
+                    "away_team",
+                    "kickoff",
+                }:
+                    raise ForwardPolicyError(
+                        "record binding cohort request fixture is incomplete"
+                    )
+                _require_cohort_id(
+                    fixture.get("fixture_id"), "record binding request fixture_id"
+                )
+                _require_cohort_id(
+                    fixture.get("competition_key"),
+                    "record binding request competition_key",
+                )
+                if (
+                    not str(fixture.get("home_team") or "").strip()
+                    or not str(fixture.get("away_team") or "").strip()
+                ):
+                    raise ForwardPolicyError(
+                        "record binding request fixture teams are missing"
+                    )
+                kickoff = _aware_datetime(
+                    str(fixture.get("kickoff") or ""),
+                    "record binding request kickoff",
+                )
+                if archived >= kickoff:
+                    raise ForwardPolicyError(
+                        "record binding archive is not strictly before kickoff"
+                    )
             requested_at = _aware_datetime(
                 str(request.get("requested_at") or ""),
                 "record binding requested_at",
             )
-            if requested_at > archived:
+            if requested_at >= archived:
                 raise ForwardPolicyError(
-                    "record binding cohort request was recorded after archive"
+                    "record binding cohort request was not strictly before archive"
                 )
         elif request is not None:
             raise ForwardPolicyError(

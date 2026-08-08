@@ -10,8 +10,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-PREVIOUS_SCHEMA_VERSION = "forward-artifact-lineage/1.1.0"
-SCHEMA_VERSION = "forward-artifact-lineage/1.2.0"
+LEGACY_SCHEMA_VERSION = "forward-artifact-lineage/1.1.0"
+PREVIOUS_SCHEMA_VERSION = "forward-artifact-lineage/1.2.0"
+SCHEMA_VERSION = "forward-artifact-lineage/1.3.0"
 DATA_ROLES = ("football_history", "corner_history")
 MODEL_ROLES = ("football_htft", "corner")
 MODEL_DATA_ROLE = {
@@ -90,7 +91,7 @@ def _corner_manifest_dataset_hashes(
         key = str(item.get("league_key") or "")
         field = (
             "dataset_hash"
-            if schema_version == PREVIOUS_SCHEMA_VERSION
+            if schema_version == LEGACY_SCHEMA_VERSION
             else "dataset_sha256"
         )
         dataset_hash = _require_hash(
@@ -106,7 +107,7 @@ def _corner_registry_leagues(
     registry: Mapping[str, Any], *, schema_version: str
 ) -> dict[str, Mapping[str, Any]]:
     raw_leagues = registry.get("leagues")
-    if schema_version == PREVIOUS_SCHEMA_VERSION:
+    if schema_version == LEGACY_SCHEMA_VERSION:
         if not isinstance(raw_leagues, Mapping) or not raw_leagues:
             raise ArtifactLineageError("corner registry leagues are missing")
         result: dict[str, Mapping[str, Any]] = {}
@@ -212,6 +213,63 @@ def _registered_models(
     return result
 
 
+def _normalized_semantic_verification(
+    role: str, *, registry_path: Path
+) -> tuple[str, dict[str, Any]]:
+    """Run the bounded manager verifier and remove its wall-clock field."""
+
+    if role == "football_htft":
+        from scripts import league_model_manager
+
+        output = league_model_manager.verify_registry_integrity(registry_path.parent)
+        verifier_version = f"league-model-manager-registry/{league_model_manager.REGISTRY_SCHEMA_VERSION}"
+    elif role == "corner":
+        from scripts import corner_model_manager
+
+        output = corner_model_manager.verify_registry_integrity(registry_path.parent)
+        verifier_version = corner_model_manager.MANAGER_VERSION
+    else:  # pragma: no cover - guarded by MODEL_ROLES
+        raise ArtifactLineageError(f"unsupported semantic verifier role: {role}")
+    if not isinstance(output, Mapping):
+        raise ArtifactLineageError(f"{role} semantic verification returned no receipt")
+    normalized = deepcopy(dict(output))
+    normalized.pop("generated_at", None)
+    return verifier_version, normalized
+
+
+def _semantic_verification_receipts(
+    model_paths: Mapping[str, Path], model_blocks: Mapping[str, Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    receipts: dict[str, dict[str, Any]] = {}
+    for role in MODEL_ROLES:
+        try:
+            verifier_version, output = _normalized_semantic_verification(
+                role, registry_path=model_paths[role]
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            raise ArtifactLineageError(
+                f"{role} semantic registry verification failed"
+            ) from exc
+        model_count = len(model_blocks[role]["registered_models"])
+        reported_count = output.get("model_count", output.get("league_count"))
+        if reported_count != model_count:
+            raise ArtifactLineageError(
+                f"{role} semantic verification model count does not match lineage"
+            )
+        if output.get("registry_hash") != model_blocks[role]["declared_registry_hash"]:
+            raise ArtifactLineageError(
+                f"{role} semantic verification registry hash does not match lineage"
+            )
+        receipts[role] = {
+            "verifier_version": verifier_version,
+            "registry_hash": model_blocks[role]["declared_registry_hash"],
+            "model_count": model_count,
+            "verification_output": output,
+            "verification_output_hash": _hash_json(output),
+        }
+    return receipts
+
+
 def _build_lineage(
     *,
     repo_root: str | Path,
@@ -219,7 +277,11 @@ def _build_lineage(
     model_registries: Mapping[str, str | Path],
     schema_version: str,
 ) -> dict[str, Any]:
-    if schema_version not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
+    if schema_version not in {
+        LEGACY_SCHEMA_VERSION,
+        PREVIOUS_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         raise ArtifactLineageError("unsupported artifact lineage schema_version")
     root = Path(repo_root).resolve()
     if set(data_manifests) != set(DATA_ROLES):
@@ -246,8 +308,10 @@ def _build_lineage(
             "as_of_date": payload.get("as_of_date"),
         }
     model_blocks: dict[str, dict[str, Any]] = {}
+    model_paths: dict[str, Path] = {}
     for role in MODEL_ROLES:
         path = Path(model_registries[role]).resolve()
+        model_paths[role] = path
         payload = _read_json(path, f"{role} model registry")
         declared = _declared_hash(payload, f"{role} model registry")
         data_role = MODEL_DATA_ROLE[role]
@@ -285,6 +349,10 @@ def _build_lineage(
             "corner_handicap": ["corner_history", "corner"],
         },
     }
+    if schema_version == SCHEMA_VERSION:
+        value["semantic_verification_receipts"] = _semantic_verification_receipts(
+            model_paths, model_blocks
+        )
     value["lineage_hash"] = _hash_json(value)
     return value
 
@@ -310,15 +378,23 @@ def validate_lineage(raw: Any) -> dict[str, Any]:
     supplied = value.pop("lineage_hash", None)
     if supplied != _hash_json(value):
         raise ArtifactLineageError("artifact lineage hash is invalid")
-    if set(value) != {
+    schema_version = value.get("schema_version")
+    expected_fields = {
         "schema_version",
         "artifact_type",
         "data_manifests",
         "model_registries",
         "candidate_role_policy",
-    }:
+    }
+    if schema_version == SCHEMA_VERSION:
+        expected_fields.add("semantic_verification_receipts")
+    if set(value) != expected_fields:
         raise ArtifactLineageError("artifact lineage fields are incomplete")
-    if value.get("schema_version") not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
+    if schema_version not in {
+        LEGACY_SCHEMA_VERSION,
+        PREVIOUS_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         raise ArtifactLineageError("unsupported artifact lineage schema_version")
     if value.get("artifact_type") != "soccer_forward_artifact_lineage":
         raise ArtifactLineageError("artifact lineage artifact_type is invalid")
@@ -383,6 +459,43 @@ def validate_lineage(raw: Any) -> dict[str, Any]:
     }
     if value.get("candidate_role_policy") != expected_role_policy:
         raise ArtifactLineageError("candidate artifact role policy is invalid")
+    if schema_version == SCHEMA_VERSION:
+        receipts = value.get("semantic_verification_receipts")
+        if not isinstance(receipts, Mapping) or set(receipts) != set(MODEL_ROLES):
+            raise ArtifactLineageError(
+                "artifact lineage semantic verification receipts are incomplete"
+            )
+        for role, receipt in receipts.items():
+            block = models[role]
+            if not isinstance(receipt, Mapping) or set(receipt) != {
+                "verifier_version",
+                "registry_hash",
+                "model_count",
+                "verification_output",
+                "verification_output_hash",
+            }:
+                raise ArtifactLineageError(
+                    f"semantic verification receipt {role} is invalid"
+                )
+            if not str(receipt.get("verifier_version") or "").strip():
+                raise ArtifactLineageError(
+                    f"semantic verification receipt {role} verifier is missing"
+                )
+            if receipt.get("registry_hash") != block.get("declared_registry_hash"):
+                raise ArtifactLineageError(
+                    f"semantic verification receipt {role} registry hash is invalid"
+                )
+            if receipt.get("model_count") != len(block["registered_models"]):
+                raise ArtifactLineageError(
+                    f"semantic verification receipt {role} model count is invalid"
+                )
+            output = receipt.get("verification_output")
+            if not isinstance(output, Mapping) or receipt.get(
+                "verification_output_hash"
+            ) != _hash_json(output):
+                raise ArtifactLineageError(
+                    f"semantic verification receipt {role} output hash is invalid"
+                )
     value["lineage_hash"] = _require_hash(supplied, "lineage_hash")
     return value
 

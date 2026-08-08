@@ -24,11 +24,17 @@ from statistics import mean
 from typing import Any, Mapping, Sequence
 
 try:
-    from scripts import execution_evidence, forward_policy, source_evidence
+    from scripts import (
+        cohort_scope,
+        execution_evidence,
+        forward_policy,
+        source_evidence,
+    )
 except ImportError:  # Direct execution from scripts/.
     script_directory = str(Path(__file__).resolve().parent)
     if script_directory not in sys.path:
         sys.path.insert(0, script_directory)
+    import cohort_scope  # type: ignore[no-redef]
     import execution_evidence  # type: ignore[no-redef]
     import forward_policy  # type: ignore[no-redef]
     import source_evidence  # type: ignore[no-redef]
@@ -1086,6 +1092,9 @@ def _validate_v3_input(
     firm_execution_required = forward_policy._release_at_least(
         policy["software"]["package_version"], (3, 7, 0)
     )
+    firm_execution_v2_required = forward_policy._release_at_least(
+        policy["software"]["package_version"], (3, 8, 0)
+    )
     schemas = _market_schemas(value.get("market_schemas"))
     queue = value.get("queue_manifest")
     if not isinstance(queue, Mapping):
@@ -1199,6 +1208,7 @@ def _validate_v3_input(
         raise ForwardValidationError("commitments must be a non-empty array")
     by_observation: dict[str, dict[str, Any]] = {}
     committed_queue_keys: set[str] = set()
+    execution_receipt_hashes: set[str] = set()
     rows: list[dict[str, Any]] = []
     expected_commitment_fields = {
         "schema_version",
@@ -1285,9 +1295,33 @@ def _validate_v3_input(
             )
         if forward_policy._policy_uses_role_aware_lineage(policy):
             request_binding = binding.get("cohort_request_binding")
-            if not isinstance(request_binding, Mapping) or request_binding.get(
-                "fixture_id"
-            ) != str(prediction.get("fixture_id") or ""):
+            request_fixture = (
+                request_binding.get("fixture")
+                if isinstance(request_binding, Mapping)
+                else None
+            )
+            if (
+                isinstance(request_binding, Mapping)
+                and request_binding.get("schema_version")
+                == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION
+            ):
+                expected_request_fixture = {
+                    "fixture_id": str(prediction.get("fixture_id") or ""),
+                    "competition_key": str(prediction.get("league") or ""),
+                    "home_team": str(prediction.get("home_team") or "").strip(),
+                    "away_team": str(prediction.get("away_team") or "").strip(),
+                    "kickoff": _aware(
+                        prediction.get("kickoff"), f"{label}.prediction_payload.kickoff"
+                    ).isoformat(),
+                }
+                request_matches = request_fixture == expected_request_fixture
+            elif isinstance(request_binding, Mapping):
+                request_matches = request_binding.get("fixture_id") == str(
+                    prediction.get("fixture_id") or ""
+                )
+            else:
+                request_matches = False
+            if not isinstance(request_binding, Mapping) or not request_matches:
                 raise ForwardValidationError(
                     f"{label}.forward_policy_binding does not bind the requested fixture"
                 )
@@ -1662,16 +1696,27 @@ def _validate_v3_input(
                 raise ForwardValidationError(
                     f"{label}.execution_entry is invalid for status"
                 )
-            expected_execution_fields = {
-                "selection",
-                "entry_decimal_odds",
-                "entry_complete_market_odds",
-                "entry_collected_at",
-                "entry_source_evidence_hash",
-                "entry_price_kind",
-                "limit_verified",
-                "stake_units",
-            }
+            expected_execution_fields = (
+                {
+                    "selection",
+                    "firm_accepted_decimal_odds",
+                    "accepted_at",
+                    "entry_price_kind",
+                    "limit_verified",
+                    "stake_units",
+                }
+                if firm_execution_v2_required
+                else {
+                    "selection",
+                    "entry_decimal_odds",
+                    "entry_complete_market_odds",
+                    "entry_collected_at",
+                    "entry_source_evidence_hash",
+                    "entry_price_kind",
+                    "limit_verified",
+                    "stake_units",
+                }
+            )
             if firm_execution_required:
                 expected_execution_fields.update(
                     {"execution_evidence_file", "execution_evidence_hash"}
@@ -1698,8 +1743,12 @@ def _validate_v3_input(
                     f"{label}.execution_entry.selection must equal the settlement reference outcome"
                 )
             entry_collected = _aware(
-                execution_entry_raw.get("entry_collected_at"),
-                f"{label}.execution_entry.entry_collected_at",
+                execution_entry_raw.get(
+                    "accepted_at"
+                    if firm_execution_v2_required
+                    else "entry_collected_at"
+                ),
+                f"{label}.execution_entry.accepted_at",
             )
             if (
                 entry_collected > archived
@@ -1728,53 +1777,62 @@ def _validate_v3_input(
                 raise ForwardValidationError(f"{label}.entry_price_kind is invalid")
             if execution_entry_raw.get("limit_verified") is not True:
                 raise ForwardValidationError(f"{label}.entry limit must be verified")
-            entry_complete_odds, entry_no_vig = _no_vig_from_complete_decimal_odds(
-                execution_entry_raw.get("entry_complete_market_odds"),
-                price_outcomes,
-                f"{label}.execution_entry.entry_complete_market_odds",
-            )
-            entry_price = _positive_decimal_price(
-                execution_entry_raw.get("entry_decimal_odds"),
-                f"{label}.execution_entry.entry_decimal_odds",
-            )
-            if not math.isclose(
-                entry_price,
-                entry_complete_odds[selection],
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                raise ForwardValidationError(
-                    f"{label}.entry price is not in complete market odds"
+            entry_complete_odds = None
+            entry_no_vig = None
+            if firm_execution_v2_required:
+                entry_price = _positive_decimal_price(
+                    execution_entry_raw.get("firm_accepted_decimal_odds"),
+                    f"{label}.execution_entry.firm_accepted_decimal_odds",
                 )
-            entry_source_hash = _sha256(
-                execution_entry_raw.get("entry_source_evidence_hash"),
-                f"{label}.execution_entry.entry_source_evidence_hash",
-            )
-            if entry_source_hash != source_hash:
-                raise ForwardValidationError(
-                    f"{label}.execution_entry source evidence does not bind the replayed bookmaker snapshot"
+                entry_source_hash = None
+            else:
+                entry_complete_odds, entry_no_vig = _no_vig_from_complete_decimal_odds(
+                    execution_entry_raw.get("entry_complete_market_odds"),
+                    price_outcomes,
+                    f"{label}.execution_entry.entry_complete_market_odds",
                 )
-            if entry_collected != bookmaker_collected:
-                raise ForwardValidationError(
-                    f"{label}.execution_entry time does not bind the replayed bookmaker snapshot"
+                entry_price = _positive_decimal_price(
+                    execution_entry_raw.get("entry_decimal_odds"),
+                    f"{label}.execution_entry.entry_decimal_odds",
                 )
-            for outcome in price_outcomes:
-                quoted_price = complete_odds[outcome]
-                executable_price = entry_complete_odds[outcome]
-                if outcome == selection:
-                    if executable_price > quoted_price + 1e-12:
-                        raise ForwardValidationError(
-                            f"{label}.execution_entry cannot improve the selected replayed price"
-                        )
-                elif not math.isclose(
-                    executable_price,
-                    quoted_price,
+                if not math.isclose(
+                    entry_price,
+                    entry_complete_odds[selection],
                     rel_tol=0.0,
                     abs_tol=1e-12,
                 ):
                     raise ForwardValidationError(
-                        f"{label}.execution_entry may only apply conservative slippage to the selected price"
+                        f"{label}.entry price is not in complete market odds"
                     )
+                entry_source_hash = _sha256(
+                    execution_entry_raw.get("entry_source_evidence_hash"),
+                    f"{label}.execution_entry.entry_source_evidence_hash",
+                )
+                if entry_source_hash != source_hash:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry source evidence does not bind the replayed bookmaker snapshot"
+                    )
+                if entry_collected != bookmaker_collected:
+                    raise ForwardValidationError(
+                        f"{label}.execution_entry time does not bind the replayed bookmaker snapshot"
+                    )
+                for outcome in price_outcomes:
+                    quoted_price = complete_odds[outcome]
+                    executable_price = entry_complete_odds[outcome]
+                    if outcome == selection:
+                        if executable_price > quoted_price + 1e-12:
+                            raise ForwardValidationError(
+                                f"{label}.execution_entry cannot improve the selected replayed price"
+                            )
+                    elif not math.isclose(
+                        executable_price,
+                        quoted_price,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    ):
+                        raise ForwardValidationError(
+                            f"{label}.execution_entry may only apply conservative slippage to the selected price"
+                        )
             execution_binding = None
             if firm_execution_required:
                 execution_evidence_file = str(
@@ -1815,6 +1873,15 @@ def _validate_v3_input(
                     raise ForwardValidationError(
                         f"{label}.execution_entry does not match its accepted firm offer"
                     ) from exc
+                receipt_hash = _sha256(
+                    execution_binding.get("receipt_identity_hash"),
+                    f"{label}.execution_entry receipt identity hash",
+                )
+                if receipt_hash in execution_receipt_hashes:
+                    raise ForwardValidationError(
+                        "one firm/account/receipt identity cannot fund multiple cohort entries"
+                    )
+                execution_receipt_hashes.add(receipt_hash)
                 accepted_at = _aware(
                     replayed_offer.get("accepted_at"),
                     f"{label}.execution_entry accepted_at",
@@ -1825,21 +1892,38 @@ def _validate_v3_input(
                     )
             execution_entry = {
                 "selection": selection,
-                "entry_decimal_odds": entry_price,
-                "entry_complete_market_odds": entry_complete_odds,
-                "entry_no_vig_probability": entry_no_vig[selection],
                 "model_expected_roi": _model_expected_return(
                     model_probabilities,
                     selection=selection,
                     decimal_odds=entry_price,
                     settlement_semantics=market_schema["settlement_semantics"],
                 ),
-                "entry_collected_at": entry_collected.isoformat(),
-                "entry_source_evidence_hash": entry_source_hash,
                 "entry_price_kind": expected_price_kind,
                 "limit_verified": True,
                 "stake_units": stake,
             }
+            if firm_execution_v2_required:
+                execution_entry.update(
+                    {
+                        "firm_accepted_decimal_odds": entry_price,
+                        "accepted_at": entry_collected.isoformat(),
+                        "decision_consensus_no_vig_probability": derived_no_vig[
+                            selection
+                        ],
+                        "firm_complete_market_no_vig_probability": None,
+                        "firm_complete_market_status": "unavailable_not_captured",
+                    }
+                )
+            else:
+                execution_entry.update(
+                    {
+                        "entry_decimal_odds": entry_price,
+                        "entry_complete_market_odds": entry_complete_odds,
+                        "entry_no_vig_probability": entry_no_vig[selection],
+                        "entry_collected_at": entry_collected.isoformat(),
+                        "entry_source_evidence_hash": entry_source_hash,
+                    }
+                )
             if execution_binding is not None:
                 execution_entry.update(
                     {
@@ -1997,7 +2081,7 @@ def _validate_v3_input(
                 {"collected_at", "source_evidence_hash", "complete_market_odds"},
                 f"{label}.closing_snapshot",
             )
-            price_outcomes = list(entry["entry_complete_market_odds"])
+            price_outcomes = list(metadata["market_identity"]["price_outcomes"])
             closing_odds, closing_no_vig = _no_vig_from_complete_decimal_odds(
                 closing_raw.get("complete_market_odds"),
                 price_outcomes,
@@ -2008,7 +2092,8 @@ def _validate_v3_input(
                 f"{label}.closing_snapshot.collected_at",
             )
             entry_collected = _aware(
-                entry["entry_collected_at"], f"{label}.entry_collected_at"
+                entry.get("accepted_at", entry.get("entry_collected_at")),
+                f"{label}.entry_collected_at",
             )
             if (
                 closing_collected < entry_collected
@@ -2122,8 +2207,22 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
                 f"forward cohort aggregate {field} does not match its history binding"
             )
     manifest_entries = closure["record_manifest"]["records"]
+    if [entry.get("fixture_id") for entry in manifest_entries] != binding.get(
+        "fixture_ids"
+    ):
+        raise ForwardValidationError(
+            "history record receipts do not exactly cover the closed cohort record manifest"
+        )
+    prevalidated_ledgers = [
+        _validate_v3_input(
+            receipt["ledger_payload"], require_history_ledger_binding=False
+        )
+        for receipt in binding["receipts"]
+    ]
     receipt_entries = []
-    for receipt in binding["receipts"]:
+    for receipt, normalized_receipt in zip(
+        binding["receipts"], prevalidated_ledgers, strict=True
+    ):
         receipt_entry = {
             "fixture_id": receipt["fixture_id"],
             "archive_version_hash": receipt["archive_version_hash"],
@@ -2144,6 +2243,28 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         )
         if request is not None:
             receipt_entry["request_event_hash"] = request.get("request_event_hash")
+            if (
+                closure["record_manifest"].get("schema_version")
+                == forward_policy.RECORD_MANIFEST_SCHEMA_VERSION
+            ):
+                receipt_entry.update(
+                    {
+                        "request_fixture_id": request.get("request_fixture_id"),
+                        "fixture": deepcopy(request.get("fixture")),
+                        "fixture_event_hash": request.get("fixture_event_hash"),
+                        "execution_receipt_hashes": sorted(
+                            str(binding_item["receipt_identity_hash"])
+                            for row in normalized_receipt["records"]
+                            if isinstance(row.get("execution_entry"), Mapping)
+                            and isinstance(
+                                binding_item := row["execution_entry"].get(
+                                    "execution_binding"
+                                ),
+                                Mapping,
+                            )
+                        ),
+                    }
+                )
         receipt_entries.append(receipt_entry)
     if receipt_entries != manifest_entries:
         raise ForwardValidationError(
@@ -2151,10 +2272,9 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
         )
 
     normalized_ledgers: list[dict[str, Any]] = []
-    for receipt in binding["receipts"]:
-        normalized = _validate_v3_input(
-            receipt["ledger_payload"], require_history_ledger_binding=False
-        )
+    for receipt, normalized in zip(
+        binding["receipts"], prevalidated_ledgers, strict=True
+    ):
         if (
             normalized["cohort_id"] != value["cohort_id"]
             or normalized["policy_id"] != value["policy_id"]
@@ -2174,6 +2294,29 @@ def _validate_aggregate_input(payload: Any) -> dict[str, Any]:
                 "history record receipt contains rows for another fixture"
             )
         normalized_ledgers.append(normalized)
+
+    cohort_receipt_hashes: set[str] = set()
+    for normalized in normalized_ledgers:
+        for row in normalized["records"]:
+            entry = row.get("execution_entry")
+            execution_binding = (
+                entry.get("execution_binding") if isinstance(entry, Mapping) else None
+            )
+            receipt_hash = (
+                execution_binding.get("receipt_identity_hash")
+                if isinstance(execution_binding, Mapping)
+                else None
+            )
+            if receipt_hash is None:
+                continue
+            normalized_hash = _sha256(
+                receipt_hash, "cohort execution receipt identity hash"
+            )
+            if normalized_hash in cohort_receipt_hashes:
+                raise ForwardValidationError(
+                    "cohort reuses one firm/account/receipt identity across records"
+                )
+            cohort_receipt_hashes.add(normalized_hash)
 
     records: list[dict[str, Any]] = []
     market_schemas: dict[str, dict[str, Any]] = {}
@@ -2441,7 +2584,11 @@ def _execution(
         execution = row.get("execution")
         if not isinstance(execution, Mapping):
             continue
-        entry = float(execution["entry_decimal_odds"])
+        entry = float(
+            execution.get(
+                "firm_accepted_decimal_odds", execution.get("entry_decimal_odds")
+            )
+        )
         stake = float(execution["stake_units"])
         settlement_state = execution.get("settlement_state")
         win_profit = entry - 1.0
@@ -2456,7 +2603,12 @@ def _execution(
             continue
         clv_probability_points = 100.0 * (
             float(execution["closing_no_vig_probability"])
-            - float(execution["entry_no_vig_probability"])
+            - float(
+                execution.get(
+                    "decision_consensus_no_vig_probability",
+                    execution.get("entry_no_vig_probability"),
+                )
+            )
         )
         observations.append(
             (str(row["kickoff_week"]), profit, clv_probability_points, stake)

@@ -91,7 +91,7 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
             "dataset_manifest_hash": football_dataset_hash,
         },
         "artifact_lineage": {
-            "schema_version": "forward-artifact-lineage/1.1.0",
+            "schema_version": forward_policy.artifact_lineage.SCHEMA_VERSION,
             "artifact_type": "soccer_forward_artifact_lineage",
             "data_manifests": {
                 "football_history": {
@@ -144,6 +144,28 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
                 "corner_total": ["corner_history", "corner"],
                 "corner_handicap": ["corner_history", "corner"],
             },
+            "semantic_verification_receipts": {
+                "football_htft": {
+                    "verifier_version": "test-football-verifier/1.0.0",
+                    "registry_hash": TEST_HASH,
+                    "model_count": 1,
+                    "verification_output": {
+                        "registry_hash": TEST_HASH,
+                        "model_count": 1,
+                        "status": "pass",
+                    },
+                },
+                "corner": {
+                    "verifier_version": "test-corner-verifier/1.0.0",
+                    "registry_hash": "sha256:" + "3" * 64,
+                    "model_count": 1,
+                    "verification_output": {
+                        "registry_hash": "sha256:" + "3" * 64,
+                        "model_count": 1,
+                        "status": "pass",
+                    },
+                },
+            },
         },
         "policy": {
             "market_policy_version": "test-policy",
@@ -158,6 +180,10 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
             forward_policy.LOCAL_INTEGRITY_SHADOW_KIND
         ),
     }
+    for receipt in value["artifact_lineage"]["semantic_verification_receipts"].values():
+        receipt["verification_output_hash"] = forward_policy._hash_json(
+            receipt["verification_output"]
+        )
     value["artifact_lineage"]["lineage_hash"] = forward_policy._hash_json(
         value["artifact_lineage"]
     )
@@ -184,10 +210,10 @@ def cohort_manifest(
     policy: dict, *, status: str = "active", base_dir: Path | None = None
 ) -> dict:
     policy_path = (
-        Path(tempfile.gettempdir()).resolve()
-        / "forward-policies"
-        / f"{policy['policy_id']}.json"
-    )
+        (Path(base_dir).resolve() / ".codex" / "soccer-predict" / "forward-policies")
+        if base_dir is not None
+        else Path(tempfile.gettempdir()).resolve() / "forward-policies"
+    ) / f"{policy['policy_id']}.json"
     if base_dir is not None:
         policy_path.parent.mkdir(parents=True, exist_ok=True)
         policy_path.write_text(json.dumps(policy, ensure_ascii=False), encoding="utf-8")
@@ -225,10 +251,26 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
     if "scope_hash" in cohort:
         for entry in entries:
             entry.setdefault("request_event_hash", "sha256:" + "9" * 64)
+            entry.setdefault("request_fixture_id", str(entry["fixture_id"]))
+            entry.setdefault(
+                "fixture",
+                {
+                    "fixture_id": str(entry["fixture_id"]),
+                    "competition_key": "league-a",
+                    "home_team": "Alpha",
+                    "away_team": "Bravo",
+                    "kickoff": "2026-08-01T01:00:00+00:00",
+                },
+            )
+            entry.setdefault("fixture_event_hash", "sha256:" + "9" * 64)
+            entry.setdefault("execution_receipt_hashes", [])
         denominator_entries = [
             {
+                "request_fixture_id": str(entry["request_fixture_id"]),
                 "fixture_id": str(entry["fixture_id"]),
-                "request_event_hash": "sha256:" + "9" * 64,
+                "fixture": deepcopy(entry["fixture"]),
+                "request_event_hash": str(entry["request_event_hash"]),
+                "fixture_event_hash": str(entry["fixture_event_hash"]),
                 "requested_at": cohort["starts_at"],
                 "disposition": "recorded",
                 "unavailable_event_hash": None,
@@ -277,7 +319,15 @@ def cohort_closure(cohort: dict, record_manifest: dict | None = None) -> dict:
 
 
 def base_policy_binding(
-    policy: dict, cohort: dict, archived_at: str, *, fixture_id: str | None = None
+    policy: dict,
+    cohort: dict,
+    archived_at: str,
+    *,
+    fixture_id: str | None = None,
+    competition_key: str | None = None,
+    home_team: str | None = None,
+    away_team: str | None = None,
+    kickoff: str | None = None,
 ) -> dict:
     value = {
         "schema_version": forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION,
@@ -297,12 +347,24 @@ def base_policy_binding(
         ),
     }
     if fixture_id is not None:
+        if None in {competition_key, home_team, away_team, kickoff}:
+            raise AssertionError("current request fixture must be complete")
         value["cohort_request_binding"] = {
-            "schema_version": "forward-cohort-request-binding/1.0.0",
+            "schema_version": forward_policy.cohort_scope.REQUEST_BINDING_SCHEMA_VERSION,
             "scope_id": policy["cohort_scope"]["scope_id"],
             "scope_hash": policy["cohort_scope"]["scope_hash"],
-            "fixture_id": fixture_id,
+            "request_fixture_id": fixture_id,
+            "fixture": {
+                "fixture_id": fixture_id,
+                "competition_key": competition_key,
+                "home_team": home_team,
+                "away_team": away_team,
+                "kickoff": datetime.fromisoformat(
+                    str(kickoff).replace("Z", "+00:00")
+                ).isoformat(),
+            },
             "request_event_hash": "sha256:" + "9" * 64,
+            "fixture_event_hash": "sha256:" + "9" * 64,
             "requested_at": cohort["starts_at"],
         }
     value["binding_hash"] = forward_policy._hash_json(value)
@@ -405,9 +467,10 @@ def build_payload(
     one_week: bool = False,
     start_index: int = 0,
     git_commit: str = REAL_GIT_COMMIT,
+    cohort_base: Path | None = None,
 ) -> dict:
     policy = policy_manifest(git_commit=git_commit)
-    cohort = cohort_manifest(policy, base_dir=base)
+    cohort = cohort_manifest(policy, base_dir=cohort_base or base)
     market_schemas = {
         "1x2": {
             "settlement_states": OUTCOMES,
@@ -569,12 +632,8 @@ def build_payload(
             },
             "execution_entry": {
                 "selection": actual,
-                "entry_decimal_odds": 2.0,
-                "entry_complete_market_odds": {
-                    item: 2.0 if item == actual else 4.0 for item in OUTCOMES
-                },
-                "entry_collected_at": generated_text,
-                "entry_source_evidence_hash": raw["evidence"]["evidence_hash"],
+                "firm_accepted_decimal_odds": 2.0,
+                "accepted_at": generated_text,
                 "entry_price_kind": "firm_accepted_offer",
                 "limit_verified": True,
                 "stake_units": 1.0,
@@ -589,6 +648,10 @@ def build_payload(
                 cohort,
                 raw["archived"].isoformat(),
                 fixture_id=raw["fixture_id"],
+                competition_key=prediction["league"],
+                home_team=prediction["home_team"],
+                away_team=prediction["away_team"],
+                kickoff=prediction["kickoff"],
             ),
             forward_validation._hash(prediction),
         )
@@ -742,6 +805,32 @@ def aggregate_from_micro_ledgers(payloads: list[dict]) -> dict:
                 "record_commitment_hash": receipt["record_commitment_hash"],
                 "record_binding_hash": receipt["record_binding_hash"],
                 "prematch_ledger_hash": receipt["prematch_ledger_hash"],
+                "request_event_hash": receipt["archive_snapshot_payload"][
+                    "forward_policy_binding"
+                ]["cohort_request_binding"]["request_event_hash"],
+                "request_fixture_id": receipt["archive_snapshot_payload"][
+                    "forward_policy_binding"
+                ]["cohort_request_binding"]["request_fixture_id"],
+                "fixture": deepcopy(
+                    receipt["archive_snapshot_payload"]["forward_policy_binding"][
+                        "cohort_request_binding"
+                    ]["fixture"]
+                ),
+                "fixture_event_hash": receipt["archive_snapshot_payload"][
+                    "forward_policy_binding"
+                ]["cohort_request_binding"]["fixture_event_hash"],
+                "execution_receipt_hashes": sorted(
+                    str(binding["receipt_identity_hash"])
+                    for row in forward_validation._validate_v3_input(
+                        receipt["ledger_payload"],
+                        require_history_ledger_binding=False,
+                    )["records"]
+                    if isinstance(row.get("execution_entry"), dict)
+                    and isinstance(
+                        binding := row["execution_entry"].get("execution_binding"),
+                        dict,
+                    )
+                ),
             }
             for receipt in preliminary_receipts
         ],
@@ -794,6 +883,7 @@ def build_aggregate_payload(
                 one_week=one_week,
                 start_index=index,
                 git_commit=git_commit,
+                cohort_base=base,
             )
         )
     return aggregate_from_micro_ledgers(payloads)
@@ -814,6 +904,10 @@ def pending_micro_ledger(base: Path, *, start_index: int = 0) -> dict:
             payload["cohort_manifest"],
             archived_at,
             fixture_id=prediction["fixture_id"],
+            competition_key=prediction["league"],
+            home_team=prediction["home_team"],
+            away_team=prediction["away_team"],
+            kickoff=prediction["kickoff"],
         ),
         forward_validation._hash(prediction),
     )
@@ -851,11 +945,12 @@ def five_state_pending_micro_ledger(
     reference_outcome: str,
     expected_state: str,
     additional_source_line: float | None = None,
+    cohort_base: Path | None = None,
 ) -> dict:
     """Build a canonical split-line ledger by resealing every affected artifact."""
 
     _forward_memory_joint_model(base)
-    payload = build_payload(base, 1, start_index=start_index)
+    payload = build_payload(base, 1, start_index=start_index, cohort_base=cohort_base)
     payload["cohort_closure"] = None
     policy = payload["policy_manifest"]
     cohort = payload["cohort_manifest"]
@@ -1014,10 +1109,8 @@ def five_state_pending_micro_ledger(
         },
         "execution_entry": {
             "selection": reference_outcome,
-            "entry_decimal_odds": prices[reference_outcome],
-            "entry_complete_market_odds": deepcopy(prices),
-            "entry_collected_at": generated,
-            "entry_source_evidence_hash": evidence["evidence_hash"],
+            "firm_accepted_decimal_odds": prices[reference_outcome],
+            "accepted_at": generated,
             "entry_price_kind": "firm_accepted_offer",
             "limit_verified": True,
             "stake_units": 1.0,
@@ -1028,7 +1121,14 @@ def five_state_pending_micro_ledger(
     archived_at = payload["commitments"][0]["forward_policy_binding"]["archived_at"]
     binding = forward_policy.bind_observation_commitment(
         base_policy_binding(
-            policy, cohort, archived_at, fixture_id=prediction["fixture_id"]
+            policy,
+            cohort,
+            archived_at,
+            fixture_id=prediction["fixture_id"],
+            competition_key=prediction["league"],
+            home_team=prediction["home_team"],
+            away_team=prediction["away_team"],
+            kickoff=prediction["kickoff"],
         ),
         forward_validation._hash(prediction),
     )
@@ -1211,7 +1311,14 @@ def categorical_half_time_pending_micro_ledger(
     archived_at = (datetime.fromisoformat(generated) + timedelta(minutes=1)).isoformat()
     binding = forward_policy.bind_observation_commitment(
         base_policy_binding(
-            policy, cohort, archived_at, fixture_id=prediction["fixture_id"]
+            policy,
+            cohort,
+            archived_at,
+            fixture_id=prediction["fixture_id"],
+            competition_key=prediction["league"],
+            home_team=prediction["home_team"],
+            away_team=prediction["away_team"],
+            kickoff=prediction["kickoff"],
         ),
         forward_validation._hash(prediction),
     )
@@ -1613,6 +1720,13 @@ def active_record_args_for_five_state_ledger(
         args.total_half_loss_probability = distribution["half_loss"]
         args.total_loss_probability = distribution["loss"]
         args.total_market_signal = "aligned"
+    # Candidate-directional evidence v2 is intentionally shadow-only in 3.8.0.
+    # The ledger keeps the modeled observation, while the public formal primary
+    # remains empty until a later versioned forward-validation promotion.
+    args.primary_market = "none"
+    args.total_side = None
+    args.display_exact_score_pick = []
+    args.display_exact_score_event_probability = None
     args.fundamental_evidence_file = write_fundamental_evidence(str(base), args)
     return args
 
@@ -1794,6 +1908,7 @@ def record_and_review_five_state_fixture(
         line=line,
         reference_outcome=reference_outcome,
         expected_state=expected_state,
+        cohort_base=base,
     )
     ledger_file = fixture_base / "prematch-forward-ledger.json"
     ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
@@ -1852,10 +1967,18 @@ def record_and_review_forward_fixture(base: Path, index: int) -> dict:
         line=2.5,
         reference_outcome="over",
         expected_state="full_win",
+        cohort_base=base,
     )
     prediction = ledger["commitments"][0]["prediction_payload"]
     policy = ledger["policy_manifest"]
     cohort = ledger["cohort_manifest"]
+    active_path = forward_policy.active_cohort_path(base)
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    if not active_path.exists():
+        active_path.write_text(json.dumps(cohort, ensure_ascii=False), encoding="utf-8")
+        immutable = forward_policy.cohort_manifest_path(base, cohort["cohort_id"])
+        immutable.parent.mkdir(parents=True, exist_ok=True)
+        immutable.write_text(json.dumps(cohort, ensure_ascii=False), encoding="utf-8")
     request = forward_policy.cohort_scope.append_event(
         base_dir=base,
         cohort_id=cohort["cohort_id"],
@@ -1870,14 +1993,15 @@ def record_and_review_forward_fixture(base: Path, index: int) -> dict:
             datetime.fromisoformat(cohort["starts_at"]) + timedelta(seconds=index + 1)
         ).isoformat(),
     )
-    ledger["commitments"][0]["forward_policy_binding"]["cohort_request_binding"] = {
-        "schema_version": "forward-cohort-request-binding/1.0.0",
-        "scope_id": request["scope_id"],
-        "scope_hash": request["scope_hash"],
-        "fixture_id": request["fixture"]["fixture_id"],
-        "request_event_hash": request["event_hash"],
-        "requested_at": request["occurred_at"],
-    }
+    ledger["commitments"][0]["forward_policy_binding"]["cohort_request_binding"] = (
+        forward_policy.cohort_scope.request_binding(
+            base_dir=base,
+            cohort_id=cohort["cohort_id"],
+            scope=policy["cohort_scope"]["scope_snapshot"],
+            fixture_id=str(prediction["fixture_id"]),
+            expected_fixture=request["fixture"],
+        )
+    )
     base_binding = reseal_single_commitment_ledger(ledger)
     ledger_file = fixture_base / "prematch-forward-ledger.json"
     ledger_file.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
@@ -1927,8 +2051,11 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
         binding = record["forward_policy_binding"]["cohort_request_binding"]
         denominator_entries.append(
             {
+                "request_fixture_id": binding["request_fixture_id"],
                 "fixture_id": str(record["match_id"]),
+                "fixture": deepcopy(binding["fixture"]),
                 "request_event_hash": binding["request_event_hash"],
+                "fixture_event_hash": binding["fixture_event_hash"],
                 "requested_at": binding["requested_at"],
                 "disposition": "recorded",
                 "unavailable_event_hash": None,
@@ -1964,19 +2091,16 @@ class ForwardValidationTests(unittest.TestCase):
     ) -> None:
         attacks = (
             (
-                "unreplayable source hash",
+                "unreplayable receipt hash",
                 lambda entry: entry.update(
-                    entry_source_evidence_hash="sha256:" + "f" * 64
+                    execution_evidence_hash="sha256:" + "f" * 64
                 ),
-                "source evidence does not bind the replayed bookmaker snapshot",
+                "evidence hash does not match",
             ),
             (
                 "invented better price",
-                lambda entry: (
-                    entry.update(entry_decimal_odds=100.0),
-                    entry["entry_complete_market_odds"].update(over=100.0),
-                ),
-                "cannot improve the selected replayed price",
+                lambda entry: entry.update(firm_accepted_decimal_odds=100.0),
+                "does not match its accepted firm offer",
             ),
         )
         for label, mutate, expected_error in attacks:
@@ -1998,6 +2122,111 @@ class ForwardValidationTests(unittest.TestCase):
                     forward_validation.ForwardValidationError, expected_error
                 ):
                     reseal_single_commitment_ledger(ledger)
+
+    def test_firm_execution_price_is_separate_from_consensus_no_vig(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = five_state_pending_micro_ledger(
+                Path(temporary),
+                start_index=435,
+                family="total",
+                line=2.5,
+                reference_outcome="over",
+                expected_state="full_win",
+            )
+            normalized = forward_validation.validate_prematch_input(ledger)
+            prices = ledger["commitments"][0]["prediction_payload"][
+                "bookmaker_snapshot"
+            ]["complete_market_odds"]
+            expected_consensus = (1.0 / prices["over"]) / sum(
+                1.0 / price for price in prices.values()
+            )
+        execution = normalized["records"][0]["execution_entry"]
+        self.assertEqual(execution["firm_accepted_decimal_odds"], 20.0)
+        self.assertAlmostEqual(
+            execution["decision_consensus_no_vig_probability"],
+            expected_consensus,
+        )
+        self.assertIsNone(execution["firm_complete_market_no_vig_probability"])
+        self.assertEqual(
+            execution["firm_complete_market_status"], "unavailable_not_captured"
+        )
+        self.assertNotIn("entry_no_vig_probability", execution)
+
+    def test_cohort_rejects_reused_firm_account_receipt_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            first_base = base / "first"
+            second_base = base / "second"
+            first_base.mkdir()
+            second_base.mkdir()
+            first = build_payload(first_base, 1, start_index=436, cohort_base=base)
+            second = build_payload(second_base, 1, start_index=437, cohort_base=base)
+            first_entry = first["commitments"][0]["prediction_payload"][
+                "execution_entry"
+            ]
+            first_evidence = execution_evidence.validate_evidence_file(
+                first_entry["execution_evidence_file"]
+            )
+            second_entry = second["commitments"][0]["prediction_payload"][
+                "execution_entry"
+            ]
+            second_evidence = execution_evidence.validate_evidence_file(
+                second_entry["execution_evidence_file"]
+            )
+            raw_path = (
+                Path(second_entry["execution_evidence_file"]).parent
+                / second_evidence["source"]["raw_offer_path"]
+            )
+            duplicate_capture = json.loads(raw_path.read_text(encoding="utf-8"))
+            duplicate_capture["receipt_id"] = first_evidence["offer"]["receipt_id"]
+            duplicate_source = second_base / "duplicate-receipt.json"
+            duplicate_source.write_text(json.dumps(duplicate_capture), encoding="utf-8")
+            duplicate_file, duplicate_evidence = execution_evidence.build_evidence(
+                duplicate_source, output_dir=second_base / "duplicate-evidence"
+            )
+            second_entry.update(
+                execution_evidence_file=str(duplicate_file),
+                execution_evidence_hash=duplicate_evidence["evidence_hash"],
+            )
+            prediction = second["commitments"][0]["prediction_payload"]
+            previous_binding = second["commitments"][0]["forward_policy_binding"]
+            base_binding = deepcopy(previous_binding)
+            base_binding.pop("binding_hash")
+            base_binding.pop("observation_commitment_hash")
+            base_binding["schema_version"] = (
+                forward_policy.PROVENANCE_RECORD_BINDING_SCHEMA_VERSION
+            )
+            base_binding["binding_hash"] = forward_policy._hash_json(base_binding)
+            committed_binding = forward_policy.bind_observation_commitment(
+                base_binding, forward_validation._hash(prediction)
+            )
+            second["commitments"][0] = seal(
+                {
+                    "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
+                    "prediction_payload": prediction,
+                    "forward_policy_binding": committed_binding,
+                },
+                "commitment_hash",
+            )
+            settlement = deepcopy(second["settlements"][0])
+            settlement.pop("settlement_hash")
+            settlement["commitment_hash"] = second["commitments"][0]["commitment_hash"]
+            second["settlements"][0] = seal(settlement, "settlement_hash")
+            aggregate = aggregate_from_micro_ledgers([first, second])
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "reuses one firm/account/receipt identity",
+            ):
+                forward_policy.validate_closure(
+                    aggregate["cohort_closure"],
+                    cohort=aggregate["cohort_manifest"],
+                    require_record_manifest=True,
+                )
+            with self.assertRaisesRegex(
+                forward_validation.ForwardValidationError,
+                "cohort closure or complete record manifest is invalid",
+            ):
+                forward_validation.validate_input(aggregate)
 
     def test_active_categorical_shadow_replays_without_fake_execution(self) -> None:
         from test_memory_store import memory_store
@@ -2369,12 +2598,12 @@ class ForwardValidationTests(unittest.TestCase):
                 mock.patch.object(memory_store, "utc_now", return_value=archived_at),
                 self.assertRaisesRegex(
                     ValueError,
-                    "formal btts pick must match exactly one evaluated candidate",
+                    "candidate-directional evidence",
                 ),
             ):
                 memory_store.cmd_record(args)
 
-    def test_formal_pick_cannot_change_frozen_candidate_signal_or_confidence(
+    def test_shadow_candidate_signal_comes_from_frozen_evaluation_not_cli_fields(
         self,
     ) -> None:
         from test_memory_store import memory_store
@@ -2409,14 +2638,20 @@ class ForwardValidationTests(unittest.TestCase):
                     return_value=deepcopy(base_binding),
                 ),
                 mock.patch.object(memory_store, "utc_now", return_value=archived_at),
-                self.assertRaisesRegex(
-                    ValueError,
-                    "does not match its frozen candidate source/price/model",
-                ),
             ):
-                memory_store.cmd_record(args)
+                record = memory_store.cmd_record(args)["record"]
+            audit = next(
+                item
+                for item in record["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            selected = next(
+                item for item in audit["candidates"] if item["shadow_selected"]
+            )
+            self.assertEqual(selected["market_signal"], "aligned")
+            self.assertIsNone(record["primary_market"])
 
-    def test_formal_eligible_selected_candidate_cannot_be_silently_suppressed(
+    def test_shadow_only_selected_candidate_is_not_promoted_to_formal(
         self,
     ) -> None:
         from test_memory_store import memory_store
@@ -2454,12 +2689,19 @@ class ForwardValidationTests(unittest.TestCase):
                     return_value=deepcopy(base_binding),
                 ),
                 mock.patch.object(memory_store, "utc_now", return_value=archived_at),
-                self.assertRaisesRegex(
-                    ValueError,
-                    "formal-eligible selected candidates and official formal picks must match exactly",
-                ),
             ):
-                memory_store.cmd_record(args)
+                record = memory_store.cmd_record(args)["record"]
+            audit = next(
+                item
+                for item in record["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            selected = next(
+                item for item in audit["candidates"] if item["shadow_selected"]
+            )
+            self.assertTrue(selected["counterfactual_eligible"])
+            self.assertFalse(selected["formal_eligible"])
+            self.assertIsNone(record["primary_market"])
 
     def test_active_record_rejects_resealed_model_probability_tamper(self) -> None:
         from test_memory_store import memory_store
@@ -2470,9 +2712,9 @@ class ForwardValidationTests(unittest.TestCase):
                 base,
                 start_index=44,
                 family="asian",
-                line=-0.75,
+                line=0.0,
                 reference_outcome="home",
-                expected_state="half_win",
+                expected_state="full_win",
             )
             ledger_file = base / "prematch-forward-ledger.json"
             ledger_file.write_text(
@@ -2553,9 +2795,6 @@ class ForwardValidationTests(unittest.TestCase):
                     "source_evidence_hash": evidence["evidence_hash"],
                 }
             )
-            prediction["execution_entry"]["entry_source_evidence_hash"] = evidence[
-                "evidence_hash"
-            ]
             base_binding = reseal_single_commitment_ledger(ledger)
             ledger_file.write_text(
                 json.dumps(ledger, ensure_ascii=False), encoding="utf-8"
@@ -3167,9 +3406,20 @@ class ForwardValidationTests(unittest.TestCase):
             ):
                 recorded = memory_store.cmd_record(args)
             record = recorded["record"]
-            self.assertEqual(record["primary_market"], "total")
-            self.assertEqual(record["total_pick"]["side"], "over")
-            self.assertEqual(record["primary_pick"]["confidence_rank"], 1)
+            self.assertIsNone(record["primary_market"])
+            self.assertIsNone(record["total_pick"])
+            candidate_audit = next(
+                item
+                for item in record["candidate_audits"]
+                if item.get("kind") == memory_store.CANDIDATE_EVALUATION_KIND
+            )
+            selected = next(
+                item
+                for item in candidate_audit["candidates"]
+                if item["shadow_selected"]
+            )
+            self.assertTrue(selected["counterfactual_eligible"])
+            self.assertFalse(selected["formal_eligible"])
             self.assertEqual(
                 record["forward_policy_binding"]["schema_version"],
                 forward_policy.PROVENANCE_COMMITTED_RECORD_BINDING_SCHEMA_VERSION,
@@ -3240,32 +3490,23 @@ class ForwardValidationTests(unittest.TestCase):
         kickoff = datetime.fromisoformat(prediction["kickoff"])
         prediction["generated_at"] = (kickoff + timedelta(minutes=1)).isoformat()
         prediction["lead_time_minutes"] = -1
-        binding = forward_policy.bind_observation_commitment(
-            base_policy_binding(
-                value["policy_manifest"],
-                value["cohort_manifest"],
-                (kickoff + timedelta(minutes=2)).isoformat(),
-                fixture_id=prediction["fixture_id"],
-            ),
-            forward_validation._hash(prediction),
-        )
-        value["commitments"][0] = seal(
-            {
-                "schema_version": forward_validation.COMMITMENT_SCHEMA_VERSION,
-                "prediction_payload": prediction,
-                "forward_policy_binding": binding,
-            },
-            "commitment_hash",
-        )
-        settlement = value["settlements"][0]
-        settlement["commitment_hash"] = value["commitments"][0]["commitment_hash"]
-        settlement.pop("settlement_hash")
-        value["settlements"][0] = seal(settlement, "settlement_hash")
         with self.assertRaisesRegex(
-            forward_validation.ForwardValidationError,
-            "archived_at < kickoff|timestamps|lead_time",
+            forward_policy.ForwardPolicyError,
+            "archive is not strictly before kickoff",
         ):
-            forward_validation.validate_prematch_input(value)
+            forward_policy.bind_observation_commitment(
+                base_policy_binding(
+                    value["policy_manifest"],
+                    value["cohort_manifest"],
+                    (kickoff + timedelta(minutes=2)).isoformat(),
+                    fixture_id=prediction["fixture_id"],
+                    competition_key=prediction["league"],
+                    home_team=prediction["home_team"],
+                    away_team=prediction["away_team"],
+                    kickoff=prediction["kickoff"],
+                ),
+                forward_validation._hash(prediction),
+            )
 
     def test_unreplayable_results_and_closing_prices_are_quarantined_from_scores(
         self,
@@ -3549,6 +3790,10 @@ class ForwardValidationTests(unittest.TestCase):
                     value["cohort_manifest"],
                     prediction["generated_at"],
                     fixture_id=prediction["fixture_id"],
+                    competition_key=prediction["league"],
+                    home_team=prediction["home_team"],
+                    away_team=prediction["away_team"],
+                    kickoff=prediction["kickoff"],
                 ),
                 forward_validation._hash(prediction),
             )
@@ -3624,6 +3869,10 @@ class ForwardValidationTests(unittest.TestCase):
                         + timedelta(minutes=1)
                     ).isoformat(),
                     fixture_id=prediction["fixture_id"],
+                    competition_key=prediction["league"],
+                    home_team=prediction["home_team"],
+                    away_team=prediction["away_team"],
+                    kickoff=prediction["kickoff"],
                 ),
                 forward_validation._hash(prediction),
             )

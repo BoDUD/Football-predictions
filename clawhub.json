@@ -4,7 +4,7 @@
   "description": "Auditable football match analysis for Codex and OpenClaw with a league-trained joint match-path posterior, reproducible Dixon-Coles score model, coherent HT/FT and exact-score scenarios, strict pre-kickoff evidence, and verified post-match settlement.",
   "category": "finance",
   "tags": ["football", "soccer", "betting", "prediction", "sports", "analytics", "quantitative", "titan007", "odds", "handicap"],
-  "version": "3.7.1",
+  "version": "3.8.0",
   "license": "MIT",
   "pricing": "free",
   "support_url": "https://github.com/BoDUD/Football-predictions/issues",

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import fundamental_evidence
+from scripts import fundamental_evidence, source_evidence
 
 
 class FundamentalEvidenceTests(unittest.TestCase):
@@ -14,6 +14,7 @@ class FundamentalEvidenceTests(unittest.TestCase):
         players = [f"Player {index}" for index in range(1, 12)]
         return {
             "schema_version": fundamental_evidence.RAW_SCHEMA_VERSION,
+            "source_class": "official_confirmed",
             "source_url": "https://zq.titan007.com/analysis/2910001cn.htm",
             "collected_at": "2026-08-08T10:00:00Z",
             "fixture": {
@@ -45,7 +46,9 @@ class FundamentalEvidenceTests(unittest.TestCase):
             "attack_configuration": {
                 side: {
                     "formation": "4-3-3",
-                    "recognized_attackers": [f"{side} striker"],
+                    "recognized_attackers": [
+                        "Player 1" if side == "home" else "Away 1"
+                    ],
                 }
                 for side in ("home", "away")
             },
@@ -73,7 +76,8 @@ class FundamentalEvidenceTests(unittest.TestCase):
             path, evidence = fundamental_evidence.build_evidence(
                 [source], output_dir=base / "evidence"
             )
-            self.assertTrue(all(evidence["derived_claims"].values()))
+            self.assertTrue(all(evidence["availability_claims"].values()))
+            self.assertEqual(evidence["candidate_support"], {})
             self.assertEqual(
                 fundamental_evidence.validate_evidence_file(path), evidence
             )
@@ -107,6 +111,131 @@ class FundamentalEvidenceTests(unittest.TestCase):
             fundamental_evidence.FundamentalEvidenceError, "11 unique"
         ):
             fundamental_evidence.parse_snapshot(json.dumps(incomplete).encode("utf-8"))
+
+    def test_predicted_lineup_and_nonstarter_attacker_cannot_confirm_support(
+        self,
+    ) -> None:
+        predicted = self._snapshot()
+        predicted["source_class"] = "predicted_lineup"
+        with self.assertRaisesRegex(
+            fundamental_evidence.FundamentalEvidenceError,
+            "can confirm lineups",
+        ):
+            fundamental_evidence.parse_snapshot(json.dumps(predicted).encode("utf-8"))
+
+        nonstarter = self._snapshot()
+        nonstarter["attack_configuration"]["home"]["recognized_attackers"] = [
+            "Not In Starting XI"
+        ]
+        with self.assertRaisesRegex(
+            fundamental_evidence.FundamentalEvidenceError,
+            "must be confirmed starters",
+        ):
+            fundamental_evidence.parse_snapshot(json.dumps(nonstarter).encode("utf-8"))
+
+    def test_conflicting_confirmed_lineups_fail_closed_across_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            first = self._snapshot()
+            second = self._snapshot()
+            second["source_url"] = "https://provider.example/fixture/2910001"
+            second["collected_at"] = "2026-08-08T10:01:00Z"
+            second["confirmed_lineups"]["home"][-1] = "Different Starter"
+            first_path = base / "first.json"
+            second_path = base / "second.json"
+            first_path.write_text(json.dumps(first), encoding="utf-8")
+            second_path.write_text(json.dumps(second), encoding="utf-8")
+            with self.assertRaisesRegex(
+                fundamental_evidence.FundamentalEvidenceError,
+                "confirmed lineup sources conflict",
+            ):
+                fundamental_evidence.build_evidence(
+                    [first_path, second_path], output_dir=base / "evidence"
+                )
+
+    def test_candidate_direction_is_evaluated_for_exact_identity_and_selection(
+        self,
+    ) -> None:
+        identity = {
+            "family": "total",
+            "period": "full_time",
+            "line": 3.5,
+            "price_outcomes": ["over", "under"],
+        }
+        identity_hash = source_evidence.market_identity_hash(identity)
+        snapshot = self._snapshot()
+        snapshot["candidate_support_requests"] = [
+            {
+                "market": "total",
+                "selection": selection,
+                "market_identity": identity,
+                "market_identity_hash": identity_hash,
+            }
+            for selection in ("over", "under")
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source.json"
+            source.write_text(json.dumps(snapshot), encoding="utf-8")
+            _path, evidence = fundamental_evidence.build_evidence(
+                [source], output_dir=base / "evidence"
+            )
+        support = evidence["candidate_support"]
+        self.assertFalse(support[f"{identity_hash}:over"]["directionally_supported"])
+        self.assertTrue(support[f"{identity_hash}:under"]["directionally_supported"])
+        self.assertFalse(support[f"{identity_hash}:under"]["formal_gate_eligible"])
+        self.assertEqual(
+            support[f"{identity_hash}:under"]["release_status"],
+            "shadow_only_pending_forward_validation",
+        )
+
+    def test_deep_asian_direction_requires_tail_risk_and_goal_margin(self) -> None:
+        identity = {
+            "family": "asian",
+            "period": "full_time",
+            "line": -0.75,
+            "price_outcomes": ["home", "away"],
+        }
+        identity_hash = source_evidence.market_identity_hash(identity)
+        snapshot = self._snapshot()
+        snapshot["chance_quality"]["home"].update(xg_per_match=2.2, xga_per_match=0.6)
+        snapshot["chance_quality"]["away"].update(xg_per_match=0.6, xga_per_match=1.8)
+        snapshot["candidate_support_requests"] = [
+            {
+                "market": "asian",
+                "selection": "home",
+                "market_identity": identity,
+                "market_identity_hash": identity_hash,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source.json"
+            source.write_text(json.dumps(snapshot), encoding="utf-8")
+            _path, evidence = fundamental_evidence.build_evidence(
+                [source], output_dir=base / "evidence"
+            )
+        item = evidence["candidate_support"][f"{identity_hash}:home"]
+        self.assertTrue(item["directionally_supported"])
+        self.assertTrue(
+            item["source_evaluations"][0]["metrics"]["opponent_tail_risk_checked"]
+        )
+
+        without_tail = self._snapshot()
+        without_tail.pop("opponent_tail_risk")
+        without_tail["candidate_support_requests"] = snapshot[
+            "candidate_support_requests"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source.json"
+            source.write_text(json.dumps(without_tail), encoding="utf-8")
+            _path, evidence = fundamental_evidence.build_evidence(
+                [source], output_dir=base / "evidence"
+            )
+        item = evidence["candidate_support"][f"{identity_hash}:home"]
+        self.assertFalse(item["directionally_supported"])
+        self.assertEqual(item["source_evaluations"], [])
 
 
 if __name__ == "__main__":

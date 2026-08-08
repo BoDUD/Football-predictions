@@ -20,9 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-SCOPE_SCHEMA_VERSION = "forward-cohort-scope/1.0.0"
-EVENT_SCHEMA_VERSION = "forward-cohort-denominator-event/1.0.0"
-DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/1.0.0"
+SCOPE_SCHEMA_VERSION = "forward-cohort-scope/1.1.0"
+PREVIOUS_SCOPE_SCHEMA_VERSION = "forward-cohort-scope/1.0.0"
+EVENT_SCHEMA_VERSION = "forward-cohort-denominator-event/2.0.0"
+PREVIOUS_EVENT_SCHEMA_VERSION = "forward-cohort-denominator-event/1.0.0"
+REQUEST_BINDING_SCHEMA_VERSION = "forward-cohort-request-binding/2.0.0"
+PREVIOUS_REQUEST_BINDING_SCHEMA_VERSION = "forward-cohort-request-binding/1.0.0"
+DENOMINATOR_SCHEMA_VERSION = "forward-cohort-denominator/2.0.0"
 ESTIMAND = "distinct_user_requested_fixtures"
 TERMINAL_UNAVAILABLE_REASONS = frozenset(
     {
@@ -33,6 +37,9 @@ TERMINAL_UNAVAILABLE_REASONS = frozenset(
         "competition_out_of_scope",
         "postponed_without_replacement",
         "cancelled",
+        "independent_model_unavailable",
+        "archive_deadline_missed",
+        "archive_pipeline_incompatible",
     }
 )
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -164,6 +171,8 @@ def build_scope(
             "one_denominator_entry_per_fixture": True,
             "all_requests_require_record_or_terminal_unavailable": True,
             "postponed_fixture_keeps_identity_until_cancelled_or_replaced": True,
+            "events_require_active_cohort_binding": True,
+            "reschedules_and_replacements_are_explicit": True,
         },
     }
     value["scope_hash"] = _hash_json(value)
@@ -189,7 +198,8 @@ def validate_scope(raw: Any) -> dict[str, Any]:
     }
     if set(value) != required:
         raise CohortScopeError("cohort scope fields are incomplete")
-    if value.get("schema_version") != SCOPE_SCHEMA_VERSION:
+    schema_version = value.get("schema_version")
+    if schema_version not in {PREVIOUS_SCOPE_SCHEMA_VERSION, SCOPE_SCHEMA_VERSION}:
         raise CohortScopeError("unsupported cohort scope schema_version")
     if value.get("artifact_type") != "soccer_live_forward_cohort_scope":
         raise CohortScopeError("cohort scope artifact_type is invalid")
@@ -214,6 +224,17 @@ def validate_scope(raw: Any) -> dict[str, Any]:
         starts_at=started,
         ends_at=ended,
     )["inclusion_policy"]
+    if schema_version == PREVIOUS_SCOPE_SCHEMA_VERSION:
+        expected_policy = {
+            key: expected_policy[key]
+            for key in (
+                "request_must_precede_analysis_archive",
+                "request_must_precede_kickoff",
+                "one_denominator_entry_per_fixture",
+                "all_requests_require_record_or_terminal_unavailable",
+                "postponed_fixture_keeps_identity_until_cancelled_or_replaced",
+            )
+        }
     if value.get("inclusion_policy") != expected_policy:
         raise CohortScopeError("cohort scope inclusion_policy is not canonical")
     value["scope_hash"] = _require_hash(supplied, "scope_hash")
@@ -228,8 +249,83 @@ def load_scope(path: str | Path) -> dict[str, Any]:
     return validate_scope(raw)
 
 
+def _active_cohort_path(base_dir: str | Path) -> Path:
+    return (
+        Path(base_dir).resolve()
+        / ".codex"
+        / "soccer-predict"
+        / "active-forward-cohort.json"
+    )
+
+
+def _load_active_event_binding(
+    base_dir: str | Path,
+    *,
+    cohort_id: str,
+    scope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Load the live pointer and bind an append to its frozen policy.
+
+    This module deliberately performs a small self-contained validation instead of
+    importing ``forward_policy`` (which imports this module).  The full policy is still
+    validated by the caller before cohort start and again at record/closure time.
+    """
+
+    path = _active_cohort_path(base_dir)
+    try:
+        cohort = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CohortScopeError("active cohort is unavailable or invalid") from exc
+    if not isinstance(cohort, Mapping):
+        raise CohortScopeError("active cohort is invalid")
+    value = deepcopy(dict(cohort))
+    supplied_hash = value.pop("cohort_hash", None)
+    if supplied_hash != _hash_json(value):
+        raise CohortScopeError("active cohort hash is invalid")
+    frozen = validate_scope(scope)
+    if value.get("status") != "active":
+        raise CohortScopeError("denominator events require an active cohort")
+    if value.get("cohort_id") != _require_token(cohort_id, "cohort_id"):
+        raise CohortScopeError("denominator event cohort_id is not active")
+    if (
+        value.get("scope_id") != frozen["scope_id"]
+        or value.get("scope_hash") != frozen["scope_hash"]
+    ):
+        raise CohortScopeError("active cohort does not bind the supplied scope")
+    policy_id = _require_token(value.get("policy_id"), "policy_id")
+    policy_hash = _require_hash(value.get("policy_hash"), "policy_hash")
+    policy_path = Path(str(value.get("policy_file") or ""))
+    expected_root = (
+        Path(base_dir).resolve() / ".codex" / "soccer-predict" / "forward-policies"
+    )
+    try:
+        resolved_policy = policy_path.resolve(strict=True)
+        resolved_policy.relative_to(expected_root)
+        raw_policy = json.loads(resolved_policy.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CohortScopeError(
+            "active cohort policy is unavailable or non-canonical"
+        ) from exc
+    if (
+        not isinstance(raw_policy, Mapping)
+        or raw_policy.get("policy_id") != policy_id
+        or raw_policy.get("policy_hash") != policy_hash
+    ):
+        raise CohortScopeError("active cohort policy binding is invalid")
+    return {
+        "cohort_hash": _require_hash(supplied_hash, "cohort_hash"),
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "starts_at": _aware(value.get("starts_at"), "cohort.starts_at")
+        .replace(microsecond=0)
+        .isoformat(),
+        "policy_snapshot": deepcopy(dict(raw_policy)),
+    }
+
+
 def _event_without_hash(
     *,
+    schema_version: str,
     event_type: str,
     cohort_id: str,
     scope: Mapping[str, Any],
@@ -241,8 +337,16 @@ def _event_without_hash(
     occurred_at: str | datetime,
     previous_event_hash: str | None,
     reason: str | None = None,
+    cohort_binding: Mapping[str, Any] | None = None,
+    replacement_fixture: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if event_type not in {"requested", "unavailable"}:
+    if schema_version not in {PREVIOUS_EVENT_SCHEMA_VERSION, EVENT_SCHEMA_VERSION}:
+        raise CohortScopeError("denominator event schema_version is invalid")
+    if schema_version == PREVIOUS_EVENT_SCHEMA_VERSION:
+        allowed_types = {"requested", "unavailable"}
+    else:
+        allowed_types = {"requested", "unavailable", "rescheduled", "replaced"}
+    if event_type not in allowed_types:
         raise CohortScopeError("denominator event_type is invalid")
     fixture = _require_token(fixture_id, "fixture_id")
     competition = _require_token(competition_key, "competition_key")
@@ -251,7 +355,7 @@ def _event_without_hash(
         raise CohortScopeError("fixture competition is outside the frozen scope")
     kickoff_at = _aware(kickoff, "kickoff")
     event_at = _aware(occurred_at, "occurred_at")
-    if event_at >= kickoff_at:
+    if event_type == "requested" and event_at >= kickoff_at:
         raise CohortScopeError("denominator event must be recorded before kickoff")
     starts_at = _aware(frozen["starts_at"], "scope.starts_at")
     ends_at = (
@@ -265,9 +369,9 @@ def _event_without_hash(
         if clean_reason not in TERMINAL_UNAVAILABLE_REASONS:
             raise CohortScopeError("terminal unavailable reason is not registered")
     elif reason is not None:
-        raise CohortScopeError("requested events cannot carry an unavailable reason")
-    return {
-        "schema_version": EVENT_SCHEMA_VERSION,
+        raise CohortScopeError("non-terminal events cannot carry an unavailable reason")
+    value: dict[str, Any] = {
+        "schema_version": schema_version,
         "event_type": event_type,
         "cohort_id": _require_token(cohort_id, "cohort_id"),
         "scope_id": frozen["scope_id"],
@@ -283,17 +387,86 @@ def _event_without_hash(
         "reason": clean_reason,
         "previous_event_hash": previous_event_hash,
     }
+    if schema_version == EVENT_SCHEMA_VERSION:
+        if not isinstance(cohort_binding, Mapping):
+            raise CohortScopeError(
+                "current denominator event lacks active cohort binding"
+            )
+        started = _aware(cohort_binding.get("starts_at"), "cohort.starts_at")
+        if event_at < started:
+            raise CohortScopeError("denominator event predates active cohort start")
+        value.update(
+            {
+                "cohort_hash": _require_hash(
+                    cohort_binding.get("cohort_hash"), "cohort_hash"
+                ),
+                "policy_id": _require_token(
+                    cohort_binding.get("policy_id"), "policy_id"
+                ),
+                "policy_hash": _require_hash(
+                    cohort_binding.get("policy_hash"), "policy_hash"
+                ),
+            }
+        )
+        if event_type == "replaced":
+            if not isinstance(replacement_fixture, Mapping):
+                raise CohortScopeError("replaced event requires replacement_fixture")
+            replacement_kickoff = _aware(
+                replacement_fixture.get("kickoff"), "replacement_fixture.kickoff"
+            )
+            if event_at >= replacement_kickoff:
+                raise CohortScopeError(
+                    "replacement must be registered before its kickoff"
+                )
+            replacement_competition = _require_token(
+                replacement_fixture.get("competition_key"),
+                "replacement_fixture.competition_key",
+            )
+            if replacement_competition not in frozen["competition_keys"]:
+                raise CohortScopeError(
+                    "replacement fixture is outside the frozen scope"
+                )
+            value["replacement_fixture"] = {
+                "fixture_id": _require_token(
+                    replacement_fixture.get("fixture_id"),
+                    "replacement_fixture.fixture_id",
+                ),
+                "competition_key": replacement_competition,
+                "home_team": " ".join(
+                    str(replacement_fixture.get("home_team") or "").split()
+                ),
+                "away_team": " ".join(
+                    str(replacement_fixture.get("away_team") or "").split()
+                ),
+                "kickoff": replacement_kickoff.replace(microsecond=0).isoformat(),
+            }
+            if (
+                not value["replacement_fixture"]["home_team"]
+                or not value["replacement_fixture"]["away_team"]
+            ):
+                raise CohortScopeError("replacement fixture teams are required")
+        elif replacement_fixture is not None:
+            raise CohortScopeError("only replaced events can carry replacement_fixture")
+    elif cohort_binding is not None or replacement_fixture is not None:
+        raise CohortScopeError(
+            "historical denominator events cannot carry current fields"
+        )
+    return value
 
 
 def validate_events(
-    raw_events: Sequence[Any], *, scope: Mapping[str, Any], cohort_id: str
+    raw_events: Sequence[Any],
+    *,
+    scope: Mapping[str, Any],
+    cohort_id: str,
+    cohort_binding: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     frozen = validate_scope(scope)
     clean_cohort_id = _require_token(cohort_id, "cohort_id")
     normalized: list[dict[str, Any]] = []
     previous_hash: str | None = None
-    requested: dict[str, dict[str, Any]] = {}
-    unavailable: set[str] = set()
+    requests: dict[str, dict[str, Any]] = {}
+    current_to_root: dict[str, str] = {}
     for index, raw in enumerate(raw_events):
         if not isinstance(raw, Mapping):
             raise CohortScopeError(f"denominator event {index} is invalid")
@@ -304,7 +477,19 @@ def validate_events(
         fixture = value.get("fixture")
         if not isinstance(fixture, Mapping):
             raise CohortScopeError(f"denominator event {index} fixture is invalid")
+        schema_version = str(value.get("schema_version") or "")
+        effective_binding = (
+            cohort_binding if schema_version == EVENT_SCHEMA_VERSION else None
+        )
+        if schema_version == EVENT_SCHEMA_VERSION and effective_binding is None:
+            effective_binding = {
+                "cohort_hash": value.get("cohort_hash"),
+                "policy_id": value.get("policy_id"),
+                "policy_hash": value.get("policy_hash"),
+                "starts_at": frozen["starts_at"],
+            }
         expected = _event_without_hash(
+            schema_version=schema_version,
             event_type=str(value.get("event_type") or ""),
             cohort_id=clean_cohort_id,
             scope=frozen,
@@ -316,25 +501,66 @@ def validate_events(
             occurred_at=str(value.get("occurred_at") or ""),
             previous_event_hash=previous_hash,
             reason=value.get("reason"),
+            cohort_binding=effective_binding,
+            replacement_fixture=value.get("replacement_fixture"),
         )
         if value != expected:
             raise CohortScopeError(f"denominator event {index} does not replay")
         fixture_id = expected["fixture"]["fixture_id"]
-        if expected["event_type"] == "requested":
-            if fixture_id in requested:
+        event_type = expected["event_type"]
+        if event_type == "requested":
+            if fixture_id in requests or fixture_id in current_to_root:
                 raise CohortScopeError("fixture was requested more than once")
-            requested[fixture_id] = expected["fixture"]
+            requests[fixture_id] = {
+                "request_event": expected,
+                "current_fixture": expected["fixture"],
+                "fixture_event_hash": supplied,
+                "terminal": False,
+            }
+            current_to_root[fixture_id] = fixture_id
+        elif event_type == "rescheduled":
+            root = current_to_root.get(fixture_id)
+            if root is None or requests[root]["terminal"]:
+                raise CohortScopeError("rescheduled event has no active request")
+            current = requests[root]["current_fixture"]
+            if any(
+                expected["fixture"][field] != current[field]
+                for field in ("fixture_id", "competition_key", "home_team", "away_team")
+            ):
+                raise CohortScopeError("rescheduled event changes fixture identity")
+            if expected["fixture"]["kickoff"] == current["kickoff"]:
+                raise CohortScopeError("rescheduled event does not change kickoff")
+            requests[root]["current_fixture"] = expected["fixture"]
+            requests[root]["fixture_event_hash"] = supplied
+        elif event_type == "replaced":
+            root = current_to_root.get(fixture_id)
+            if root is None or requests[root]["terminal"]:
+                raise CohortScopeError("replaced event has no active request")
+            if expected["fixture"] != requests[root]["current_fixture"]:
+                raise CohortScopeError(
+                    "replaced event does not bind the current fixture"
+                )
+            replacement = expected["replacement_fixture"]
+            replacement_id = replacement["fixture_id"]
+            if replacement_id in requests or replacement_id in current_to_root:
+                raise CohortScopeError("replacement fixture identity is already in use")
+            current_to_root.pop(fixture_id)
+            current_to_root[replacement_id] = root
+            requests[root]["current_fixture"] = replacement
+            requests[root]["fixture_event_hash"] = supplied
         else:
-            if fixture_id not in requested:
+            root = current_to_root.get(fixture_id)
+            if root is None:
                 raise CohortScopeError("unavailable disposition has no prior request")
             if (
-                requested[fixture_id] != expected["fixture"]
-                or fixture_id in unavailable
+                requests[root]["terminal"]
+                or requests[root]["current_fixture"] != expected["fixture"]
             ):
                 raise CohortScopeError(
                     "unavailable disposition conflicts with its request"
                 )
-            unavailable.add(fixture_id)
+            requests[root]["terminal"] = True
+            requests[root]["terminal_event"] = expected
         expected["event_hash"] = _require_hash(supplied, "event_hash")
         normalized.append(expected)
         previous_hash = supplied
@@ -342,7 +568,11 @@ def validate_events(
 
 
 def load_events(
-    base_dir: str | Path, cohort_id: str, *, scope: Mapping[str, Any]
+    base_dir: str | Path,
+    cohort_id: str,
+    *,
+    scope: Mapping[str, Any],
+    cohort_binding: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     path = denominator_event_path(base_dir, cohort_id)
     if not path.exists():
@@ -356,7 +586,67 @@ def load_events(
         raise CohortScopeError(
             "denominator event log is unavailable or invalid"
         ) from exc
-    return validate_events(raw_events, scope=scope, cohort_id=cohort_id)
+    return validate_events(
+        raw_events,
+        scope=scope,
+        cohort_id=cohort_id,
+        cohort_binding=cohort_binding,
+    )
+
+
+def _request_states(events: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    states: dict[str, dict[str, Any]] = {}
+    current_to_root: dict[str, str] = {}
+    for event in events:
+        event_type = str(event["event_type"])
+        fixture = deepcopy(dict(event["fixture"]))
+        fixture_id = str(fixture["fixture_id"])
+        if event_type == "requested":
+            states[fixture_id] = {
+                "request_event": event,
+                "request_fixture": fixture,
+                "current_fixture": fixture,
+                "fixture_event_hash": event["event_hash"],
+                "terminal_event": None,
+            }
+            current_to_root[fixture_id] = fixture_id
+        elif event_type == "rescheduled":
+            root = current_to_root[fixture_id]
+            states[root]["current_fixture"] = fixture
+            states[root]["fixture_event_hash"] = event["event_hash"]
+        elif event_type == "replaced":
+            root = current_to_root.pop(fixture_id)
+            replacement = deepcopy(dict(event["replacement_fixture"]))
+            current_to_root[str(replacement["fixture_id"])] = root
+            states[root]["current_fixture"] = replacement
+            states[root]["fixture_event_hash"] = event["event_hash"]
+        else:
+            root = current_to_root[fixture_id]
+            states[root]["terminal_event"] = event
+    return states
+
+
+def _validate_independent_model_unavailable(
+    *,
+    active_policy: Mapping[str, Any],
+    competition_key: str,
+) -> None:
+    lineage = active_policy.get("artifact_lineage")
+    registries = (
+        lineage.get("model_registries") if isinstance(lineage, Mapping) else None
+    )
+    football = (
+        registries.get("football_htft") if isinstance(registries, Mapping) else None
+    )
+    registered = (
+        football.get("registered_models") if isinstance(football, Mapping) else None
+    )
+    if not isinstance(registered, Mapping):
+        raise CohortScopeError("active policy football model registry is unavailable")
+    if competition_key in registered:
+        raise CohortScopeError(
+            "independent_model_unavailable contradicts the frozen football registry"
+        )
 
 
 def append_event(
@@ -372,11 +662,26 @@ def append_event(
     kickoff: str | datetime,
     occurred_at: str | datetime,
     reason: str | None = None,
+    replacement_fixture: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     path = denominator_event_path(base_dir, cohort_id)
     with _event_log_lock(path):
-        events = load_events(base_dir, cohort_id, scope=scope)
+        active_binding = _load_active_event_binding(
+            base_dir, cohort_id=cohort_id, scope=scope
+        )
+        events = load_events(
+            base_dir,
+            cohort_id,
+            scope=scope,
+            cohort_binding=active_binding,
+        )
+        if reason == "independent_model_unavailable":
+            _validate_independent_model_unavailable(
+                active_policy=active_binding["policy_snapshot"],
+                competition_key=competition_key,
+            )
         value = _event_without_hash(
+            schema_version=EVENT_SCHEMA_VERSION,
             event_type=event_type,
             cohort_id=cohort_id,
             scope=scope,
@@ -388,9 +693,16 @@ def append_event(
             occurred_at=occurred_at,
             previous_event_hash=events[-1]["event_hash"] if events else None,
             reason=reason,
+            cohort_binding=active_binding,
+            replacement_fixture=replacement_fixture,
         )
         value["event_hash"] = _hash_json(value)
-        validate_events([*events, value], scope=scope, cohort_id=cohort_id)
+        validate_events(
+            [*events, value],
+            scope=scope,
+            cohort_id=cohort_id,
+            cohort_binding=active_binding,
+        )
         with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(
                 json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -400,26 +712,47 @@ def append_event(
 
 
 def request_binding(
-    *, base_dir: str | Path, cohort_id: str, scope: Mapping[str, Any], fixture_id: str
+    *,
+    base_dir: str | Path,
+    cohort_id: str,
+    scope: Mapping[str, Any],
+    fixture_id: str,
+    expected_fixture: Mapping[str, Any] | None = None,
+    cohort_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    events = load_events(base_dir, cohort_id, scope=scope)
+    events = load_events(
+        base_dir,
+        cohort_id,
+        scope=scope,
+        cohort_binding=cohort_binding,
+    )
+    states = _request_states(events)
     matches = [
-        event for event in events if event["fixture"]["fixture_id"] == str(fixture_id)
+        state
+        for state in states.values()
+        if state["current_fixture"]["fixture_id"] == str(fixture_id)
     ]
-    requests = [event for event in matches if event["event_type"] == "requested"]
-    if len(requests) != 1:
+    if len(matches) != 1:
         raise CohortScopeError(
             "fixture must have exactly one pre-analysis request event"
         )
-    if any(event["event_type"] == "unavailable" for event in matches):
+    state = matches[0]
+    if state["terminal_event"] is not None:
         raise CohortScopeError("terminally unavailable fixture cannot be archived")
-    request = requests[0]
+    fixture = deepcopy(state["current_fixture"])
+    if expected_fixture is not None and dict(expected_fixture) != fixture:
+        raise CohortScopeError(
+            "archived record fixture does not match its frozen request snapshot"
+        )
+    request = state["request_event"]
     return {
-        "schema_version": "forward-cohort-request-binding/1.0.0",
+        "schema_version": REQUEST_BINDING_SCHEMA_VERSION,
         "scope_id": request["scope_id"],
         "scope_hash": request["scope_hash"],
-        "fixture_id": request["fixture"]["fixture_id"],
+        "request_fixture_id": str(request["fixture"]["fixture_id"]),
+        "fixture": fixture,
         "request_event_hash": request["event_hash"],
+        "fixture_event_hash": state["fixture_event_hash"],
         "requested_at": request["occurred_at"],
     }
 
@@ -443,47 +776,68 @@ def build_denominator(
     ]
     if len(record_ids) != len(records) or len(set(record_ids)) != len(record_ids):
         raise CohortScopeError("record manifest fixture identities are invalid")
-    requests = {
-        event["fixture"]["fixture_id"]: event
-        for event in normalized
-        if event["event_type"] == "requested"
+    states = _request_states(normalized)
+    by_current_fixture = {
+        str(state["current_fixture"]["fixture_id"]): state for state in states.values()
     }
-    unavailable = {
-        event["fixture"]["fixture_id"]: event
-        for event in normalized
-        if event["event_type"] == "unavailable"
-    }
-    if set(record_ids) - set(requests):
+    if set(record_ids) - set(by_current_fixture):
         raise CohortScopeError("archived records exist outside the request denominator")
     for item in records:
         if not isinstance(item, Mapping):
             raise CohortScopeError("record manifest fixture identities are invalid")
         fixture_id = str(item.get("fixture_id") or "")
-        if item.get("request_event_hash") != requests[fixture_id]["event_hash"]:
+        state = by_current_fixture[fixture_id]
+        if item.get("request_event_hash") != state["request_event"]["event_hash"]:
             raise CohortScopeError(
                 "archived record request binding does not match the event log"
             )
-    if set(record_ids) & set(unavailable):
-        raise CohortScopeError("fixture cannot be both archived and unavailable")
-    unresolved = sorted(set(requests) - set(record_ids) - set(unavailable))
+        if (
+            item.get("fixture") is not None
+            and item.get("fixture") != state["current_fixture"]
+        ):
+            raise CohortScopeError(
+                "archived record fixture does not match the request event log"
+            )
+        if (
+            item.get("fixture_event_hash") is not None
+            and item.get("fixture_event_hash") != state["fixture_event_hash"]
+        ):
+            raise CohortScopeError(
+                "archived record fixture transition binding does not match the event log"
+            )
+        if state["terminal_event"] is not None:
+            raise CohortScopeError("fixture cannot be both archived and unavailable")
+    unresolved = sorted(
+        str(state["current_fixture"]["fixture_id"])
+        for state in states.values()
+        if state["terminal_event"] is None
+        and str(state["current_fixture"]["fixture_id"]) not in record_ids
+    )
     if unresolved:
         raise CohortScopeError(
             f"cohort denominator has unresolved fixtures: {unresolved}"
         )
     entries = []
-    for fixture_id in sorted(requests):
-        request = requests[fixture_id]
+    for request_fixture_id in sorted(states):
+        state = states[request_fixture_id]
+        request = state["request_event"]
+        fixture = state["current_fixture"]
+        fixture_id = str(fixture["fixture_id"])
+        terminal = state["terminal_event"]
         disposition = "recorded" if fixture_id in record_ids else "unavailable"
         entries.append(
             {
+                "request_fixture_id": request_fixture_id,
                 "fixture_id": fixture_id,
+                "fixture": deepcopy(fixture),
                 "request_event_hash": request["event_hash"],
+                "fixture_event_hash": state["fixture_event_hash"],
                 "requested_at": request["occurred_at"],
                 "disposition": disposition,
-                "unavailable_event_hash": unavailable[fixture_id]["event_hash"]
+                "unavailable_event_hash": terminal["event_hash"]
                 if disposition == "unavailable"
                 else None,
-                "unavailable_reason": unavailable[fixture_id]["reason"]
+                "unavailable_reason": terminal["reason"]
                 if disposition == "unavailable"
                 else None,
             }
@@ -498,7 +852,9 @@ def build_denominator(
         "last_event_hash": normalized[-1]["event_hash"] if normalized else None,
         "requested_fixture_count": len(entries),
         "recorded_fixture_count": len(record_ids),
-        "unavailable_fixture_count": len(unavailable),
+        "unavailable_fixture_count": sum(
+            state["terminal_event"] is not None for state in states.values()
+        ),
         "entries": entries,
         "complete": True,
     }
@@ -529,11 +885,11 @@ def validate_denominator(
         raise CohortScopeError("cohort denominator does not bind its scope/cohort")
     entries = value.get("entries")
     if not isinstance(entries, list) or [
-        str(item.get("fixture_id") or "")
+        str(item.get("request_fixture_id") or "")
         for item in entries
         if isinstance(item, Mapping)
     ] != sorted(
-        str(item.get("fixture_id") or "")
+        str(item.get("request_fixture_id") or "")
         for item in entries
         if isinstance(item, Mapping)
     ):
@@ -552,7 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--starts-at", required=True)
     build.add_argument("--ends-at")
     build.add_argument("--output", required=True)
-    for name in ("request", "unavailable"):
+    for name in ("request", "unavailable", "rescheduled", "replaced"):
         command = sub.add_parser(name)
         command.add_argument("--scope-file", required=True)
         command.add_argument("--cohort-id", required=True)
@@ -566,12 +922,21 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--reason", required=True, choices=sorted(TERMINAL_UNAVAILABLE_REASONS)
             )
+        if name == "replaced":
+            command.add_argument("--replacement-fixture-id", required=True)
+            command.add_argument("--replacement-competition-key", required=True)
+            command.add_argument("--replacement-home-team", required=True)
+            command.add_argument("--replacement-away-team", required=True)
+            command.add_argument("--replacement-kickoff", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--scope-file", required=True)
     return parser
 
 
 def main() -> int:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     try:
         if args.command == "build":
@@ -594,11 +959,26 @@ def main() -> int:
             artifact = load_scope(path)
         else:
             path = denominator_event_path(args.base_dir, args.cohort_id)
+            event_type = {
+                "request": "requested",
+                "unavailable": "unavailable",
+                "rescheduled": "rescheduled",
+                "replaced": "replaced",
+            }[args.command]
+            replacement_fixture = None
+            if args.command == "replaced":
+                replacement_fixture = {
+                    "fixture_id": args.replacement_fixture_id,
+                    "competition_key": args.replacement_competition_key,
+                    "home_team": args.replacement_home_team,
+                    "away_team": args.replacement_away_team,
+                    "kickoff": args.replacement_kickoff,
+                }
             artifact = append_event(
                 base_dir=args.base_dir,
                 cohort_id=args.cohort_id,
                 scope=load_scope(args.scope_file),
-                event_type="requested" if args.command == "request" else "unavailable",
+                event_type=event_type,
                 fixture_id=args.fixture_id,
                 competition_key=args.competition_key,
                 home_team=args.home_team,
@@ -606,6 +986,7 @@ def main() -> int:
                 kickoff=args.kickoff,
                 occurred_at=args.occurred_at,
                 reason=getattr(args, "reason", None),
+                replacement_fixture=replacement_fixture,
             )
         print(
             json.dumps(

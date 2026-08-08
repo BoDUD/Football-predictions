@@ -1,0 +1,25 @@
+{
+  "schema_version": "forward-lineage-golden/1.0.0",
+  "expected_model_count": 19,
+  "league_keys": [
+    "afc_champions_league",
+    "brazil_cup",
+    "brazil_serie_a",
+    "england_league_cup",
+    "england_premier_league",
+    "finland_veikkausliiga",
+    "france_ligue_1",
+    "germany_bundesliga",
+    "italy_serie_a",
+    "japan_j1",
+    "korea_k_league_1",
+    "netherlands_eerste_divisie",
+    "norway_eliteserien",
+    "portugal_primeira_liga",
+    "spain_la_liga",
+    "sweden_allsvenskan",
+    "uefa_champions_league",
+    "uefa_nations_league",
+    "usa_mls"
+  ]
+}
