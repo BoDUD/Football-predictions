@@ -4,6 +4,12 @@ Released-version entries below describe historical behavior and are superseded b
 
 ## [Unreleased]
 
+## [3.6.2] - 2026-08-08
+
+### Fixed
+- Made lineup-check plain text and prediction cards compare observation transitions against the same frozen initial archive, without changing the existing immediate-revision baseline used for formal-primary price arrows.
+- Rendered every non-formal `主推` table cell and the no-primary footer explanation in the neutral no-bet color while preserving the observation color exclusively for the separate non-counting observation panel.
+
 ## [3.6.1] - 2026-08-08
 
 ### Fixed
