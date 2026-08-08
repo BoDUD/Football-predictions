@@ -1751,8 +1751,35 @@ def close_cohort(
     record_manifest: Mapping[str, Any],
     closed_at: str | datetime | None = None,
 ) -> tuple[Path, dict[str, Any]]:
+    """Close one cohort while excluding every concurrent event-log writer."""
+
+    cohort_id = str(record_manifest.get("cohort_id") or "")
+    try:
+        cohort_scope.denominator_event_path(base_dir, cohort_id)
+    except cohort_scope.CohortScopeError as exc:
+        raise ForwardPolicyError("record manifest cohort_id is invalid") from exc
+    with cohort_scope.event_log_transaction(base_dir, cohort_id):
+        return _close_cohort_under_event_lock(
+            base_dir=base_dir,
+            record_manifest=record_manifest,
+            closed_at=closed_at,
+            expected_cohort_id=cohort_id,
+        )
+
+
+def _close_cohort_under_event_lock(
+    *,
+    base_dir: str | Path,
+    record_manifest: Mapping[str, Any],
+    closed_at: str | datetime | None,
+    expected_cohort_id: str,
+) -> tuple[Path, dict[str, Any]]:
     active_path = active_cohort_path(base_dir)
     pointer = validate_cohort(_read_json(active_path, "active cohort"))
+    if pointer.get("cohort_id") != expected_cohort_id:
+        raise ForwardPolicyError(
+            "active live-forward cohort does not match the record manifest"
+        )
     already_closed = pointer["status"] == "closed"
     if already_closed:
         immutable_path = cohort_manifest_path(base_dir, str(pointer["cohort_id"]))

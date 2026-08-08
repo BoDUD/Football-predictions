@@ -8669,9 +8669,6 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
         else forward_policy.cohort_directory(args.base_dir)
         / f"{cohort_id}-record-manifest.json"
     )
-    manifest_path = _write_forward_record_manifest_once(
-        manifest_output, manifest, cohort=cohort
-    )
     try:
         closure_path, closure = forward_policy.close_cohort(
             base_dir=args.base_dir,
@@ -8680,12 +8677,16 @@ def cmd_close_forward_cohort(args: argparse.Namespace) -> dict[str, Any]:
         )
     except forward_policy.ForwardPolicyError as exc:
         raise ValueError("Forward cohort could not be closed") from exc
+    closed_manifest = closure.get("record_manifest")
+    if not isinstance(closed_manifest, dict) or closed_manifest != manifest:
+        raise ValueError("Closed cohort did not preserve the candidate record manifest")
+    manifest_path = _write_json_atomically(manifest_output, closed_manifest)
     return {
         "ok": True,
         "cohort_id": cohort_id,
         "record_manifest_path": str(manifest_path),
-        "record_count": manifest["record_count"],
-        "manifest_hash": manifest["manifest_hash"],
+        "record_count": closed_manifest["record_count"],
+        "manifest_hash": closed_manifest["manifest_hash"],
         "closure_path": str(closure_path),
         "closure_hash": closure["closure_hash"],
     }

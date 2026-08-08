@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.11.0] - 2026-08-09
+
+- Serialize cohort closure and every denominator event append with the same cross-process event-log transaction until the immutable closure and closed active pointer are both durable.
+- Publish the external record manifest only after closure succeeds, using the exact manifest embedded in the closure so a concurrent-event failure cannot strand a stale final manifest or block a safe retry.
+- Add deterministic spawned-process regressions for both lock orders while keeping every formal recommendation gate, model, market release policy, and settlement rule unchanged.
+
 ## [3.10.0] - 2026-08-08
 
 - Bind every current cohort closure to its last denominator event, maximum record archive timestamp, and actual closure observation time without truncating microseconds.

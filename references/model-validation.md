@@ -501,10 +501,15 @@ and optional closing snapshot. The evaluator requires exact queue coverage, one 
 explicit settled-or-pending settlement per key; caller-chosen duplicate observation IDs,
 retrospective generation, late market snapshots and post-result edits to model probabilities fail
 closed. Close the cohort only through `memory_store.py close-forward-cohort`. It holds the history
-lock while selecting every bound record in the named cohort, writes a canonical
-`forward-cohort-denominator/2.2.0` with `last_event_at`, writes a canonical
-`live-forward-record-manifest/2.2.0` with `max_record_archived_at`, embeds that manifest in the
-`live-forward-cohort-closure/2.1.0`, and closes the active pointer before releasing the lock. Each
+lock while selecting every bound record in the named cohort, then holds the same cross-process
+event-log transaction used by request/rescheduled/replaced/unavailable writers while it rereads the
+active pointer and complete log, reproduces `forward-cohort-denominator/2.2.0` with
+`last_event_at`, embeds the canonical `live-forward-record-manifest/2.2.0` with
+`max_record_archived_at` in `live-forward-cohort-closure/2.1.0`, and closes the active pointer.
+Only after that transaction succeeds does it atomically publish the external record-manifest file
+from the closure's exact embedded copy. A losing concurrent event therefore either precedes the
+closure and must be included, or observes the closed pointer and fails; a failed close cannot leave
+a stale final manifest that blocks retry. Each
 canonically sorted manifest entry binds the fixture ID, original request fixture ID, current full
 fixture, request and fixture event hashes, latest fixture event time, execution receipt identities, archive-version hash,
 record archive time, record-commitment hash, committed-binding hash, and pre-match-ledger hash.

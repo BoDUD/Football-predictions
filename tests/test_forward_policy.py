@@ -1,15 +1,99 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from scripts import forward_policy, forward_validation, memory_store
+from scripts import cohort_scope, forward_policy, forward_validation, memory_store
+
+
+def _close_cohort_process(
+    base_dir: str,
+    manifest: dict,
+    result_queue,
+    started,
+    lock_acquired=None,
+    release_lock=None,
+) -> None:
+    if lock_acquired is not None and release_lock is not None:
+        original_transaction = cohort_scope.event_log_transaction
+
+        @contextmanager
+        def controlled_transaction(base, cohort_id):
+            with original_transaction(base, cohort_id) as path:
+                lock_acquired.set()
+                if not release_lock.wait(20):
+                    raise RuntimeError("timed out waiting to release the close lock")
+                yield path
+
+        cohort_scope.event_log_transaction = controlled_transaction
+    started.set()
+    try:
+        path, closure = forward_policy.close_cohort(
+            base_dir=base_dir,
+            record_manifest=manifest,
+        )
+    except Exception as exc:  # pragma: no cover - asserted through child result
+        result_queue.put({"ok": False, "type": type(exc).__name__, "message": str(exc)})
+    else:
+        result_queue.put(
+            {
+                "ok": True,
+                "path": str(path),
+                "closure_hash": closure["closure_hash"],
+                "last_event_hash": closure["record_manifest"]["denominator"][
+                    "last_event_hash"
+                ],
+            }
+        )
+
+
+def _append_event_process(
+    base_dir: str,
+    cohort_id: str,
+    scope: dict,
+    result_queue,
+    started,
+    lock_acquired=None,
+    release_lock=None,
+) -> None:
+    if lock_acquired is not None and release_lock is not None:
+        original_transaction = cohort_scope.event_log_transaction
+
+        @contextmanager
+        def controlled_transaction(base, selected_cohort_id):
+            with original_transaction(base, selected_cohort_id) as path:
+                lock_acquired.set()
+                if not release_lock.wait(20):
+                    raise RuntimeError("timed out waiting to release the event lock")
+                yield path
+
+        cohort_scope.event_log_transaction = controlled_transaction
+    started.set()
+    try:
+        event = cohort_scope.append_event(
+            base_dir=base_dir,
+            cohort_id=cohort_id,
+            scope=scope,
+            event_type="requested",
+            fixture_id="concurrent-fixture",
+            competition_key="test_league",
+            home_team="Home",
+            away_team="Away",
+            kickoff="2026-08-06T05:00:00Z",
+            occurred_at="2026-08-06T02:30:00Z",
+        )
+    except Exception as exc:  # pragma: no cover - asserted through child result
+        result_queue.put({"ok": False, "type": type(exc).__name__, "message": str(exc)})
+    else:
+        result_queue.put({"ok": True, "event_hash": event["event_hash"]})
 
 
 def empty_record_manifest(cohort: dict) -> dict:
@@ -1275,6 +1359,263 @@ class ForwardPolicyTests(unittest.TestCase):
                     record_manifest=manifest,
                     closed_at="2026-08-06T02:59:00Z",
                 )
+
+    def test_close_and_event_append_share_one_cross_process_transaction(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            policy_file = self._write_policy(base, policy)
+            with mock.patch.object(
+                forward_policy, "_git", side_effect=self._clean_final_head
+            ):
+                active_path, cohort = forward_policy.start_cohort(
+                    base_dir=base,
+                    policy_file=policy_file,
+                    cohort_id="concurrent-close-wins",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
+            manifest = empty_record_manifest(cohort)
+            close_results = context.Queue()
+            event_results = context.Queue()
+            close_started = context.Event()
+            close_acquired = context.Event()
+            release_close = context.Event()
+            event_started = context.Event()
+            closer = context.Process(
+                target=_close_cohort_process,
+                args=(
+                    str(base),
+                    manifest,
+                    close_results,
+                    close_started,
+                    close_acquired,
+                    release_close,
+                ),
+            )
+            writer = context.Process(
+                target=_append_event_process,
+                args=(
+                    str(base),
+                    cohort["cohort_id"],
+                    policy["cohort_scope"]["scope_snapshot"],
+                    event_results,
+                    event_started,
+                ),
+            )
+            closer.start()
+            self.assertTrue(close_started.wait(10))
+            self.assertTrue(close_acquired.wait(10))
+            writer.start()
+            self.assertTrue(event_started.wait(10))
+            release_close.set()
+            closer.join(20)
+            writer.join(20)
+            if closer.is_alive():
+                closer.terminate()
+            if writer.is_alive():
+                writer.terminate()
+            self.assertFalse(closer.is_alive())
+            self.assertFalse(writer.is_alive())
+            self.assertEqual(closer.exitcode, 0)
+            self.assertEqual(writer.exitcode, 0)
+            close_result = close_results.get(timeout=5)
+            event_result = event_results.get(timeout=5)
+            self.assertTrue(close_result["ok"])
+            self.assertIsNone(close_result["last_event_hash"])
+            self.assertFalse(event_result["ok"])
+            self.assertEqual(event_result["type"], "CohortScopeError")
+            self.assertEqual(
+                json.loads(active_path.read_text(encoding="utf-8"))["status"],
+                "closed",
+            )
+            self.assertEqual(
+                cohort_scope.load_events(
+                    base,
+                    cohort["cohort_id"],
+                    scope=policy["cohort_scope"]["scope_snapshot"],
+                ),
+                [],
+            )
+
+    def test_event_that_wins_lock_is_seen_by_concurrent_close(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            policy_file = self._write_policy(base, policy)
+            with mock.patch.object(
+                forward_policy, "_git", side_effect=self._clean_final_head
+            ):
+                active_path, cohort = forward_policy.start_cohort(
+                    base_dir=base,
+                    policy_file=policy_file,
+                    cohort_id="concurrent-event-wins",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
+            manifest = empty_record_manifest(cohort)
+            event_results = context.Queue()
+            close_results = context.Queue()
+            event_started = context.Event()
+            event_acquired = context.Event()
+            release_event = context.Event()
+            close_started = context.Event()
+            writer = context.Process(
+                target=_append_event_process,
+                args=(
+                    str(base),
+                    cohort["cohort_id"],
+                    policy["cohort_scope"]["scope_snapshot"],
+                    event_results,
+                    event_started,
+                    event_acquired,
+                    release_event,
+                ),
+            )
+            closer = context.Process(
+                target=_close_cohort_process,
+                args=(str(base), manifest, close_results, close_started),
+            )
+            writer.start()
+            self.assertTrue(event_started.wait(10))
+            self.assertTrue(event_acquired.wait(10))
+            closer.start()
+            self.assertTrue(close_started.wait(10))
+            release_event.set()
+            writer.join(20)
+            closer.join(20)
+            if writer.is_alive():
+                writer.terminate()
+            if closer.is_alive():
+                closer.terminate()
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(closer.is_alive())
+            self.assertEqual(writer.exitcode, 0)
+            self.assertEqual(closer.exitcode, 0)
+            event_result = event_results.get(timeout=5)
+            close_result = close_results.get(timeout=5)
+            self.assertTrue(event_result["ok"])
+            self.assertFalse(close_result["ok"])
+            self.assertEqual(close_result["type"], "ForwardPolicyError")
+            self.assertIn("denominator", close_result["message"])
+            self.assertEqual(
+                json.loads(active_path.read_text(encoding="utf-8"))["status"],
+                "active",
+            )
+            events = cohort_scope.load_events(
+                base,
+                cohort["cohort_id"],
+                scope=policy["cohort_scope"]["scope_snapshot"],
+                cohort_binding={
+                    "cohort_hash": cohort["cohort_hash"],
+                    "policy_id": cohort["policy_id"],
+                    "policy_hash": cohort["policy_hash"],
+                    "starts_at": cohort["starts_at"],
+                },
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_hash"], event_result["event_hash"])
+            self.assertFalse(
+                forward_policy.cohort_closure_path(base, cohort["cohort_id"]).exists()
+            )
+
+    def test_close_publishes_manifest_only_after_success_and_repairs_stale_copy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            policy_file = self._write_policy(base, policy)
+            with mock.patch.object(
+                forward_policy, "_git", side_effect=self._clean_final_head
+            ):
+                _, cohort = forward_policy.start_cohort(
+                    base_dir=base,
+                    policy_file=policy_file,
+                    cohort_id="manifest-publish-order",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
+            manifest = empty_record_manifest(cohort)
+            output = base / "published-record-manifest.json"
+            arguments = SimpleNamespace(
+                base_dir=str(base),
+                cohort_id=cohort["cohort_id"],
+                closed_at=None,
+                record_manifest_output=str(output),
+            )
+
+            def enter_common(stack: ExitStack) -> None:
+                stack.enter_context(
+                    mock.patch.object(memory_store, "load_history", return_value=[])
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        memory_store,
+                        "_load_immutable_forward_cohort",
+                        return_value=cohort,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        memory_store,
+                        "_all_forward_records_for_cohort",
+                        return_value=[],
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        memory_store,
+                        "_denominator_for_records",
+                        return_value=manifest["denominator"],
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        memory_store,
+                        "forward_record_manifest_for_records",
+                        return_value=manifest,
+                    )
+                )
+
+            with ExitStack() as stack:
+                enter_common(stack)
+                stack.enter_context(
+                    mock.patch.object(
+                        forward_policy,
+                        "close_cohort",
+                        side_effect=forward_policy.ForwardPolicyError(
+                            "simulated concurrent event"
+                        ),
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "could not be closed"):
+                    memory_store.cmd_close_forward_cohort.__wrapped__(arguments)
+            self.assertFalse(output.exists())
+
+            output.write_text('{"stale":true}\n', encoding="utf-8")
+            closure_path = base / "closure.json"
+            closure = {
+                "closure_hash": "sha256:" + "9" * 64,
+                "record_manifest": manifest,
+            }
+            with ExitStack() as stack:
+                enter_common(stack)
+                stack.enter_context(
+                    mock.patch.object(
+                        forward_policy,
+                        "close_cohort",
+                        return_value=(closure_path, closure),
+                    )
+                )
+                result = memory_store.cmd_close_forward_cohort.__wrapped__(arguments)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), manifest)
+            self.assertEqual(result["manifest_hash"], manifest["manifest_hash"])
 
     def test_current_closure_binds_event_archive_observation_and_microseconds(
         self,
