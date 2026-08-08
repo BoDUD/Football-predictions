@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -3077,6 +3077,64 @@ def _candidate_gate(
     }
 
 
+def candidate_directional_fundamental_support(
+    record: dict[str, Any], candidate: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    audit = validated_fundamental_evidence_audit(record)
+    if (
+        not isinstance(audit, dict)
+        or audit.get("schema_version") != fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+    ):
+        return None
+    identity_hash = str(candidate.get("market_identity_hash") or "")
+    selection = str(candidate.get("settlement_reference_outcome") or "")
+    if not identity_hash or not selection:
+        return None
+    key = f"{identity_hash}:{selection}"
+    support = audit.get("candidate_support")
+    item = support.get(key) if isinstance(support, dict) else None
+    if (
+        not isinstance(item, dict)
+        or item.get("support_key") != key
+        or item.get("market_identity_hash") != identity_hash
+        or item.get("selection") != selection
+        or item.get("market_identity") != candidate.get("market_identity")
+        or item.get("rule_version") != fundamental_evidence.SUPPORT_RULE_VERSION
+    ):
+        return None
+    return deepcopy(item)
+
+
+def formal_candidate_directional_support(
+    record: dict[str, Any], candidate: Mapping[str, Any], *, market: str | None = None
+) -> bool:
+    """Apply v2 directional evidence without rewriting legacy local records."""
+
+    support = candidate_directional_fundamental_support(record, candidate)
+    if support is not None:
+        return bool(
+            support.get("directionally_supported") is True
+            and support.get("formal_gate_eligible") is True
+        )
+    audit = validated_fundamental_evidence_audit(record)
+    if (
+        isinstance(audit, dict)
+        and audit.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+    ):
+        return False
+    evidence = record.get("guardrail_evidence", {})
+    candidate_market = str(market or candidate.get("market") or "")
+    if candidate_market in CORNER_MARKETS:
+        return bool(evidence.get("corner_profile_supported"))
+    return bool(
+        evidence.get("chance_quality_supported")
+        or (
+            evidence.get("lineup_confirmed")
+            and evidence.get("attack_configuration_supported")
+        )
+    )
+
+
 def _normalize_candidate_identity(
     raw: dict[str, Any], *, legacy_read_only: bool = False
 ) -> tuple[dict[str, Any], str]:
@@ -3646,7 +3704,15 @@ def _evaluate_candidate(
             ["market_signal_unclassified"],
         )
     )
-    evidence = record.get("guardrail_evidence", {})
+    directional_support = candidate_directional_fundamental_support(record, candidate)
+    directionally_supported = bool(
+        directional_support
+        and directional_support.get("directionally_supported") is True
+    )
+    formal_directional_support = bool(
+        directionally_supported
+        and directional_support.get("formal_gate_eligible") is True
+    )
     adverse_passed = True
     adverse_reasons: list[str] = []
     if signal in ADVERSE_MARKET_SIGNALS:
@@ -3657,10 +3723,7 @@ def _evaluate_candidate(
             and calculated_edge >= ADVERSE_FORMAL_MIN_EDGE_PP
             and firm_count is not None
             and int(float(firm_count)) >= PROVISIONAL_MIN_FIRMS
-            and (
-                evidence.get("lineup_confirmed")
-                or evidence.get("fundamental_supported")
-            )
+            and directionally_supported
         )
         if not adverse_passed:
             adverse_reasons.append("adverse_market_safety_thresholds_not_met")
@@ -3670,37 +3733,22 @@ def _evaluate_candidate(
     market_specific_passed = True
     market_specific_reasons: list[str] = []
     if market in {"total", "goal_range", "btts"}:
-        market_specific_passed = bool(
-            evidence.get("chance_quality_supported")
-            or (
-                evidence.get("lineup_confirmed")
-                and evidence.get("attack_configuration_supported")
-            )
-        )
+        market_specific_passed = directionally_supported
         if not market_specific_passed:
             market_specific_reasons.append(
-                "attacking_or_chance_quality_evidence_required"
+                "candidate_directional_attacking_evidence_required"
             )
     elif market in CORNER_MARKETS:
-        market_specific_passed = bool(evidence.get("corner_profile_supported"))
+        market_specific_passed = directionally_supported
         if not market_specific_passed:
-            market_specific_reasons.append("corner_profile_evidence_required")
+            market_specific_reasons.append(
+                "candidate_directional_corner_evidence_required"
+            )
     elif market == "asian" and float(candidate.get("line", 0.0)) <= DEEP_FAVORITE_LINE:
         market_specific_passed = bool(
             record.get("data_quality") == "high"
-            and evidence.get("lineup_confirmed")
-            and evidence.get("opponent_tail_risk_checked")
             and raw.get("cover_distribution_validated") is True
-            and (
-                evidence.get("chance_quality_supported")
-                or (
-                    signal == "aligned"
-                    and firm_count is not None
-                    and int(float(firm_count)) >= PROVISIONAL_MIN_FIRMS
-                    and evidence.get("fundamental_supported")
-                    and evidence.get("attack_configuration_supported")
-                )
-            )
+            and directionally_supported
         )
         if not market_specific_passed:
             market_specific_reasons.append("deep_favorite_safety_evidence_required")
@@ -3712,6 +3760,25 @@ def _evaluate_candidate(
             market_specific_reasons,
         )
     )
+    directional_release_required = market in {
+        "total",
+        "goal_range",
+        "btts",
+        *CORNER_MARKETS,
+    } or (market == "asian" and float(candidate.get("line", 0.0)) <= DEEP_FAVORITE_LINE)
+    if directional_release_required:
+        gates.append(
+            _candidate_gate(
+                "candidate_fundamental_release_evidence",
+                "release",
+                formal_directional_support,
+                [
+                    "directional_fundamental_rule_is_shadow_only"
+                    if directionally_supported
+                    else "candidate_directional_fundamental_support_unavailable"
+                ],
+            )
+        )
 
     policy_enabled = market not in STRICT_OOS_MARKET_STATUS
     gates.append(
@@ -3773,6 +3840,7 @@ def _evaluate_candidate(
             "complete_market_probabilities": complete_market_probabilities,
             "ev": calculated_ev,
             "edge_pp": calculated_edge,
+            "candidate_fundamental_support": directional_support,
             "gates": gates,
             "counterfactual_eligible": counterfactual_eligible,
             "formal_eligible": formal_eligible,
@@ -3924,6 +3992,14 @@ def load_fundamental_evidence_audit(
         evidence = fundamental_evidence.validate_evidence_file(evidence_path)
     except fundamental_evidence.FundamentalEvidenceError as exc:
         raise ValueError("fundamental evidence replay failed") from exc
+    if (
+        required
+        and evidence.get("schema_version")
+        != fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "active untouched live-forward cohort requires candidate-directional fundamental-evidence/2"
+        )
     fixture = evidence.get("fixture")
     if not isinstance(fixture, dict):
         raise ValueError("fundamental evidence fixture is missing")
@@ -3955,11 +4031,27 @@ def load_fundamental_evidence_audit(
         )
     if generated_at > archived_at:
         raise ValueError("fundamental evidence cannot be generated after archive time")
-    claims = evidence.get("derived_claims")
-    if not isinstance(claims, dict) or set(claims) != set(
-        fundamental_evidence.CLAIM_FIELDS
-    ):
-        raise ValueError("fundamental evidence claims are incomplete")
+    current_evidence = (
+        evidence.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+    )
+    if current_evidence:
+        availability = evidence.get("availability_claims")
+        candidate_support = evidence.get("candidate_support")
+        if not isinstance(availability, dict) or set(availability) != set(
+            fundamental_evidence.AVAILABILITY_CLAIM_FIELDS
+        ):
+            raise ValueError("fundamental evidence availability claims are incomplete")
+        if not isinstance(candidate_support, dict):
+            raise ValueError("fundamental evidence candidate support is incomplete")
+        claims = {field: False for field in fundamental_evidence.CLAIM_FIELDS}
+    else:
+        claims = evidence.get("derived_claims")
+        if not isinstance(claims, dict) or set(claims) != set(
+            fundamental_evidence.CLAIM_FIELDS
+        ):
+            raise ValueError("fundamental evidence claims are incomplete")
+        availability = None
+        candidate_support = None
     audit = {
         "schema_version": evidence["schema_version"],
         "kind": "replayable_fundamental_evidence",
@@ -3968,6 +4060,8 @@ def load_fundamental_evidence_audit(
         "fixture": deepcopy(fixture),
         "generated_at": generated_at.isoformat(),
         "derived_claims": deepcopy(claims),
+        "availability_claims": deepcopy(availability),
+        "candidate_support": deepcopy(candidate_support),
         "bundle": deepcopy(evidence),
         "raw_sources_replayed": len(evidence.get("sources", [])),
         "counts_toward_primary_record": False,
@@ -3986,7 +4080,11 @@ def validated_fundamental_evidence_audit(
         return None
     if (
         not isinstance(audit, dict)
-        or audit.get("schema_version") != fundamental_evidence.EVIDENCE_SCHEMA_VERSION
+        or audit.get("schema_version")
+        not in {
+            fundamental_evidence.PREVIOUS_EVIDENCE_SCHEMA_VERSION,
+            fundamental_evidence.EVIDENCE_SCHEMA_VERSION,
+        }
         or audit.get("kind") != "replayable_fundamental_evidence"
         or audit.get("counts_toward_primary_record") is not False
         or not isinstance(audit.get("bundle"), dict)
@@ -4009,9 +4107,18 @@ def validated_fundamental_evidence_audit(
     for field in ("match_id", "home_team", "away_team"):
         if str(fixture.get(field) or "") != str(context.get(field) or ""):
             return None
-    claims = replayed.get("derived_claims")
-    if not isinstance(claims, dict) or claims != audit.get("derived_claims"):
-        return None
+    if replayed.get("schema_version") == fundamental_evidence.EVIDENCE_SCHEMA_VERSION:
+        claims = {field: False for field in fundamental_evidence.CLAIM_FIELDS}
+        if (
+            replayed.get("availability_claims") != audit.get("availability_claims")
+            or replayed.get("candidate_support") != audit.get("candidate_support")
+            or audit.get("derived_claims") != claims
+        ):
+            return None
+    else:
+        claims = replayed.get("derived_claims")
+        if not isinstance(claims, dict) or claims != audit.get("derived_claims"):
+            return None
     try:
         evidence_kickoff = parse_aware_datetime(
             str(fixture.get("kickoff") or ""), "fundamental evidence kickoff"
@@ -5168,13 +5275,9 @@ def validate_basic_formal_pick(
             PROVISIONAL_MIN_FIRMS,
             f"{market} adverse-signal bookmaker count",
         )
-        evidence = record.get("guardrail_evidence", {})
-        if not (
-            evidence.get("lineup_confirmed") or evidence.get("fundamental_supported")
-        ):
+        if not formal_candidate_directional_support(record, pick, market=market):
             raise ValueError(
-                f"{market} adverse-market formal pick requires independent lineup "
-                "or fundamental evidence"
+                f"{market} adverse-market formal pick requires exact candidate-directional evidence"
             )
 
 
@@ -5604,7 +5707,7 @@ def validate_new_formal_pick(
     pick: dict[str, Any],
     record: dict[str, Any],
 ) -> None:
-    evidence = record.get("guardrail_evidence", {})
+    formal_support = formal_candidate_directional_support(record, pick, market=market)
     if pick.get("market_complete") is not True:
         raise ValueError(f"{market} formal pick requires explicit market_complete=true")
     validate_odds_format(pick, market)
@@ -5633,16 +5736,9 @@ def validate_new_formal_pick(
             )
         split_line(float(pick["line"]))
 
-    if market in {"goal_range", "btts"} and not (
-        evidence.get("chance_quality_supported")
-        or (
-            evidence.get("lineup_confirmed")
-            and evidence.get("attack_configuration_supported")
-        )
-    ):
+    if market in {"goal_range", "btts"} and not formal_support:
         raise ValueError(
-            f"{market} formal pick requires attacking-configuration or "
-            "chance-quality evidence"
+            f"{market} formal pick requires exact candidate-directional evidence"
         )
     if market in {"goal_range", "btts"}:
         calculated_ev = validate_binary_ev(pick, market)
@@ -5657,9 +5753,9 @@ def validate_new_formal_pick(
             calculated_ev,
             f"{market} recalculated EV",
         )
-        if not evidence.get("corner_profile_supported"):
+        if not formal_support:
             raise ValueError(
-                f"{market} formal pick requires independent corner-profile evidence"
+                f"{market} formal pick requires exact candidate-directional corner evidence"
             )
         require_minimum(
             pick.get("firm_count"),
@@ -5709,39 +5805,25 @@ def validate_provisional_formal_guardrails(record: dict[str, Any]) -> None:
                 PROVISIONAL_MIN_FIRMS,
                 "total bookmaker count",
             )
-            supported_attack = bool(
-                evidence.get("chance_quality_supported")
-                or (
-                    evidence.get("lineup_confirmed")
-                    and evidence.get("attack_configuration_supported")
-                )
+            supported_attack = formal_candidate_directional_support(
+                record, pick, market=market
             )
             if not supported_attack:
                 raise ValueError(
-                    "Total formal pick requires chance-quality evidence or a confirmed "
-                    "attacking configuration; price movement alone is insufficient"
+                    "Total formal pick requires exact candidate-directional evidence; "
+                    "availability or price movement alone is insufficient"
                 )
         if market == "asian" and float(pick.get("line", 0.0)) <= DEEP_FAVORITE_LINE:
             if data_quality != "high":
                 raise ValueError(
                     "Asian favorite -0.75 or deeper requires high data quality"
                 )
-            if not evidence.get("lineup_confirmed"):
-                raise ValueError(
-                    "Asian favorite -0.75 or deeper requires confirmed lineups"
-                )
-            chance_supported = bool(evidence.get("chance_quality_supported"))
-            consensus_supported = bool(
-                effective_market_signal(market, pick) == "aligned"
-                and float(pick.get("firm_count") or 0) >= PROVISIONAL_MIN_FIRMS
-                and evidence.get("fundamental_supported")
-                and evidence.get("attack_configuration_supported")
+            directionally_supported = formal_candidate_directional_support(
+                record, pick, market=market
             )
-            if not (chance_supported or consensus_supported):
+            if not directionally_supported:
                 raise ValueError(
-                    "Asian favorite -0.75 or deeper requires independent chance-quality "
-                    "evidence, or aligned 5-firm consensus plus confirmed attacking "
-                    "configuration and fundamental support"
+                    "Asian favorite -0.75 or deeper requires exact candidate-directional evidence"
                 )
             if not evidence.get("opponent_tail_risk_checked"):
                 raise ValueError(
@@ -5782,21 +5864,12 @@ def settlement_safety(
 def evidence_coverage(
     record: dict[str, Any], market: str, pick: dict[str, Any]
 ) -> float:
-    evidence = record.get("guardrail_evidence", {})
-    if market in {"total", "goal_range", "btts"}:
+    support = candidate_directional_fundamental_support(record, pick)
+    if market in {"total", "goal_range", "btts", *CORNER_MARKETS}:
         return (
-            1.0
-            if (
-                evidence.get("chance_quality_supported")
-                or (
-                    evidence.get("lineup_confirmed")
-                    and evidence.get("attack_configuration_supported")
-                )
-            )
-            else 0.0
+            1.0 if support and support.get("directionally_supported") is True else 0.0
         )
-    if market in CORNER_MARKETS:
-        return 1.0 if evidence.get("corner_profile_supported") else 0.0
+    evidence = record.get("guardrail_evidence", {})
     relevant = (
         bool(evidence.get("lineup_confirmed")),
         bool(evidence.get("fundamental_supported")),
@@ -8032,8 +8105,63 @@ def _forward_history_record_receipt(
     return receipt
 
 
-def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, str]:
-    entry = {
+def _execution_receipt_hashes_from_receipt(receipt: dict[str, Any]) -> list[str]:
+    """Replay firm evidence and return canonical receipt identities for closure."""
+
+    try:
+        from scripts import execution_evidence
+    except ImportError:  # Direct execution from scripts/.
+        import execution_evidence  # type: ignore[no-redef]
+
+    ledger = receipt.get("ledger_payload")
+    commitments = ledger.get("commitments") if isinstance(ledger, dict) else None
+    if not isinstance(commitments, list):
+        raise ValueError("Forward record receipt commitments are missing")
+    hashes: list[str] = []
+    for commitment in commitments:
+        prediction = (
+            commitment.get("prediction_payload")
+            if isinstance(commitment, dict)
+            else None
+        )
+        execution = (
+            prediction.get("execution_entry") if isinstance(prediction, dict) else None
+        )
+        if execution is None:
+            continue
+        if not isinstance(execution, dict):
+            raise ValueError("Forward execution entry is invalid")
+        evidence_file = str(execution.get("execution_evidence_file") or "").strip()
+        if not evidence_file:
+            raise ValueError("Current forward execution lacks firm receipt evidence")
+        try:
+            evidence = execution_evidence.validate_evidence_file(evidence_file)
+        except (execution_evidence.ExecutionEvidenceError, OSError) as exc:
+            raise ValueError("Forward execution receipt cannot be replayed") from exc
+        if evidence.get("evidence_hash") != require_sha256(
+            execution.get("execution_evidence_hash"),
+            "forward execution evidence hash",
+        ):
+            raise ValueError("Forward execution evidence hash does not match")
+        firm = evidence.get("firm")
+        offer = evidence.get("offer")
+        if not isinstance(firm, dict) or not isinstance(offer, dict):
+            raise ValueError("Forward execution receipt identity is missing")
+        identity = {
+            "firm_id": firm.get("firm_id"),
+            "account_region": firm.get("account_region"),
+            "receipt_id": offer.get("receipt_id"),
+        }
+        hashes.append(forward_policy._hash_json(identity))
+    if len(hashes) != len(set(hashes)):
+        raise ValueError(
+            "One firm receipt identity cannot fund multiple record entries"
+        )
+    return sorted(hashes)
+
+
+def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {
         "fixture_id": str(receipt.get("fixture_id") or ""),
         "archive_version_hash": require_sha256(
             receipt.get("archive_version_hash"), "forward archive version hash"
@@ -8060,6 +8188,23 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, st
             request.get("request_event_hash"),
             "forward cohort request event hash",
         )
+        if request.get("schema_version") == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION:
+            fixture = request.get("fixture")
+            if not isinstance(fixture, dict):
+                raise ValueError("Forward cohort request fixture is missing")
+            entry.update(
+                {
+                    "request_fixture_id": str(request.get("request_fixture_id") or ""),
+                    "fixture": deepcopy(fixture),
+                    "fixture_event_hash": require_sha256(
+                        request.get("fixture_event_hash"),
+                        "forward cohort fixture event hash",
+                    ),
+                    "execution_receipt_hashes": (
+                        _execution_receipt_hashes_from_receipt(receipt)
+                    ),
+                }
+            )
     return entry
 
 
@@ -8088,6 +8233,15 @@ def forward_record_manifest_for_records(
     fixture_ids = [entry["fixture_id"] for entry in entries]
     if len(set(fixture_ids)) != len(fixture_ids):
         raise ValueError("Forward record manifest contains duplicate fixture records")
+    receipt_hashes = [
+        receipt_hash
+        for entry in entries
+        for receipt_hash in entry.get("execution_receipt_hashes", [])
+    ]
+    if len(receipt_hashes) != len(set(receipt_hashes)):
+        raise ValueError(
+            "Forward record manifest reuses one firm/account/receipt identity"
+        )
     for receipt in receipts:
         ledger = receipt["ledger_payload"]
         if (
@@ -8683,6 +8837,10 @@ def cmd_record(args: argparse.Namespace) -> dict[str, Any]:
         repo_root=Path(__file__).resolve().parents[1],
         archived_at=timestamp,
         fixture_id=str(args.match_id),
+        competition_key=normalize_league_name(args.league),
+        home_team=args.home_team,
+        away_team=args.away_team,
+        kickoff=time_metadata["kickoff"],
     )
     revisions = list(existing.get("revisions", [])) if existing else []
     exact_score_picks = [

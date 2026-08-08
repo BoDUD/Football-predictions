@@ -5,12 +5,37 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest import mock
 
 from scripts import artifact_lineage
 
 
 class ArtifactLineageTests(unittest.TestCase):
-    def _write_artifacts(self, base: Path):
+    def setUp(self) -> None:
+        self.semantic = mock.patch.object(
+            artifact_lineage,
+            "_normalized_semantic_verification",
+            side_effect=self._semantic_receipt,
+        )
+        self.semantic.start()
+        self.addCleanup(self.semantic.stop)
+
+    @staticmethod
+    def _semantic_receipt(role: str, *, registry_path: Path):
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        leagues = registry.get("leagues")
+        count = len(leagues) if isinstance(leagues, (list, dict)) else 0
+        return (
+            f"test-{role}-verifier/1.0.0",
+            {
+                "registry_hash": registry["registry_hash"],
+                "model_count": count,
+                "status": "pass",
+            },
+        )
+
+    def _write_artifacts(self, base: Path, *, league_keys: list[str] | None = None):
+        keys = league_keys or ["test_league"]
         football_manifest = base / "football-manifest.json"
         football_manifest.write_text(
             json.dumps(
@@ -31,10 +56,11 @@ class ArtifactLineageTests(unittest.TestCase):
                     "dataset_manifest_hash": "sha256:" + "1" * 64,
                     "leagues": [
                         {
-                            "league_key": "test_league",
+                            "league_key": league_key,
                             "model_hash": "sha256:" + "6" * 64,
                             "full_time_component_model_hash": "sha256:" + "7" * 64,
                         }
+                        for league_key in keys
                     ],
                 }
             ),
@@ -49,9 +75,10 @@ class ArtifactLineageTests(unittest.TestCase):
                     "as_of_date": "2026-08-08",
                     "leagues": [
                         {
-                            "league_key": "test_league",
+                            "league_key": league_key,
                             "dataset_sha256": "sha256:" + "4" * 64,
                         }
+                        for league_key in keys
                     ],
                 }
             ),
@@ -63,10 +90,12 @@ class ArtifactLineageTests(unittest.TestCase):
                 {
                     "schema_version": "corner-registry/1",
                     "registry_hash": "sha256:" + "5" * 64,
-                    "dataset_hashes": {"test_league": "sha256:" + "4" * 64},
+                    "dataset_hashes": {
+                        league_key: "sha256:" + "4" * 64 for league_key in keys
+                    },
                     "leagues": [
                         {
-                            "league_key": "test_league",
+                            "league_key": league_key,
                             "model_hash": "sha256:" + "8" * 64,
                             "dataset_hash": "sha256:" + "4" * 64,
                             "source_lineage": {
@@ -74,6 +103,7 @@ class ArtifactLineageTests(unittest.TestCase):
                                 "dataset_hash": "sha256:" + "4" * 64,
                             },
                         }
+                        for league_key in keys
                     ],
                 }
             ),
@@ -108,6 +138,41 @@ class ArtifactLineageTests(unittest.TestCase):
                 "corner_history",
             )
 
+    def test_public_golden_replays_all_19_registered_leagues_and_receipts(
+        self,
+    ) -> None:
+        golden_path = (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "forward_lineage_19_leagues.json"
+        )
+        golden = json.loads(golden_path.read_text(encoding="utf-8"))
+        league_keys = golden["league_keys"]
+        self.assertEqual(len(league_keys), golden["expected_model_count"])
+        self.assertEqual(league_keys, sorted(set(league_keys)))
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._write_artifacts(Path(temporary), league_keys=league_keys)
+            lineage = artifact_lineage.build_lineage(
+                repo_root=temporary,
+                data_manifests=paths["data"],
+                model_registries=paths["models"],
+            )
+            for role in artifact_lineage.MODEL_ROLES:
+                self.assertEqual(
+                    sorted(lineage["model_registries"][role]["registered_models"]),
+                    league_keys,
+                )
+                receipt = lineage["semantic_verification_receipts"][role]
+                self.assertEqual(receipt["model_count"], 19)
+                self.assertEqual(
+                    receipt["registry_hash"],
+                    lineage["model_registries"][role]["declared_registry_hash"],
+                )
+            self.assertEqual(
+                artifact_lineage.verify_files(lineage, repo_root=temporary),
+                lineage,
+            )
+
     def test_historical_1_1_mapping_shape_remains_replayable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = self._write_artifacts(Path(temporary))
@@ -128,7 +193,7 @@ class ArtifactLineageTests(unittest.TestCase):
                 repo_root=temporary,
                 data_manifests=paths["data"],
                 model_registries=paths["models"],
-                schema_version=artifact_lineage.PREVIOUS_SCHEMA_VERSION,
+                schema_version=artifact_lineage.LEGACY_SCHEMA_VERSION,
             )
             self.assertEqual(
                 artifact_lineage.verify_files(lineage, repo_root=temporary), lineage

@@ -14,7 +14,12 @@ from scripts import forward_policy, forward_validation, memory_store
 
 def empty_record_manifest(cohort: dict) -> dict:
     value = {
-        "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        "schema_version": (
+            forward_policy.PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION
+            if cohort.get("schema_version")
+            == forward_policy.LEGACY_COHORT_SCHEMA_VERSION
+            else forward_policy.RECORD_MANIFEST_SCHEMA_VERSION
+        ),
         "artifact_type": "soccer_untouched_live_forward_record_manifest",
         "cohort_id": cohort["cohort_id"],
         "cohort_hash": cohort["cohort_hash"],
@@ -48,6 +53,27 @@ def empty_record_manifest(cohort: dict) -> dict:
 class ForwardPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
+        self.semantic = mock.patch.object(
+            forward_policy.artifact_lineage,
+            "_normalized_semantic_verification",
+            side_effect=self._semantic_receipt,
+        )
+        self.semantic.start()
+        self.addCleanup(self.semantic.stop)
+
+    @staticmethod
+    def _semantic_receipt(role: str, *, registry_path: Path):
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        leagues = registry.get("leagues")
+        count = len(leagues) if isinstance(leagues, (list, dict)) else 0
+        return (
+            f"test-{role}-verifier/1.0.0",
+            {
+                "registry_hash": registry["registry_hash"],
+                "model_count": count,
+                "status": "pass",
+            },
+        )
 
     def test_documented_cli_uses_importable_module_entrypoint(self) -> None:
         for relative in ("README.md", "references/model-validation.md"):
@@ -1285,6 +1311,10 @@ class ForwardPolicyTests(unittest.TestCase):
                     repo_root=self.repo_root,
                     archived_at=start + timedelta(seconds=1),
                     fixture_id="fixture-a",
+                    competition_key="test_league",
+                    home_team="Home",
+                    away_team="Away",
+                    kickoff="2026-08-06T03:00:00Z",
                 )
             self.assertIsNotNone(binding)
             assert binding is not None
@@ -1912,6 +1942,83 @@ class ForwardPolicyTests(unittest.TestCase):
                 forward_policy.ForwardPolicyError, "legacy.*cannot carry"
             ):
                 forward_policy.validate_cohort(legacy_with_kind)
+
+    def test_current_policy_cannot_activate_with_resealed_historical_lineage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            downgraded = deepcopy(policy)
+            lineage = downgraded["artifact_lineage"]
+            lineage.pop("lineage_hash")
+            lineage.pop("semantic_verification_receipts")
+            lineage["schema_version"] = (
+                forward_policy.artifact_lineage.PREVIOUS_SCHEMA_VERSION
+            )
+            lineage["lineage_hash"] = forward_policy._hash_json(lineage)
+            downgraded = self._reseal_policy(downgraded)
+
+            historical = forward_policy.validate_policy_manifest(downgraded)
+            self.assertEqual(
+                historical["artifact_lineage"]["schema_version"],
+                forward_policy.artifact_lineage.PREVIOUS_SCHEMA_VERSION,
+            )
+            with self.assertRaisesRegex(
+                forward_policy.ForwardPolicyError,
+                "historical artifact lineage is read-only",
+            ):
+                forward_policy.validate_active_runtime_policy_manifest(
+                    downgraded, repo_root=self.repo_root
+                )
+
+            policy_file = self._write_policy(base / "start", downgraded)
+            with (
+                mock.patch.object(
+                    forward_policy, "_git", side_effect=self._clean_final_head
+                ),
+                self.assertRaisesRegex(
+                    forward_policy.ForwardPolicyError,
+                    "historical artifact lineage is read-only",
+                ),
+            ):
+                forward_policy.start_cohort(
+                    base_dir=base / "start",
+                    policy_file=policy_file,
+                    cohort_id="lineage-downgrade",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
+
+    def test_cohort_start_rejects_a_preexisting_denominator_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            policy = self._policy(base)
+            runtime_base = base / "runtime"
+            policy_file = self._write_policy(runtime_base, policy)
+            event_path = forward_policy.cohort_scope.denominator_event_path(
+                runtime_base, "preexisting-events"
+            )
+            event_path.parent.mkdir(parents=True, exist_ok=True)
+            event_path.write_text("{}\n", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    forward_policy, "_git", side_effect=self._clean_final_head
+                ),
+                self.assertRaisesRegex(
+                    forward_policy.ForwardPolicyError,
+                    "denominator log already exists before cohort start",
+                ),
+            ):
+                forward_policy.start_cohort(
+                    base_dir=runtime_base,
+                    policy_file=policy_file,
+                    cohort_id="preexisting-events",
+                    cohort_kind=forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+                    starts_at="2026-08-06T02:00:00Z",
+                    repo_root=self.repo_root,
+                )
 
     def test_freeze_requires_caller_confirmed_clean_final_merge_head(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

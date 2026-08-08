@@ -326,10 +326,17 @@ def match_offer(
         abs_tol=1e-12,
     ):
         raise ExecutionEvidenceError("execution accepted price/stake does not match")
+    receipt_identity = {
+        "firm_id": evidence["firm"]["firm_id"],
+        "account_region": evidence["firm"]["account_region"],
+        "receipt_id": offer["receipt_id"],
+    }
     return {
         "execution_evidence_hash": evidence["evidence_hash"],
         "firm": evidence["firm"],
         "offer": dict(offer),
+        "receipt_identity": receipt_identity,
+        "receipt_identity_hash": _hash_json(receipt_identity),
     }
 
 

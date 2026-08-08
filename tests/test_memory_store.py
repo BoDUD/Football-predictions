@@ -608,11 +608,54 @@ def record_args(base_dir: str, match_id: str = "1", **overrides):
 
 
 def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
+    support_requests = []
+    preferred_total_selection = None
+    preferred_asian_selection = None
+    candidate_file = str(getattr(args, "candidate_evaluation_file", "") or "")
+    if candidate_file and Path(candidate_file).exists():
+        candidate_payload = json.loads(Path(candidate_file).read_text(encoding="utf-8"))
+        support_requests = [
+            {
+                "market": candidate["market"],
+                "selection": candidate["settlement_reference_outcome"],
+                "market_identity": candidate["market_identity"],
+                "market_identity_hash": candidate["market_identity_hash"],
+            }
+            for candidate in candidate_payload.get("candidates", [])
+        ]
+        total_candidates = [
+            candidate
+            for candidate in candidate_payload.get("candidates", [])
+            if candidate.get("market") == "total"
+        ]
+        if total_candidates:
+            preferred_total_selection = max(
+                total_candidates,
+                key=lambda candidate: float(candidate.get("odds") or 0.0),
+            ).get("settlement_reference_outcome")
+        asian_candidates = [
+            candidate
+            for candidate in candidate_payload.get("candidates", [])
+            if candidate.get("market") == "asian"
+        ]
+        if asian_candidates:
+            preferred_asian_selection = max(
+                asian_candidates,
+                key=lambda candidate: float(candidate.get("odds") or 0.0),
+            ).get("settlement_reference_outcome")
+    if preferred_asian_selection == "home":
+        home_xg, away_xg = 2.2, 0.6
+    elif preferred_asian_selection == "away":
+        home_xg, away_xg = 0.6, 2.2
+    else:
+        home_xg = 1.2 if preferred_total_selection == "under" else 1.8
+        away_xg = 0.7 if preferred_total_selection == "under" else 1.1
     source = Path(base_dir) / f"fundamental-source-{args.match_id}.json"
     source.write_text(
         json.dumps(
             {
                 "schema_version": fundamental_evidence.RAW_SCHEMA_VERSION,
+                "source_class": "official_confirmed",
                 "source_url": f"https://example.test/fundamentals/{args.match_id}",
                 "collected_at": "2026-07-21T09:00:00+00:00",
                 "fixture": {
@@ -640,12 +683,12 @@ def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
                 "chance_quality": {
                     "home": {
                         "sample_matches": 8,
-                        "xg_per_match": 1.7,
+                        "xg_per_match": home_xg,
                         "xga_per_match": 0.8,
                     },
                     "away": {
                         "sample_matches": 8,
-                        "xg_per_match": 1.0,
+                        "xg_per_match": away_xg,
                         "xga_per_match": 1.5,
                     },
                 },
@@ -675,6 +718,7 @@ def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
                         "corners_against_per_match": 5.2,
                     },
                 },
+                "candidate_support_requests": support_requests,
             },
             ensure_ascii=False,
         ),
@@ -827,6 +871,8 @@ class MemoryStoreTests(unittest.TestCase):
             args = record_args(
                 base,
                 match_id="fundamental-1",
+                primary_market="none",
+                total_side=None,
                 lineup_confirmed=False,
                 fundamental_evidence=False,
                 chance_quality_evidence=False,
@@ -838,7 +884,7 @@ class MemoryStoreTests(unittest.TestCase):
             recorded = memory_store.cmd_record(args)["record"]
 
             self.assertEqual(
-                {field: True for field in fundamental_evidence.CLAIM_FIELDS},
+                {field: False for field in fundamental_evidence.CLAIM_FIELDS},
                 {
                     field: recorded["guardrail_evidence"][field]
                     for field in fundamental_evidence.CLAIM_FIELDS
@@ -847,9 +893,16 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIsNotNone(
                 memory_store.validated_fundamental_evidence_audit(recorded)
             )
+            self.assertTrue(
+                all(
+                    recorded["fundamental_evidence_audit"][
+                        "availability_claims"
+                    ].values()
+                )
+            )
             tampered = copy.deepcopy(recorded)
-            tampered["fundamental_evidence_audit"]["derived_claims"][
-                "lineup_confirmed"
+            tampered["fundamental_evidence_audit"]["availability_claims"][
+                "confirmed_lineups_available"
             ] = False
             self.assertIsNone(
                 memory_store.validated_fundamental_evidence_audit(tampered)
@@ -4103,9 +4156,7 @@ class MemoryStoreTests(unittest.TestCase):
                         total_firm_count=4,
                     )
                 )
-            with self.assertRaisesRegex(
-                ValueError, "independent lineup or fundamental"
-            ):
+            with self.assertRaisesRegex(ValueError, "candidate-directional"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4113,11 +4164,14 @@ class MemoryStoreTests(unittest.TestCase):
                         asian_side=None,
                         total_market_signal="against",
                         total_ev=0.08,
+                        total_odds=0.963636363636,
                         lineup_confirmed=False,
                         fundamental_evidence=False,
+                        chance_quality_evidence=False,
+                        attack_configuration_evidence=False,
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "chance-quality evidence"):
+            with self.assertRaisesRegex(ValueError, "candidate-directional"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4333,7 +4387,7 @@ class MemoryStoreTests(unittest.TestCase):
                         base, match_id="goal-quality", data_quality="low", **goal
                     )
                 )
-            with self.assertRaisesRegex(ValueError, "attacking-configuration"):
+            with self.assertRaisesRegex(ValueError, "candidate-directional"):
                 memory_store.cmd_record(
                     record_args(
                         base,
@@ -4562,7 +4616,9 @@ class MemoryStoreTests(unittest.TestCase):
             )["record"]
             self.assertLess(sub_eight_corner["primary_pick"]["ev"], 0.08)
             self.assertEqual(sub_eight_corner["primary_pick"]["confidence_rank"], 1)
-            with self.assertRaisesRegex(ValueError, "corner-profile evidence"):
+            with self.assertRaisesRegex(
+                ValueError, "candidate-directional corner evidence"
+            ):
                 memory_store.cmd_record(
                     record_args(
                         base,
