@@ -3368,7 +3368,13 @@ class ForwardValidationTests(unittest.TestCase):
             active_path.write_text(
                 json.dumps(cohort, ensure_ascii=False), encoding="utf-8"
             )
-            manifest_output = base / "record-manifest.json"
+            manifest_output = (
+                base
+                / ".codex"
+                / "soccer-predict"
+                / "forward-record-manifest-exports"
+                / f"{cohort['cohort_id']}-record-manifest.json"
+            )
             with mock.patch.object(
                 forward_policy,
                 "_require_canonical_policy_file",

@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.12.0] - 2026-08-09
+
+- Fail closed on denominator-event appends and record bindings whenever an immutable closure exists while the active pointer still says `active`, then allow an idempotent close retry to repair only the pointer.
+- Restrict record-manifest publication to the canonical cohort path or the exact cohort filename in a dedicated safe export directory, rejecting state-file overwrite targets and symbolic-link traversal.
+- Add deterministic crash-injection and path-boundary regressions without changing recommendation gates, models, market release policy, or settlement behavior.
+
 ## [3.11.0] - 2026-08-09
 
 - Serialize cohort closure and every denominator event append with the same cross-process event-log transaction until the immutable closure and closed active pointer are both durable.

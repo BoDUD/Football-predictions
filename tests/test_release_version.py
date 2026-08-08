@@ -10,7 +10,7 @@ from pathlib import Path
 from soccer_predict import __version__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_RELEASE_VERSION = "3.11.0"
+EXPECTED_RELEASE_VERSION = "3.12.0"
 EXPECTED_RELEASE_DATE = "2026-08-09"
 
 
