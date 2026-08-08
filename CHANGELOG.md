@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.10.0] - 2026-08-08
+
+- Bind every current cohort closure to its last denominator event, maximum record archive timestamp, and actual closure observation time without truncating microseconds.
+- Require formal aggregate validation to derive exact closure, record-manifest, and denominator schemas from the frozen package version, while retaining read-only validation for historical 3.9 artifacts.
+- Keep all formal recommendation gates, market release policies, and performance accounting unchanged.
+
 ## [3.9.0] - 2026-08-08
 
 - Bind current cohort closure to the immutable cohort/policy identity, enforce monotonic fixture-event causality through archive time, and version the request/denominator/record-manifest contract without rewriting historical artifacts.

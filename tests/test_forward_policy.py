@@ -28,6 +28,8 @@ def empty_record_manifest(cohort: dict) -> dict:
         "record_count": 0,
         "records": [],
     }
+    if value["schema_version"] == forward_policy.RECORD_MANIFEST_SCHEMA_VERSION:
+        value["max_record_archived_at"] = None
     if "scope_hash" in cohort:
         denominator = {
             "schema_version": forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION,
@@ -37,6 +39,7 @@ def empty_record_manifest(cohort: dict) -> dict:
             "scope_hash": cohort["scope_hash"],
             "event_count": 0,
             "last_event_hash": None,
+            "last_event_at": None,
             "requested_fixture_count": 0,
             "recorded_fixture_count": 0,
             "unavailable_fixture_count": 0,
@@ -880,14 +883,19 @@ class ForwardPolicyTests(unittest.TestCase):
             record_manifest = empty_record_manifest(cohort)
             record_manifest["record_count"] = 1
             record_manifest["records"] = [
-                memory_store._record_manifest_entry_from_receipt(preliminary_receipt)
+                memory_store._record_manifest_entry_from_receipt(
+                    preliminary_receipt,
+                    manifest_schema_version=(
+                        forward_policy.PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION
+                    ),
+                )
             ]
             record_manifest.pop("manifest_hash")
             record_manifest["manifest_hash"] = forward_policy._hash_json(
                 record_manifest
             )
             closure = {
-                "schema_version": forward_policy.CLOSURE_SCHEMA_VERSION,
+                "schema_version": forward_policy.PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION,
                 "artifact_type": ("soccer_untouched_live_forward_cohort_closure"),
                 "cohort_id": cohort["cohort_id"],
                 "cohort_hash": cohort["cohort_hash"],
@@ -1202,8 +1210,9 @@ class ForwardPolicyTests(unittest.TestCase):
                 forward_policy.close_cohort(
                     base_dir=base,
                     record_manifest=manifest,
-                    closed_at="2026-08-06T03:01:00Z",
+                    closed_at="2026-08-06T02:59:00Z",
                 )
+
             self.assertEqual(closure_path.read_bytes(), original_closure_bytes)
 
             with mock.patch.object(
@@ -1264,8 +1273,203 @@ class ForwardPolicyTests(unittest.TestCase):
                 forward_policy.close_cohort(
                     base_dir=base,
                     record_manifest=manifest,
-                    closed_at="2026-08-06T03:01:00Z",
+                    closed_at="2026-08-06T02:59:00Z",
                 )
+
+    def test_current_closure_binds_event_archive_observation_and_microseconds(
+        self,
+    ) -> None:
+        policy = self._policy(Path(tempfile.gettempdir()))
+        cohort = {
+            "schema_version": forward_policy.COHORT_SCHEMA_VERSION,
+            "artifact_type": "soccer_untouched_live_forward_cohort",
+            "cohort_id": "causal-closure",
+            "kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
+            "status": "active",
+            "starts_at": "2026-08-06T02:00:00+00:00",
+            "policy_file": str(
+                Path(tempfile.gettempdir()).resolve() / f"{policy['policy_id']}.json"
+            ),
+            "policy_id": policy["policy_id"],
+            "policy_hash": policy["policy_hash"],
+            "retrospective_records_allowed": False,
+            "closed_at": None,
+        }
+        cohort["cohort_hash"] = forward_policy._hash_json(cohort)
+        entry = {
+            "fixture_id": "micro-fixture",
+            "archive_version_hash": "sha256:" + "1" * 64,
+            "record_commitment_hash": "sha256:" + "2" * 64,
+            "record_binding_hash": "sha256:" + "3" * 64,
+            "prematch_ledger_hash": "sha256:" + "4" * 64,
+            "request_event_hash": "sha256:" + "5" * 64,
+            "request_fixture_id": "micro-fixture",
+            "fixture": {
+                "fixture_id": "micro-fixture",
+                "competition_key": "test_league",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "kickoff": "2026-08-06T03:00:00+00:00",
+            },
+            "fixture_event_hash": "sha256:" + "6" * 64,
+            "fixture_event_at": "2026-08-06T02:00:00.900000+00:00",
+            "execution_receipt_hashes": [],
+            "record_archived_at": "2026-08-06T02:00:00.950000+00:00",
+        }
+        denominator = {
+            "schema_version": forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION,
+            "artifact_type": "soccer_live_forward_cohort_denominator",
+            "cohort_id": cohort["cohort_id"],
+            "scope_id": "causal-scope",
+            "scope_hash": "sha256:" + "7" * 64,
+            "event_count": 1,
+            "last_event_hash": entry["fixture_event_hash"],
+            "last_event_at": entry["fixture_event_at"],
+            "requested_fixture_count": 1,
+            "recorded_fixture_count": 1,
+            "unavailable_fixture_count": 0,
+            "entries": [
+                {
+                    "request_fixture_id": entry["request_fixture_id"],
+                    "fixture_id": entry["fixture_id"],
+                    "fixture": deepcopy(entry["fixture"]),
+                    "request_event_hash": entry["request_event_hash"],
+                    "fixture_event_hash": entry["fixture_event_hash"],
+                    "fixture_event_at": entry["fixture_event_at"],
+                    "requested_at": "2026-08-06T02:00:00.800000+00:00",
+                    "disposition": "recorded",
+                    "unavailable_event_hash": None,
+                    "unavailable_reason": None,
+                }
+            ],
+            "complete": True,
+        }
+        denominator["denominator_hash"] = forward_policy._hash_json(denominator)
+        manifest = {
+            "schema_version": forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+            "artifact_type": "soccer_untouched_live_forward_record_manifest",
+            "cohort_id": cohort["cohort_id"],
+            "cohort_hash": cohort["cohort_hash"],
+            "policy_id": cohort["policy_id"],
+            "policy_hash": cohort["policy_hash"],
+            "record_count": 1,
+            "records": [entry],
+            "max_record_archived_at": entry["record_archived_at"],
+            "denominator": denominator,
+            "denominator_hash": denominator["denominator_hash"],
+        }
+        manifest["manifest_hash"] = forward_policy._hash_json(manifest)
+        closure = {
+            "schema_version": forward_policy.CLOSURE_SCHEMA_VERSION,
+            "artifact_type": "soccer_untouched_live_forward_cohort_closure",
+            "cohort_id": cohort["cohort_id"],
+            "cohort_hash": cohort["cohort_hash"],
+            "policy_id": cohort["policy_id"],
+            "policy_hash": cohort["policy_hash"],
+            "starts_at": cohort["starts_at"],
+            "closed_at": "2026-08-06T02:00:00.975000+00:00",
+            "reason": "explicit_policy_boundary",
+            "record_manifest_hash": manifest["manifest_hash"],
+            "record_manifest": manifest,
+            "observed_at": "2026-08-06T02:00:00.999000+00:00",
+        }
+        closure["closure_hash"] = forward_policy._hash_json(closure)
+
+        validated = forward_policy.validate_closure(
+            closure,
+            cohort=cohort,
+            require_record_manifest=True,
+            required_closure_schema=forward_policy.CLOSURE_SCHEMA_VERSION,
+            required_record_manifest_schema=forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+            required_denominator_schema=(
+                forward_policy.cohort_scope.DENOMINATOR_SCHEMA_VERSION
+            ),
+        )
+        self.assertEqual(validated["closed_at"], "2026-08-06T02:00:00.975000+00:00")
+
+        for field, attacked_time, message in (
+            ("closed_at", "2026-08-06T02:00:00.850000+00:00", "last event"),
+            ("closed_at", "2026-08-06T02:00:00.925000+00:00", "last record"),
+        ):
+            attacked = deepcopy(closure)
+            attacked[field] = attacked_time
+            attacked.pop("closure_hash")
+            attacked["closure_hash"] = forward_policy._hash_json(attacked)
+            with self.subTest(field=field, attacked_time=attacked_time):
+                with self.assertRaisesRegex(forward_policy.ForwardPolicyError, message):
+                    forward_policy.validate_closure(attacked, cohort=cohort)
+
+        future = deepcopy(closure)
+        future["observed_at"] = (
+            datetime.now(timezone.utc) + timedelta(days=1)
+        ).isoformat()
+        future.pop("closure_hash")
+        future["closure_hash"] = forward_policy._hash_json(future)
+        with self.assertRaisesRegex(forward_policy.ForwardPolicyError, "future-dated"):
+            forward_policy.validate_closure(future, cohort=cohort)
+
+        historical_manifest = deepcopy(manifest)
+        historical_manifest["schema_version"] = (
+            forward_policy.PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION
+        )
+        historical_manifest.pop("max_record_archived_at")
+        historical_manifest["records"][0].pop("record_archived_at")
+        historical_manifest["denominator"]["schema_version"] = (
+            forward_policy.cohort_scope.PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION
+        )
+        historical_manifest["denominator"].pop("last_event_at")
+        historical_manifest["denominator"].pop("denominator_hash")
+        historical_manifest["denominator"]["denominator_hash"] = (
+            forward_policy._hash_json(historical_manifest["denominator"])
+        )
+        historical_manifest["denominator_hash"] = historical_manifest["denominator"][
+            "denominator_hash"
+        ]
+        historical_manifest.pop("manifest_hash")
+        historical_manifest["manifest_hash"] = forward_policy._hash_json(
+            historical_manifest
+        )
+        historical = deepcopy(closure)
+        historical["schema_version"] = (
+            forward_policy.PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION
+        )
+        historical["record_manifest"] = historical_manifest
+        historical["record_manifest_hash"] = historical_manifest["manifest_hash"]
+        historical.pop("observed_at")
+        historical.pop("closure_hash")
+        historical["closure_hash"] = forward_policy._hash_json(historical)
+        contract = forward_policy.closure_schema_contract("3.9.0")
+        forward_policy.validate_closure(
+            historical,
+            cohort=cohort,
+            require_record_manifest=True,
+            required_closure_schema=contract["closure"],
+            required_record_manifest_schema=contract["record_manifest"],
+            required_denominator_schema=contract["denominator"],
+        )
+        downgraded = deepcopy(historical)
+        downgraded_manifest = downgraded["record_manifest"]
+        downgraded_manifest["schema_version"] = (
+            forward_policy.PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION
+        )
+        downgraded_manifest.pop("manifest_hash")
+        downgraded_manifest["manifest_hash"] = forward_policy._hash_json(
+            downgraded_manifest
+        )
+        downgraded["record_manifest_hash"] = downgraded_manifest["manifest_hash"]
+        downgraded.pop("closure_hash")
+        downgraded["closure_hash"] = forward_policy._hash_json(downgraded)
+        with self.assertRaisesRegex(
+            forward_policy.ForwardPolicyError, "frozen release contract"
+        ):
+            forward_policy.validate_closure(
+                downgraded,
+                cohort=cohort,
+                require_record_manifest=True,
+                required_closure_schema=contract["closure"],
+                required_record_manifest_schema=contract["record_manifest"],
+                required_denominator_schema=contract["denominator"],
+            )
 
     def test_cohort_rejects_retrospective_binding_and_preserves_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -662,7 +662,10 @@ def write_fundamental_evidence(base_dir: str, args: SimpleNamespace) -> str:
                 "source_url": (
                     f"https://zq.titan007.com/analysis/{args.match_id}cn.htm"
                 ),
-                "collected_at": "2026-07-21T09:00:00+00:00",
+                "collected_at": (
+                    datetime.fromisoformat(str(args.kickoff).replace("Z", "+00:00"))
+                    - timedelta(hours=2)
+                ).isoformat(),
                 "fixture": {
                     "match_id": str(args.match_id),
                     "home_team": args.home_team,

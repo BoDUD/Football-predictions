@@ -33,10 +33,14 @@ POLICY_SCHEMA_VERSION = "forward-policy/3.0.0"
 LEGACY_COHORT_SCHEMA_VERSION = "live-forward-cohort/1.0.0"
 COHORT_SCHEMA_VERSION = "live-forward-cohort/2.0.0"
 LEGACY_CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/1.0.0"
-CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.0.0"
+PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.0.0"
+CLOSURE_SCHEMA_VERSION = "live-forward-cohort-closure/2.1.0"
 PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/1.0.0"
 PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/2.0.0"
-RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/2.1.0"
+PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION = (
+    "live-forward-record-manifest/2.1.0"
+)
+RECORD_MANIFEST_SCHEMA_VERSION = "live-forward-record-manifest/2.2.0"
 POLICY_ID_PREFIX = "untouched-live-forward"
 ACTIVE_COHORT_NAME = "active-forward-cohort.json"
 RECORD_BINDING_SCHEMA_VERSION = "forward-policy-binding/1.0.0"
@@ -256,6 +260,38 @@ def _release_at_least(package_version: Any, minimum: tuple[int, int, int]) -> bo
     return release >= minimum
 
 
+def closure_schema_contract(package_version: Any) -> dict[str, str | None]:
+    """Return the exact closure schemas frozen by one package release."""
+
+    if _release_at_least(package_version, (3, 10, 0)):
+        return {
+            "closure": CLOSURE_SCHEMA_VERSION,
+            "record_manifest": RECORD_MANIFEST_SCHEMA_VERSION,
+            "denominator": cohort_scope.DENOMINATOR_SCHEMA_VERSION,
+            "event": cohort_scope.EVENT_SCHEMA_VERSION,
+        }
+    if _release_at_least(package_version, (3, 9, 0)):
+        return {
+            "closure": PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION,
+            "record_manifest": PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+            "denominator": cohort_scope.PREVIOUS_EVENT_BOUND_DENOMINATOR_SCHEMA_VERSION,
+            "event": cohort_scope.EVENT_SCHEMA_VERSION,
+        }
+    if _release_at_least(package_version, (3, 8, 0)):
+        return {
+            "closure": PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION,
+            "record_manifest": PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+            "denominator": cohort_scope.PREVIOUS_DENOMINATOR_SCHEMA_VERSION,
+            "event": cohort_scope.EVENT_SCHEMA_VERSION,
+        }
+    return {
+        "closure": None,
+        "record_manifest": None,
+        "denominator": None,
+        "event": None,
+    }
+
+
 def _policy_uses_role_aware_lineage(policy: Mapping[str, Any]) -> bool:
     software = policy.get("software")
     return bool(
@@ -351,7 +387,7 @@ def _aware_datetime(value: str | datetime, label: str) -> datetime:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -1330,6 +1366,7 @@ def validate_record_manifest(
     *,
     cohort: Mapping[str, Any] | None = None,
     required_schema_version: str | None = None,
+    required_denominator_schema: str | None = None,
 ) -> dict[str, Any]:
     """Validate the complete immutable record index sealed at cohort closure."""
 
@@ -1348,14 +1385,17 @@ def validate_record_manifest(
         "manifest_hash",
     }
     has_denominator = "denominator" in value or "denominator_hash" in value
+    if required_denominator_schema is not None and not has_denominator:
+        raise ForwardPolicyError(
+            "live-forward record manifest is missing its frozen denominator contract"
+        )
     if has_denominator:
         required.update({"denominator", "denominator_hash"})
-    if set(value) != required:
-        raise ForwardPolicyError("live-forward record manifest fields are incomplete")
     schema_version = value.get("schema_version")
     if schema_version not in {
         PREVIOUS_RECORD_MANIFEST_SCHEMA_VERSION,
         PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+        PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
         RECORD_MANIFEST_SCHEMA_VERSION,
     }:
         raise ForwardPolicyError(
@@ -1368,6 +1408,10 @@ def validate_record_manifest(
         raise ForwardPolicyError(
             "live-forward record manifest schema_version does not match the frozen release contract"
         )
+    if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+        required.add("max_record_archived_at")
+    if set(value) != required:
+        raise ForwardPolicyError("live-forward record manifest fields are incomplete")
     supplied_hash = value.pop("manifest_hash", None)
     if supplied_hash != _hash_json(value):
         raise ForwardPolicyError("live-forward record manifest hash is invalid")
@@ -1400,6 +1444,7 @@ def validate_record_manifest(
         entry_fields.add("request_event_hash")
     if schema_version in {
         PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+        PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
         RECORD_MANIFEST_SCHEMA_VERSION,
     }:
         entry_fields.update(
@@ -1410,8 +1455,13 @@ def validate_record_manifest(
                 "execution_receipt_hashes",
             }
         )
-        if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+        if schema_version in {
+            PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+            RECORD_MANIFEST_SCHEMA_VERSION,
+        }:
             entry_fields.add("fixture_event_at")
+        if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+            entry_fields.add("record_archived_at")
     for index, raw_entry in enumerate(raw_records):
         if not isinstance(raw_entry, Mapping) or set(raw_entry) != entry_fields:
             raise ForwardPolicyError(
@@ -1433,6 +1483,7 @@ def validate_record_manifest(
             hash_fields.add("request_event_hash")
         if schema_version in {
             PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+            PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
             RECORD_MANIFEST_SCHEMA_VERSION,
         }:
             hash_fields.add("fixture_event_hash")
@@ -1442,6 +1493,7 @@ def validate_record_manifest(
             )
         if schema_version in {
             PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+            PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
             RECORD_MANIFEST_SCHEMA_VERSION,
         }:
             if not str(entry.get("request_fixture_id") or ""):
@@ -1503,11 +1555,31 @@ def validate_record_manifest(
                 )
             entry["request_fixture_id"] = str(entry["request_fixture_id"])
             entry["execution_receipt_hashes"] = receipt_hashes
-            if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+            if schema_version in {
+                PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+                RECORD_MANIFEST_SCHEMA_VERSION,
+            }:
                 entry["fixture_event_at"] = _aware_datetime(
                     entry.get("fixture_event_at"),
                     f"live-forward record manifest records[{index}].fixture_event_at",
                 ).isoformat()
+            if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+                record_archived_at = _aware_datetime(
+                    entry.get("record_archived_at"),
+                    f"live-forward record manifest records[{index}].record_archived_at",
+                )
+                if record_archived_at <= _aware_datetime(
+                    entry["fixture_event_at"],
+                    f"live-forward record manifest records[{index}].fixture_event_at",
+                ):
+                    raise ForwardPolicyError(
+                        "live-forward record manifest archive must follow its latest fixture event"
+                    )
+                if record_archived_at >= kickoff:
+                    raise ForwardPolicyError(
+                        "live-forward record manifest archive must precede kickoff"
+                    )
+                entry["record_archived_at"] = record_archived_at.isoformat()
         fixture_ids.append(fixture_id)
         normalized_records.append(entry)
     if fixture_ids != sorted(fixture_ids) or len(set(fixture_ids)) != len(fixture_ids):
@@ -1523,6 +1595,34 @@ def validate_record_manifest(
     ):
         raise ForwardPolicyError("live-forward record manifest record_count is invalid")
     value["records"] = normalized_records
+    if schema_version == RECORD_MANIFEST_SCHEMA_VERSION:
+        expected_max_archived_at = (
+            max(
+                _aware_datetime(
+                    entry["record_archived_at"],
+                    "live-forward record manifest record_archived_at",
+                )
+                for entry in normalized_records
+            )
+            if normalized_records
+            else None
+        )
+        supplied_max_archived_at = value.get("max_record_archived_at")
+        if expected_max_archived_at is None:
+            if supplied_max_archived_at is not None:
+                raise ForwardPolicyError(
+                    "live-forward record manifest max_record_archived_at is invalid"
+                )
+        else:
+            supplied_max = _aware_datetime(
+                supplied_max_archived_at,
+                "live-forward record manifest max_record_archived_at",
+            )
+            if supplied_max != expected_max_archived_at:
+                raise ForwardPolicyError(
+                    "live-forward record manifest max_record_archived_at is invalid"
+                )
+            value["max_record_archived_at"] = supplied_max.isoformat()
     if has_denominator:
         denominator = value.get("denominator")
         if not isinstance(denominator, Mapping):
@@ -1540,6 +1640,13 @@ def validate_record_manifest(
         if denominator.get("complete") is not True:
             raise ForwardPolicyError(
                 "live-forward record manifest denominator is incomplete"
+            )
+        if (
+            required_denominator_schema is not None
+            and denominator.get("schema_version") != required_denominator_schema
+        ):
+            raise ForwardPolicyError(
+                "live-forward record manifest denominator schema_version does not match the frozen release contract"
             )
         denominator_entries = denominator.get("entries")
         if not isinstance(denominator_entries, list):
@@ -1573,6 +1680,7 @@ def validate_record_manifest(
             )
         if schema_version in {
             PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+            PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
             RECORD_MANIFEST_SCHEMA_VERSION,
         }:
             recorded_entries = {
@@ -1589,7 +1697,11 @@ def validate_record_manifest(
                     or entry["fixture_event_hash"]
                     != denominator_entry.get("fixture_event_hash")
                     or (
-                        schema_version == RECORD_MANIFEST_SCHEMA_VERSION
+                        schema_version
+                        in {
+                            PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+                            RECORD_MANIFEST_SCHEMA_VERSION,
+                        }
                         and entry["fixture_event_at"]
                         != denominator_entry.get("fixture_event_at")
                     )
@@ -1674,23 +1786,18 @@ def close_cohort(
     package_version = (
         software.get("package_version") if isinstance(software, Mapping) else None
     )
-    if package_version and _release_at_least(package_version, (3, 9, 0)):
-        required_manifest_schema = RECORD_MANIFEST_SCHEMA_VERSION
-        required_denominator_schema = cohort_scope.DENOMINATOR_SCHEMA_VERSION
-        required_event_schema = cohort_scope.EVENT_SCHEMA_VERSION
-    elif package_version and _release_at_least(package_version, (3, 8, 0)):
-        required_manifest_schema = PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION
-        required_denominator_schema = cohort_scope.PREVIOUS_DENOMINATOR_SCHEMA_VERSION
-        required_event_schema = cohort_scope.EVENT_SCHEMA_VERSION
-    else:
-        required_manifest_schema = None
-        required_denominator_schema = None
-        required_event_schema = None
+    schema_contract = closure_schema_contract(package_version)
+    required_closure_schema = schema_contract["closure"]
+    required_manifest_schema = schema_contract["record_manifest"]
+    required_denominator_schema = schema_contract["denominator"]
+    required_event_schema = schema_contract["event"]
     manifest = validate_record_manifest(
         record_manifest,
         cohort=cohort,
         required_schema_version=required_manifest_schema,
+        required_denominator_schema=required_denominator_schema,
     )
+    events: list[dict[str, Any]] = []
     if "scope_hash" in cohort:
         event_binding = {
             "cohort_hash": cohort["cohort_hash"],
@@ -1744,6 +1851,9 @@ def close_cohort(
             _read_json(closure_path, "existing live-forward cohort closure"),
             cohort=cohort,
             require_record_manifest=True,
+            required_closure_schema=required_closure_schema,
+            required_record_manifest_schema=required_manifest_schema,
+            required_denominator_schema=required_denominator_schema,
         )
         if already_closed and pointer["closed_at"] != existing["closed_at"]:
             raise ForwardPolicyError(
@@ -1753,28 +1863,59 @@ def close_cohort(
         raise ForwardPolicyError(
             "closed live-forward cohort pointer has no immutable closure"
         )
-    effective_closed_at: str | datetime
-    if closed_at is None and existing is not None:
-        effective_closed_at = str(existing["closed_at"])
-    else:
-        effective_closed_at = closed_at or _now_iso()
+    observed = _aware_datetime(
+        (
+            str(existing["observed_at"])
+            if existing is not None and "observed_at" in existing
+            else _now_iso()
+        ),
+        "observed_at",
+    )
+    effective_closed_at: str | datetime = (
+        str(existing["closed_at"])
+        if closed_at is None and existing is not None
+        else closed_at or observed
+    )
     closed = _aware_datetime(effective_closed_at, "closed_at")
     started = _aware_datetime(str(cohort["starts_at"]), "cohort.starts_at")
     if closed < started:
         raise ForwardPolicyError("live-forward cohort cannot close before it started")
+    if closed > observed:
+        raise ForwardPolicyError("live-forward cohort cannot close in the future")
+    last_event_at = (
+        max(
+            _aware_datetime(event["occurred_at"], "cohort event occurred_at")
+            for event in events
+        )
+        if events
+        else None
+    )
+    max_record_archived_at = (
+        _aware_datetime(
+            manifest["max_record_archived_at"], "record manifest max_record_archived_at"
+        )
+        if manifest.get("max_record_archived_at") is not None
+        else None
+    )
+    if last_event_at is not None and closed < last_event_at:
+        raise ForwardPolicyError("live-forward cohort closure predates its last event")
+    if max_record_archived_at is not None and closed < max_record_archived_at:
+        raise ForwardPolicyError("live-forward cohort closure predates its last record")
     closure: dict[str, Any] = {
-        "schema_version": CLOSURE_SCHEMA_VERSION,
+        "schema_version": required_closure_schema or CLOSURE_SCHEMA_VERSION,
         "artifact_type": "soccer_untouched_live_forward_cohort_closure",
         "cohort_id": cohort["cohort_id"],
         "cohort_hash": cohort["cohort_hash"],
         "policy_id": cohort["policy_id"],
         "policy_hash": cohort["policy_hash"],
         "starts_at": cohort["starts_at"],
-        "closed_at": closed.replace(microsecond=0).isoformat(),
+        "closed_at": closed.isoformat(),
         "reason": "explicit_policy_boundary",
         "record_manifest_hash": manifest["manifest_hash"],
         "record_manifest": manifest,
     }
+    if closure["schema_version"] == CLOSURE_SCHEMA_VERSION:
+        closure["observed_at"] = observed.isoformat()
     closure["closure_hash"] = _hash_json(closure)
     if existing is not None:
         if existing != closure:
@@ -1851,17 +1992,28 @@ def validate_closure(
     *,
     cohort: Mapping[str, Any] | None = None,
     require_record_manifest: bool = False,
+    required_closure_schema: str | None = None,
+    required_record_manifest_schema: str | None = None,
+    required_denominator_schema: str | None = None,
 ) -> dict[str, Any]:
     value = deepcopy(dict(closure))
     schema_version = value.get("schema_version")
     if schema_version not in {
         LEGACY_CLOSURE_SCHEMA_VERSION,
+        PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION,
         CLOSURE_SCHEMA_VERSION,
     }:
         raise ForwardPolicyError(
             "unsupported live-forward cohort closure schema_version"
         )
-    if require_record_manifest and schema_version != CLOSURE_SCHEMA_VERSION:
+    if (
+        required_closure_schema is not None
+        and schema_version != required_closure_schema
+    ):
+        raise ForwardPolicyError(
+            "live-forward cohort closure schema_version does not match the frozen release contract"
+        )
+    if require_record_manifest and schema_version == LEGACY_CLOSURE_SCHEMA_VERSION:
         raise ForwardPolicyError(
             "formal forward evaluation requires a record-manifest-bound cohort closure"
         )
@@ -1879,8 +2031,10 @@ def validate_closure(
         "closed_at",
         "reason",
     }
-    if schema_version == CLOSURE_SCHEMA_VERSION:
+    if schema_version in {PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION, CLOSURE_SCHEMA_VERSION}:
         required.update({"record_manifest_hash", "record_manifest"})
+    if schema_version == CLOSURE_SCHEMA_VERSION:
+        required.add("observed_at")
     if set(value) != required:
         raise ForwardPolicyError("live-forward cohort closure fields are incomplete")
     value["closure_hash"] = supplied_hash
@@ -1897,8 +2051,22 @@ def validate_closure(
     if value.get("reason") != "explicit_policy_boundary":
         raise ForwardPolicyError("live-forward cohort closure reason is invalid")
     if schema_version == CLOSURE_SCHEMA_VERSION:
+        observed = _aware_datetime(
+            str(value.get("observed_at") or ""), "closure.observed_at"
+        )
+        if closed > observed:
+            raise ForwardPolicyError("live-forward cohort closure exceeds observed_at")
+        if observed > datetime.now(timezone.utc):
+            raise ForwardPolicyError(
+                "live-forward cohort closure observed_at is future-dated"
+            )
+        value["observed_at"] = observed.isoformat()
+    if schema_version in {PREVIOUS_FULL_CLOSURE_SCHEMA_VERSION, CLOSURE_SCHEMA_VERSION}:
         manifest = validate_record_manifest(
-            value.get("record_manifest") or {}, cohort=cohort
+            value.get("record_manifest") or {},
+            cohort=cohort,
+            required_schema_version=required_record_manifest_schema,
+            required_denominator_schema=required_denominator_schema,
         )
         if value.get("record_manifest_hash") != manifest["manifest_hash"]:
             raise ForwardPolicyError(
@@ -1912,6 +2080,34 @@ def validate_closure(
                 "live-forward cohort closure does not bind its record manifest"
             )
         value["record_manifest"] = manifest
+        if schema_version == CLOSURE_SCHEMA_VERSION:
+            denominator = manifest.get("denominator")
+            if isinstance(denominator, Mapping):
+                event_count = denominator.get("event_count")
+                last_event_at = denominator.get("last_event_at")
+                if event_count and last_event_at is None:
+                    raise ForwardPolicyError(
+                        "live-forward cohort denominator omits its last event time"
+                    )
+                if event_count == 0 and last_event_at is not None:
+                    raise ForwardPolicyError(
+                        "empty live-forward cohort denominator invents a last event time"
+                    )
+                if last_event_at is not None:
+                    parsed_last_event = _aware_datetime(
+                        last_event_at, "denominator last_event_at"
+                    )
+                    if parsed_last_event < started or closed < parsed_last_event:
+                        raise ForwardPolicyError(
+                            "live-forward cohort closure predates its last event"
+                        )
+            max_record_archived_at = manifest.get("max_record_archived_at")
+            if max_record_archived_at is not None and closed < _aware_datetime(
+                max_record_archived_at, "record manifest max_record_archived_at"
+            ):
+                raise ForwardPolicyError(
+                    "live-forward cohort closure predates its last record"
+                )
     if cohort is not None:
         frozen = validate_cohort(cohort)
         if any(

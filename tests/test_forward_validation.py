@@ -65,7 +65,7 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
     value = {
         "schema_version": forward_policy.POLICY_SCHEMA_VERSION,
         "artifact_type": "soccer_prediction_policy_freeze",
-        "created_at": "2026-08-01T00:00:00+00:00",
+        "created_at": "2026-01-01T00:00:00+00:00",
         "software": {
             "package_name": "soccer-predict",
             "package_version": forward_policy.SOCCER_PREDICT_VERSION,
@@ -190,7 +190,7 @@ def policy_manifest(*, git_commit: str = REAL_GIT_COMMIT) -> dict:
     scope = forward_policy.cohort_scope.build_scope(
         scope_id="test-forward-scope",
         competition_keys=["league-a", "league-b", "test_league"],
-        starts_at="2026-08-01T00:00:00Z",
+        starts_at="2026-01-01T00:00:00Z",
     )
     value["cohort_scope"] = {
         "scope_path": "scopes/test.json",
@@ -223,14 +223,14 @@ def cohort_manifest(
         "cohort_id": "confirmation-a",
         "kind": forward_policy.LOCAL_INTEGRITY_SHADOW_KIND,
         "status": status,
-        "starts_at": "2026-08-01T00:01:00+00:00",
+        "starts_at": "2026-01-01T00:01:00+00:00",
         "policy_file": str(policy_path),
         "policy_id": policy["policy_id"],
         "policy_hash": policy["policy_hash"],
         "scope_id": policy["cohort_scope"]["scope_id"],
         "scope_hash": policy["cohort_scope"]["scope_hash"],
         "retrospective_records_allowed": False,
-        "closed_at": "2027-01-01T00:00:00+00:00" if status == "closed" else None,
+        "closed_at": "2026-08-01T00:00:00+00:00" if status == "closed" else None,
     }
     value["cohort_hash"] = forward_policy._hash_json(value)
     return value
@@ -265,6 +265,7 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
             entry.setdefault("fixture_event_hash", "sha256:" + "9" * 64)
             entry.setdefault("fixture_event_at", cohort["starts_at"])
             entry.setdefault("execution_receipt_hashes", [])
+            entry.setdefault("record_archived_at", "2026-07-31T23:00:00+00:00")
         denominator_entries = [
             {
                 "request_fixture_id": str(entry["request_fixture_id"]),
@@ -288,6 +289,11 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
             "scope_hash": cohort["scope_hash"],
             "event_count": len(entries),
             "last_event_hash": "sha256:" + "9" * 64 if entries else None,
+            "last_event_at": (
+                max(str(entry["fixture_event_at"]) for entry in entries)
+                if entries
+                else None
+            ),
             "requested_fixture_count": len(entries),
             "recorded_fixture_count": len(entries),
             "unavailable_fixture_count": 0,
@@ -297,6 +303,9 @@ def cohort_record_manifest(cohort: dict, records: list[dict] | None = None) -> d
         denominator["denominator_hash"] = forward_policy._hash_json(denominator)
         value["denominator"] = denominator
         value["denominator_hash"] = denominator["denominator_hash"]
+    value["max_record_archived_at"] = (
+        max(str(entry["record_archived_at"]) for entry in entries) if entries else None
+    )
     value["manifest_hash"] = forward_policy._hash_json(value)
     return value
 
@@ -311,10 +320,11 @@ def cohort_closure(cohort: dict, record_manifest: dict | None = None) -> dict:
         "policy_id": cohort["policy_id"],
         "policy_hash": cohort["policy_hash"],
         "starts_at": cohort["starts_at"],
-        "closed_at": "2027-01-01T00:00:00+00:00",
+        "closed_at": "2026-08-01T00:00:00+00:00",
         "reason": "explicit_policy_boundary",
         "record_manifest_hash": manifest["manifest_hash"],
         "record_manifest": manifest,
+        "observed_at": "2026-08-01T00:00:00+00:00",
     }
     value["closure_hash"] = forward_policy._hash_json(value)
     return value
@@ -480,14 +490,14 @@ def build_payload(
             "settlement_semantics": "categorical",
         }
     }
-    frozen_at = datetime(2026, 8, 2, tzinfo=timezone.utc)
+    frozen_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
     entries: list[dict] = []
     raw_rows: list[dict] = []
     for offset in range(count):
         index = start_index + offset
         actual = OUTCOMES[index % 3]
-        kickoff = datetime(2026, 9, 1, 10, tzinfo=timezone.utc) + timedelta(
-            days=index if one_week else index * 7
+        kickoff = datetime(2026, 1, 12, 10, tzinfo=timezone.utc) + timedelta(
+            days=(index % 6) if one_week else (index % 20) * 7
         )
         generated = kickoff - timedelta(minutes=30)
         archived = generated + timedelta(minutes=1)
@@ -825,6 +835,7 @@ def aggregate_from_micro_ledgers(payloads: list[dict]) -> dict:
                 "fixture_event_at": receipt["archive_snapshot_payload"][
                     "forward_policy_binding"
                 ]["cohort_request_binding"]["fixture_event_at"],
+                "record_archived_at": receipt["record_archived_at"],
                 "execution_receipt_hashes": sorted(
                     str(binding["receipt_identity_hash"])
                     for row in forward_validation._validate_v3_input(
@@ -1402,9 +1413,9 @@ def _forward_memory_joint_model(base: Path) -> dict:
             competition_key="test_league",
             dataset_manifest_hash="sha256:" + "a" * 64,
         )
-        _FORWARD_MEMORY_JOINT_MODEL["generated_at"] = "2026-07-20T00:00:00Z"
+        _FORWARD_MEMORY_JOINT_MODEL["generated_at"] = "2025-04-01T00:00:00Z"
         for component in _FORWARD_MEMORY_JOINT_MODEL["components"].values():
-            component["generated_at"] = "2026-07-20T00:00:00Z"
+            component["generated_at"] = "2025-04-01T00:00:00Z"
         htft_model.validate_model(_FORWARD_MEMORY_JOINT_MODEL)
     return _FORWARD_MEMORY_JOINT_MODEL
 
@@ -2079,6 +2090,11 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
         "last_event_hash": denominator_entries[-1]["request_event_hash"]
         if denominator_entries
         else None,
+        "last_event_at": (
+            max(str(entry["fixture_event_at"]) for entry in denominator_entries)
+            if denominator_entries
+            else None
+        ),
         "requested_fixture_count": len(denominator_entries),
         "recorded_fixture_count": len(denominator_entries),
         "unavailable_fixture_count": 0,
@@ -2093,6 +2109,31 @@ def closed_cohort_for_memory_records(records: list[dict]) -> tuple[dict, dict]:
 
 
 class ForwardValidationTests(unittest.TestCase):
+    def test_aggregate_rejects_resealed_manifest_schema_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            aggregate = build_aggregate_payload(Path(temporary), 1)
+        attacked = deepcopy(aggregate)
+        closure = attacked["cohort_closure"]
+        manifest = closure["record_manifest"]
+        manifest["schema_version"] = (
+            forward_policy.PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION
+        )
+        manifest.pop("max_record_archived_at")
+        for entry in manifest["records"]:
+            entry.pop("fixture_event_at")
+            entry.pop("record_archived_at")
+        manifest.pop("manifest_hash")
+        manifest["manifest_hash"] = forward_policy._hash_json(manifest)
+        closure["record_manifest_hash"] = manifest["manifest_hash"]
+        closure.pop("closure_hash")
+        closure["closure_hash"] = forward_policy._hash_json(closure)
+
+        with self.assertRaisesRegex(
+            forward_validation.ForwardValidationError,
+            "closure or complete record manifest is invalid",
+        ):
+            forward_validation._validate_aggregate_input(attacked)
+
     def test_execution_entry_cannot_invent_better_price_or_unreplayable_source_hash(
         self,
     ) -> None:
@@ -3337,7 +3378,7 @@ class ForwardValidationTests(unittest.TestCase):
                     SimpleNamespace(
                         base_dir=str(base),
                         cohort_id=cohort["cohort_id"],
-                        closed_at="2027-01-01T00:00:00+00:00",
+                        closed_at="2026-08-01T00:00:00+00:00",
                         record_manifest_output=str(manifest_output),
                     )
                 )

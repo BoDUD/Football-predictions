@@ -8187,7 +8187,11 @@ def _execution_receipt_hashes_from_receipt(receipt: dict[str, Any]) -> list[str]
     return sorted(hashes)
 
 
-def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+def _record_manifest_entry_from_receipt(
+    receipt: dict[str, Any],
+    *,
+    manifest_schema_version: str = forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "fixture_id": str(receipt.get("fixture_id") or ""),
         "archive_version_hash": require_sha256(
@@ -8215,7 +8219,11 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, An
             request.get("request_event_hash"),
             "forward cohort request event hash",
         )
-        if request.get("schema_version") in {
+        if manifest_schema_version in {
+            forward_policy.PREVIOUS_FULL_RECORD_MANIFEST_SCHEMA_VERSION,
+            forward_policy.PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+            forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+        } and request.get("schema_version") in {
             cohort_scope.PREVIOUS_FULL_REQUEST_BINDING_SCHEMA_VERSION,
             cohort_scope.REQUEST_BINDING_SCHEMA_VERSION,
         }:
@@ -8235,11 +8243,16 @@ def _record_manifest_entry_from_receipt(receipt: dict[str, Any]) -> dict[str, An
                     ),
                 }
             )
-            if (
+            if manifest_schema_version in {
+                forward_policy.PREVIOUS_EVENT_BOUND_RECORD_MANIFEST_SCHEMA_VERSION,
+                forward_policy.RECORD_MANIFEST_SCHEMA_VERSION,
+            } and (
                 request.get("schema_version")
                 == cohort_scope.REQUEST_BINDING_SCHEMA_VERSION
             ):
                 entry["fixture_event_at"] = str(request.get("fixture_event_at") or "")
+    if manifest_schema_version == forward_policy.RECORD_MANIFEST_SCHEMA_VERSION:
+        entry["record_archived_at"] = str(receipt.get("record_archived_at") or "")
     return entry
 
 
@@ -8297,6 +8310,16 @@ def forward_record_manifest_for_records(
         "policy_hash": cohort["policy_hash"],
         "record_count": len(entries),
         "records": entries,
+        "max_record_archived_at": (
+            max(
+                forward_policy._aware_datetime(
+                    entry["record_archived_at"], "forward record archived_at"
+                )
+                for entry in entries
+            ).isoformat()
+            if entries
+            else None
+        ),
     }
     if denominator is not None:
         manifest["denominator"] = deepcopy(denominator)
@@ -8360,8 +8383,20 @@ def forward_validation_input_for_records(
     if not isinstance(policy, dict) or not isinstance(cohort, dict):
         raise ValueError("Forward cohort export policy/cohort is missing")
     try:
+        validated_policy = forward_policy.validate_policy_manifest(policy)
+    except forward_policy.ForwardPolicyError as exc:
+        raise ValueError("Forward cohort export policy is invalid") from exc
+    schema_contract = forward_policy.closure_schema_contract(
+        validated_policy["software"]["package_version"]
+    )
+    try:
         closure = forward_policy.validate_closure(
-            closure, cohort=cohort, require_record_manifest=True
+            closure,
+            cohort=cohort,
+            require_record_manifest=True,
+            required_closure_schema=schema_contract["closure"],
+            required_record_manifest_schema=schema_contract["record_manifest"],
+            required_denominator_schema=schema_contract["denominator"],
         )
     except forward_policy.ForwardPolicyError as exc:
         raise ValueError(
@@ -8387,7 +8422,11 @@ def forward_validation_input_for_records(
             )
 
     receipt_manifest_entries = [
-        _record_manifest_entry_from_receipt(receipt) for receipt in receipts
+        _record_manifest_entry_from_receipt(
+            receipt,
+            manifest_schema_version=closure["record_manifest"]["schema_version"],
+        )
+        for receipt in receipts
     ]
     if receipt_manifest_entries != closure["record_manifest"]["records"]:
         raise ValueError(

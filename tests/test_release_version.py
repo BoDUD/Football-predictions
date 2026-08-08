@@ -10,7 +10,7 @@ from pathlib import Path
 from soccer_predict import __version__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_RELEASE_VERSION = "3.9.0"
+EXPECTED_RELEASE_VERSION = "3.10.0"
 
 
 class ReleaseVersionContractTests(unittest.TestCase):
